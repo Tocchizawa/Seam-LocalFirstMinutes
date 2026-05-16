@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  backend-syntax:
+    name: Backend Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python Sources
+        run: python -m compileall src
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: gui/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Frontend
+        run: pnpm build
+
+  tauri-smoke:
+    name: Tauri Smoke Build
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: gui/pnpm-lock.yaml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri (No Bundle)
+        run: pnpm tauri build --no-bundle --ci

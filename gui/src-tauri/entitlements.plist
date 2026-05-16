@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Tauri / WKWebView の JIT 用 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Python (numpy / torch / mlx-whisper) が同梱外の dylib をロードするため -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- uv が python interpreter を環境変数経由で起動するため -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- マイク (sounddevice / PortAudio) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

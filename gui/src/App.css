@@ -1,0 +1,2188 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════════
+   Design Tokens
+   ─────────────────────────────────────────────────────────────────
+   全コンポーネントが参照する単一の真実。テーマ切替は data-theme で行う。
+   ═══════════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* Tailwind 用 — デフォルトはダーク値で初期化、実際は :root の var で上書き */
+  --color-t1: #e4e4e8;
+  --color-t2: rgba(228, 228, 232, 0.55);
+  --color-t3: rgba(228, 228, 232, 0.28);
+  --color-t4: rgba(228, 228, 232, 0.12);
+  --color-blue: #3b82f6;
+  --color-red: #ef4444;
+  --color-green: #34d399;
+}
+
+/* ─── ダーク(デフォルト)───────────────────────────────────── */
+:root,
+[data-theme="dark"] {
+  /* 背景レイヤー: true black ベース */
+  --bg: #000000;
+  --surface: #0c0c0e;
+  --surface-2: #16161a;
+  --surface-3: #1f1f24;
+  --surface-pressed: #2a2a30;
+
+  /* 線 */
+  --border: rgba(255, 255, 255, 0.1);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.18);
+
+  /* テキスト */
+  --t1: #f5f5f7;
+  --t2: rgba(245, 245, 247, 0.65);
+  --t3: rgba(245, 245, 247, 0.42);
+  --t4: rgba(245, 245, 247, 0.20);
+
+  /* アクセント: 暖かいオレンジ */
+  --accent: #f97316;
+  --accent-bright: #fb923c;
+  --accent-soft: rgba(249, 115, 22, 0.14);
+  --accent-line: rgba(249, 115, 22, 0.30);
+  --blue: #60a5fa;
+  --green: #34d399;
+  --yellow: #fbbf24;
+
+  /* 状態色 */
+  --danger: #f87171;
+  --warning: #f59e0b;
+  --success: #10b981;
+  --success-soft: rgba(16, 185, 129, 0.12);
+
+  /* on-accent (オレンジ上にのる文字) */
+  --on-accent: #0a0a0a;
+
+  /* 影 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  /* シェル */
+  --shell-bg: #000000;
+  --shell-border: rgba(255, 255, 255, 0.08);
+  --sidebar-bg: #050507;
+  --titlebar-bg: rgba(0, 0, 0, 0.6);
+
+  /* dialog */
+  --dialog-bg: #16161a;
+  --dialog-border: rgba(255, 255, 255, 0.08);
+
+  color-scheme: dark;
+}
+
+/* ─── ライト ───────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f4f4f5;
+  --surface-3: #eaeaec;
+  --surface-pressed: #d4d4d8;
+
+  --border: rgba(0, 0, 0, 0.08);
+  --border-hover: rgba(0, 0, 0, 0.14);
+  --border-strong: rgba(0, 0, 0, 0.20);
+
+  --t1: #0a0a0a;
+  --t2: rgba(10, 10, 10, 0.65);
+  --t3: rgba(10, 10, 10, 0.42);
+  --t4: rgba(10, 10, 10, 0.20);
+
+  --accent: #ea580c;
+  --accent-bright: #f97316;
+  --accent-soft: rgba(234, 88, 12, 0.10);
+  --accent-line: rgba(234, 88, 12, 0.30);
+  --blue: #2563eb;
+  --green: #059669;
+  --yellow: #d97706;
+
+  --danger: #dc2626;
+  --warning: #d97706;
+  --success: #059669;
+  --success-soft: rgba(5, 150, 105, 0.10);
+
+  --on-accent: #ffffff;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.16);
+
+  --shell-bg: #fafafa;
+  --shell-border: rgba(0, 0, 0, 0.08);
+  --sidebar-bg: #f4f4f5;
+  --titlebar-bg: rgba(255, 255, 255, 0.85);
+
+  --dialog-bg: #ffffff;
+  --dialog-border: rgba(0, 0, 0, 0.08);
+
+  color-scheme: light;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Base
+   ═══════════════════════════════════════════════════════════════════ */
+
+* { -webkit-font-smoothing: antialiased; }
+
+html, body, #root {
+  height: 100%; margin: 0;
+  background: var(--shell-bg);
+  color: var(--t1);
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* 読み物としてユーザーが選択・コピーしたい部分は user-select を有効化。
+   ネイティブアプリ風の UX を保ちつつ、コンテンツ部分は選択可能にする。 */
+.md-body,
+.md-body *,
+.flat-row,
+.flat-row *,
+.selectable,
+.selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+button { font-family: inherit; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Layout primitives
+   ═══════════════════════════════════════════════════════════════════ */
+
+.shell {
+  background: var(--shell-bg);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--shell-border);
+}
+
+.titlebar {
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.surface {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.surface-hover:hover {
+  background: var(--surface-2);
+  border-color: var(--border-hover);
+}
+
+.surface-2 {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.dialog-shell {
+  background: var(--dialog-bg);
+  border: 1px solid var(--dialog-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Form controls
+   ═══════════════════════════════════════════════════════════════════ */
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  appearance: none;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.input:hover { border-color: var(--border-hover); }
+.input:focus { border-color: var(--blue); background: var(--surface-2); }
+.input option { background: var(--bg); color: var(--t1); }
+
+.input::placeholder { color: var(--t3); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.btn:hover {
+  background: var(--surface-2);
+  border-color: var(--border-hover);
+}
+.btn:active { background: var(--surface-pressed); transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--t2);
+}
+.btn-ghost:hover {
+  background: var(--surface);
+  color: var(--t1);
+  border-color: var(--border);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.btn-primary:hover {
+  background: var(--accent-bright);
+  border-color: var(--accent-bright);
+}
+.btn-primary:active {
+  filter: brightness(0.95);
+}
+
+.btn-danger:hover {
+  border-color: var(--accent-line);
+  color: var(--danger);
+  background: var(--accent-soft);
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--t3);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.icon-btn:hover { color: var(--t1); background: var(--surface-2); }
+.icon-btn:active { background: var(--surface-3); transform: scale(0.94); }
+
+/* ─── Pill button ────────────────────────────────────────── */
+/* 副次アクション。角丸の dark capsule。 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.pill:hover { background: var(--surface-3); }
+.pill:active { background: var(--surface-pressed); transform: scale(0.97); }
+.pill:disabled { opacity: 0.4; cursor: not-allowed; }
+.pill .icon { color: var(--t2); }
+
+/* ─── Circle control button ─────────────────────────────── */
+/* 主要メディア操作ボタン。白丸 + black icon。 */
+.circle-btn {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--t1);
+  color: var(--bg);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1),
+              filter 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.circle-btn:hover { filter: brightness(0.92); }
+.circle-btn:active { transform: scale(0.92); }
+.circle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.circle-btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--t2);
+}
+.circle-btn-ghost:hover {
+  border-color: var(--t2);
+  color: var(--t1);
+  filter: none;
+  background: var(--surface);
+}
+
+.circle-btn-accent {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* ─── Status dot (Speaking 等) ──────────────────────────── */
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  display: inline-block;
+  flex-shrink: 0;
+}
+.status-dot--pulse {
+  animation: status-pulse 1.6s ease-in-out infinite;
+}
+@keyframes status-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ─── Numeric display ──────────────────────────────────── */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 200;
+  letter-spacing: 0.02em;
+}
+
+/* ─── Flat row list (border-separated, no card) ────────── */
+.flat-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  overflow: hidden;
+  max-height: 80px;
+  transition:
+    background 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    max-height 320ms cubic-bezier(0.7, 0, 0.3, 1),
+    padding 320ms cubic-bezier(0.7, 0, 0.3, 1),
+    opacity 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: row-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes row-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.flat-row:hover { background: var(--surface); }
+.flat-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.flat-row:hover::before { opacity: 1; }
+
+.flat-row-actions { opacity: 0; transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1); }
+.flat-row:hover .flat-row-actions { opacity: 1; }
+
+.flat-group-label {
+  display: block;
+  padding: 18px 18px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+
+/* ─── Processing row (active → done → leaving) ─────────── */
+.proc-row {
+  /* base: flat-row のサブセット。背景遷移を追加 */
+  transition:
+    background 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    max-height 320ms cubic-bezier(0.7, 0, 0.3, 1),
+    padding 320ms cubic-bezier(0.7, 0, 0.3, 1),
+    opacity 280ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* "done" 状態: 緑のフラッシュ + チェックがバウンスイン */
+.proc-row[data-anim="done"] {
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+}
+
+/* "leaving" 状態: 高さ・パディング・opacity を 0 へ */
+.proc-row[data-anim="leaving"] {
+  max-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  opacity: 0;
+  border-bottom-color: transparent;
+  pointer-events: none;
+}
+
+/* ─── Icon swap (spinner ⇄ check) ─────────────────────── */
+.icon-stack {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.icon-stack > * {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity 280ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 360ms cubic-bezier(0.34, 1.6, 0.5, 1);
+}
+.icon-stack .icon-active { opacity: 1; transform: scale(1); }
+.icon-stack .icon-done { opacity: 0; transform: scale(0.5) rotate(-30deg); }
+
+.proc-row[data-anim="done"] .icon-stack .icon-active,
+.proc-row[data-anim="leaving"] .icon-stack .icon-active {
+  opacity: 0;
+  transform: scale(0.5) rotate(30deg);
+}
+.proc-row[data-anim="done"] .icon-stack .icon-done,
+.proc-row[data-anim="leaving"] .icon-stack .icon-done {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+/* ─── Status text crossfade ───────────────────────────── */
+.status-stack {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+}
+.status-stack > * {
+  transition: opacity 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.status-stack > .show { opacity: 1; }
+.status-stack > .hide {
+  opacity: 0;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ─── Sidebar ─────────────────────────────────────────── */
+.sidebar-shell {
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-search {
+  width: 100%;
+  padding: 7px 10px 7px 28px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.sidebar-search:focus { border-color: var(--accent-line); }
+.sidebar-search::placeholder { color: var(--t3); }
+
+.project-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 14px;
+  font-size: 12px;
+  color: var(--t2);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  width: 100%;
+  font-family: inherit;
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.project-row:hover { color: var(--t1); background: var(--surface); }
+.project-row.active {
+  color: var(--t1);
+  background: var(--surface);
+}
+.project-row.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+.project-row-action {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--t3);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.project-row:hover .project-row-action {
+  opacity: 1;
+}
+.project-row-action:hover {
+  color: var(--t1);
+  background: var(--surface-2);
+}
+.project-row-action.is-editing {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.project-row-action.is-editing:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+  filter: brightness(1.05);
+}
+
+/* 編集中(プロジェクト設定を開いている)プロジェクト行 */
+.project-row.editing {
+  background: var(--accent-soft);
+  color: var(--t1);
+}
+.project-row.editing::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+/* icon-btn の active 状態 (全体設定 gear など) */
+.icon-btn.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.icon-btn.is-active:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--t3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.settings-nav-item:hover {
+  color: var(--t1);
+  background: var(--surface-2);
+}
+.settings-nav-item.active {
+  color: var(--t1);
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+
+/* ─── Radio card (設定画面のプロバイダ選択など) ──────── */
+.provider-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.provider-card:hover {
+  border-color: var(--border-hover);
+}
+.provider-card.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.provider-radio {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1.5px solid var(--t3);
+  background: transparent;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.provider-card.is-active .provider-radio {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 50%, transparent 55%);
+}
+
+/* ─── Transcript minimap (議事録詳細・右側) ──────────── */
+.transcript-minimap {
+  position: relative;
+  width: 56px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  overflow: hidden;
+  user-select: none;
+  touch-action: none;
+}
+.minimap-bars {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+.minimap-bar {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  opacity: 0.4;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.transcript-minimap:hover .minimap-bar {
+  opacity: 0.7;
+}
+.minimap-matches {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.minimap-match {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  opacity: 0.7;
+}
+.minimap-match.is-active {
+  height: 3px;
+  opacity: 1;
+  box-shadow: 0 0 6px var(--accent);
+}
+.minimap-viewport {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  pointer-events: none;
+}
+[data-theme="light"] .minimap-viewport {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* ─── Settings (リスト形式) ────────────────────────────── */
+.s-group {
+  margin-bottom: 28px;
+}
+.s-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t3);
+  margin: 0 0 4px;
+}
+.s-group-hint {
+  font-size: 11px;
+  color: var(--t3);
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+.s-rows {
+  border-top: 1px solid var(--border);
+}
+.s-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+  min-height: 38px;
+}
+.s-row-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.s-row-label > span:first-child {
+  font-size: 13px;
+  color: var(--t1);
+}
+.s-row-hint {
+  font-size: 11px;
+  color: var(--t3);
+  line-height: 1.4;
+}
+.s-row-control {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 140px;
+  max-width: 360px;
+  justify-content: flex-end;
+}
+.s-control {
+  min-width: 130px;
+  max-width: 240px;
+}
+
+/* s-row 内のコントロールは全て同じ高さに揃える (28px) */
+.s-row-control input.input,
+.s-row-control select.input,
+.s-row-control input.s-control,
+.s-row-control select.s-control {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 28px;
+}
+.s-row-control input[type="number"].input {
+  /* spinner ボタン分の余白 */
+  padding-right: 4px;
+}
+.s-row-control .btn {
+  height: 28px;
+  font-size: 12px;
+}
+
+/* Toggle switch */
+.s-toggle {
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.s-toggle-dot {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--t2);
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.s-toggle.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.s-toggle.is-on .s-toggle-dot {
+  transform: translateX(16px);
+  background: var(--on-accent);
+}
+
+/* Radio list (排他選択, カードなし) */
+.s-radio-list {
+  display: flex;
+  flex-direction: column;
+}
+.s-radio-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  width: 100%;
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.s-radio-row:last-child {
+  border-bottom: none;
+}
+.s-radio-row:hover {
+  background: var(--surface);
+}
+.s-radio-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--t3);
+  background: transparent;
+  flex-shrink: 0;
+  margin-top: 2px;
+  transition: border-color 160ms, background 160ms;
+}
+.s-radio-dot.is-on {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 50%, transparent 55%);
+}
+.s-radio-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.s-radio-label {
+  font-size: 13px;
+  color: var(--t1);
+  font-weight: 500;
+}
+.s-radio-hint {
+  font-size: 11px;
+  color: var(--t3);
+  line-height: 1.5;
+}
+
+/* ─── 話者一覧 (新デザイン) ────────────────────────────── */
+.speaker-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* ── Speaker panel: 全コントロール 32px に揃える ── */
+.speaker-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.speaker-search {
+  flex: 1;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.speaker-search:focus-within {
+  border-color: var(--accent-line);
+  background: var(--surface-2);
+}
+.speaker-search-input {
+  flex: 1;
+  height: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t1);
+  padding: 0;
+}
+.speaker-search-input::placeholder { color: var(--t3); }
+
+/* speaker-toolbar / speaker-bulkbar 内のボタンは 32px に統一 */
+.speaker-toolbar .btn,
+.speaker-bulkbar .btn {
+  height: 32px;
+  font-size: 12px;
+}
+
+.speaker-bulkbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  transition: background 160ms, border-color 160ms;
+  min-height: 42px;
+}
+.speaker-bulkbar.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.speaker-rows-v2 {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.spk-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.spk-row:last-child { border-bottom: none; }
+.spk-row:hover { background: var(--surface-2); }
+.spk-row.is-selected { background: var(--accent-soft); }
+
+.spk-check {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  padding: 0;
+  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.spk-check:hover { border-color: var(--t2); }
+.spk-check.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.spk-avatar {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  text-transform: uppercase;
+}
+
+.spk-name-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.spk-name-input {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: -4px -8px -1px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+  outline: none;
+  transition: border-color 160ms, background 160ms;
+}
+.spk-name-input:hover { border-color: var(--border); }
+.spk-name-input:focus {
+  border-color: var(--accent-line);
+  background: var(--surface);
+}
+.spk-name-input:disabled { opacity: 0.5; }
+.spk-stats {
+  font-size: 10px;
+  color: var(--t3);
+  margin: 0;
+}
+
+.spk-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.spk-play-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--t2);
+  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.spk-play-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.spk-no-sample {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  color: var(--t4);
+  font-size: 12px;
+}
+
+/* ─── Merge dialog cards ─────────────────────────────── */
+.merge-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  outline: none;
+}
+.merge-card:hover {
+  background: var(--surface);
+}
+.merge-card:focus-visible {
+  border-color: var(--accent-line);
+}
+.merge-card.is-primary {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+.merge-card.is-busy {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.merge-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.merge-card-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.merge-card-stats {
+  font-size: 11px;
+  color: var(--t3);
+}
+
+/* ─── 旧 .speaker-row (廃止予定だが互換のため残置) ───── */
+.speaker-list {
+  display: flex;
+  flex-direction: column;
+}
+.speaker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.speaker-row:last-child {
+  border-bottom: none;
+}
+.speaker-row.is-selected {
+  background: var(--accent-soft);
+}
+.speaker-row-check {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin-left: 4px;
+}
+.speaker-row-name {
+  width: 170px;
+  flex-shrink: 0;
+}
+.speaker-row-audio {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ─── Retry status banner (議事録詳細・再文字起こし中) ── */
+.retry-status {
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.retry-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.retry-progress {
+  margin-top: 6px;
+  height: 3px;
+  width: 100%;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.retry-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ─── Summary banner (議事録詳細・要約タブ) ───────────── */
+/* retry-status と同じ高さ感だが、種類別 (running / error / info) で
+   左border色を変える。背景は subtle にして本文の邪魔をしない。 */
+.summary-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  border-left: 3px solid var(--border);
+}
+.summary-banner-running {
+  border-left-color: var(--accent);
+}
+.summary-banner-error {
+  border-left-color: var(--danger);
+  background: var(--accent-soft);
+}
+.summary-banner-info {
+  border-left-color: var(--t4);
+}
+
+.summary-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* ─── In-document find bar (議事録詳細) ───────────────── */
+.find-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.find-bar-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t1);
+  padding: 0;
+}
+.find-bar-input::placeholder { color: var(--t3); }
+
+.find-mark {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--t1);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.find-mark.is-active {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* ─── Inline title edit (議事録詳細) ──────────────────── */
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: -1px -4px;
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.title-row > h2 {
+  min-width: 0;
+}
+.title-row.is-editable {
+  cursor: text;
+}
+.title-row.is-editable:hover {
+  background: var(--surface-2);
+}
+
+.title-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--t3);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.title-row:hover .title-edit-btn { opacity: 1; }
+.title-edit-btn:hover {
+  color: var(--t1);
+  background: var(--surface-3);
+}
+
+.title-edit-input {
+  width: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--accent-line);
+  border-radius: 6px;
+  padding: 3px 7px;
+  margin: -3px -7px -1px;
+  outline: none;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.title-edit-input:focus { border-color: var(--accent); }
+.title-edit-input:disabled { opacity: 0.6; }
+
+/* ─── Search bar (議事録検索) ─────────────────────────── */
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.search-bar:hover { border-color: var(--border-hover); }
+.search-bar:focus-within {
+  border-color: var(--accent-line);
+  background: var(--surface-2);
+}
+.search-bar-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t1);
+  padding: 0;
+}
+.search-bar-input::placeholder { color: var(--t3); }
+
+/* ─── Search result card ──────────────────────────────── */
+.search-result-card {
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.search-result-card:hover {
+  border-color: var(--border-hover);
+  background: var(--surface-2);
+}
+
+.search-mark {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--t1);
+  border-radius: 2px;
+  padding: 0 2px;
+  font-weight: 600;
+}
+
+.match-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+/* ─── Toolbar ─────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  min-height: 64px;
+}
+
+/* ─── Record morph animation ──────────────────────────── */
+@keyframes rec-spawn {
+  from {
+    transform: scale(0.6) translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes rec-spawn-left {
+  from {
+    transform: scale(0.6) translateX(-28px);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes rec-collapse {
+  from { transform: scale(1); opacity: 1; }
+  to   { transform: scale(0.7); opacity: 0; }
+}
+.anim-rec-spawn {
+  animation: rec-spawn 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.anim-rec-spawn-l {
+  animation: rec-spawn-left 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ─── Drag region ─────────────────────────────────────── */
+/* macOS の traffic lights (赤黄緑ボタン) を収めるための領域。
+   Tahoe 以降の標準サイズ (~38px) に合わせて余白を確保する。 */
+.drag-bar {
+  position: relative;
+  height: 26px;
+  background: transparent;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ─── Record controls (smooth transitions) ───────────── */
+.rec-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Pause button: width animates 0 → 40px when entering rec state */
+.rec-pause {
+  height: 40px;
+  width: 0;
+  margin: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--t2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition:
+    width 380ms cubic-bezier(0.34, 1.4, 0.5, 1),
+    opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 200ms ease,
+    background 200ms ease,
+    color 200ms ease;
+}
+.rec-pause:hover {
+  border-color: var(--t2);
+  color: var(--t1);
+  background: var(--surface);
+}
+.rec-pause:active { transform: scale(0.94); }
+
+.rec-controls[data-state="rec"] .rec-pause {
+  width: 40px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Main button: stays in place, only icon + bg morph */
+.rec-main {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rec-main:hover { filter: brightness(0.93); }
+.rec-main:active { transform: scale(0.94); }
+
+.rec-main-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 240ms cubic-bezier(0.34, 1.6, 0.5, 1);
+}
+.rec-main-icon-mic { opacity: 1; transform: scale(1) rotate(0deg); }
+.rec-main-icon-stop { opacity: 0; transform: scale(0.5) rotate(-90deg); }
+
+.rec-controls[data-state="rec"] .rec-main-icon-mic {
+  opacity: 0;
+  transform: scale(0.5) rotate(90deg);
+}
+.rec-controls[data-state="rec"] .rec-main-icon-stop {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+/* ─── Timer tick ──────────────────────────────────────── */
+@keyframes tick-in {
+  0%   { opacity: 0.55; transform: translateY(-2px); }
+  60%  { opacity: 1; }
+  100% { transform: translateY(0); }
+}
+.tick-anim {
+  display: inline-block;
+  animation: tick-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ─── Toast ───────────────────────────────────────────── */
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(8px, 4px) scale(0.97); }
+  to   { opacity: 1; transform: translate(0, 0) scale(1); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translate(0, 0) scale(1); }
+  to   { opacity: 0; transform: translate(8px, 4px) scale(0.97); }
+}
+.anim-toast-in  { animation: toast-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-toast-out { animation: toast-out 200ms cubic-bezier(0.4, 0, 0.6, 1) both; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Scrollbar
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* スクロールバー全面非表示 (スクロール機能は維持) */
+::-webkit-scrollbar { width: 0; height: 0; display: none; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; }
+* { scrollbar-width: none; }   /* Firefox */
+* { -ms-overflow-style: none; } /* Edge legacy */
+
+/* ═══════════════════════════════════════════════════════════════════
+   Animations
+   ═══════════════════════════════════════════════════════════════════ */
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes slide-right {
+  from { opacity: 0; transform: translateX(14px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-ring {
+  0%   { transform: scale(0.8); opacity: 0.5; }
+  100% { transform: scale(2);   opacity: 0;   }
+}
+@keyframes overlay-in  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.92) translateY(12px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0);    }
+}
+@keyframes modal-out {
+  from { opacity: 1; transform: scale(1)    translateY(0);    }
+  to   { opacity: 0; transform: scale(0.95) translateY(6px);  }
+}
+@keyframes spin    { to { transform: rotate(360deg); } }
+@keyframes breathe {
+  0%, 100% { transform: scale(1);    opacity: 0.5; }
+  50%      { transform: scale(1.06); opacity: 1;   }
+}
+@keyframes ambient-glow {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 0.7; }
+}
+
+/* utility classes */
+.anim-fade-in   { animation: fade-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-scale-in  { animation: scale-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-slide-right { animation: slide-right 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-slide-up  { animation: slide-up 320ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+.anim-modal-overlay-in  { animation: overlay-in 200ms ease both; }
+.anim-modal-overlay-out { animation: overlay-out 150ms ease both; }
+.anim-modal-in          { animation: modal-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.anim-modal-out         { animation: modal-out 200ms ease both; }
+
+.stagger > * { animation: fade-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 30ms; }
+.stagger > *:nth-child(3) { animation-delay: 60ms; }
+.stagger > *:nth-child(4) { animation-delay: 90ms; }
+.stagger > *:nth-child(5) { animation-delay: 120ms; }
+.stagger > *:nth-child(6) { animation-delay: 150ms; }
+.stagger > *:nth-child(7) { animation-delay: 180ms; }
+.stagger > *:nth-child(8) { animation-delay: 210ms; }
+.stagger > *:nth-child(9) { animation-delay: 240ms; }
+.stagger > *:nth-child(10) { animation-delay: 270ms; }
+
+.anim-spin { animation: spin 0.7s linear infinite; }
+.anim-breathe { animation: breathe 3s ease-in-out infinite; }
+.anim-pulse-ring { animation: pulse-ring 1.5s ease-out infinite; }
+.anim-ambient { animation: ambient-glow 4s ease-in-out infinite; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Markdown body
+   ═══════════════════════════════════════════════════════════════════ */
+
+.md-body {
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: var(--t1);
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  font-weight: 700;
+  color: var(--t1);
+  line-height: 1.35;
+  letter-spacing: -0.005em;
+}
+.md-body > *:first-child { margin-top: 0; }
+.md-body > *:last-child { margin-bottom: 0; }
+
+.md-body h1 {
+  font-size: 24px;
+  margin: 1.6em 0 0.7em;
+  padding-bottom: 0.4em;
+  border-bottom: 1px solid var(--border);
+}
+.md-body h2 {
+  font-size: 18px;
+  margin: 1.8em 0 0.7em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--border);
+}
+.md-body h3 {
+  font-size: 15.5px;
+  margin: 1.5em 0 0.5em;
+}
+.md-body h4 {
+  font-size: 13.5px;
+  margin: 1.2em 0 0.4em;
+  color: var(--t2);
+}
+
+.md-body p {
+  margin: 0.85em 0;
+  color: var(--t1);
+}
+.md-body strong {
+  color: var(--t1);
+  font-weight: 700;
+}
+.md-body em { color: var(--t1); }
+
+/* Tailwind v4 Preflight が ul/ol の list-style を消すので、
+   .md-body 内では明示的に復元する。 */
+.md-body ul {
+  margin: 0.7em 0;
+  padding-left: 1.6em;
+  list-style: disc outside;
+}
+.md-body ol {
+  margin: 0.7em 0;
+  padding-left: 1.7em;
+  list-style: decimal outside;
+}
+.md-body ul ul {
+  list-style: circle outside;
+}
+.md-body ul ul ul {
+  list-style: square outside;
+}
+.md-body ul ul,
+.md-body ol ol,
+.md-body ul ol,
+.md-body ol ul {
+  margin: 0.3em 0;
+}
+.md-body li {
+  margin: 0.35em 0;
+  display: list-item;
+}
+.md-body li::marker {
+  color: var(--accent);
+}
+.md-body ol > li::marker {
+  color: var(--t2);
+  font-weight: 600;
+}
+.md-body li > p {
+  margin: 0.3em 0;
+}
+.md-body input[type="checkbox"] {
+  margin-right: 6px;
+  accent-color: var(--accent);
+}
+.md-body code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  color: var(--accent);
+}
+.md-body pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0.8em 0;
+}
+.md-body pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+}
+.md-body blockquote {
+  border-left: 2px solid var(--t4);
+  margin: 0.8em 0;
+  padding: 0.2em 0 0.2em 0.9em;
+  color: var(--t2);
+}
+.md-body a {
+  color: var(--blue);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--blue) 30%, transparent);
+}
+.md-body a:hover { border-bottom-color: var(--blue); }
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+.md-body table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 12px;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+}
+.md-body th {
+  background: var(--surface-2);
+  font-weight: 600;
+  color: var(--t1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TipTap markdown editor
+   ═══════════════════════════════════════════════════════════════════ */
+
+.tt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex-wrap: wrap;
+}
+.tt-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--t2);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+.tt-tool:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--t1);
+}
+.tt-tool:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.tt-tool.is-active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.tiptap-content {
+  outline: none;
+  min-height: 100%;
+}
+.tiptap-content:focus {
+  outline: none;
+}
+.tiptap-readonly {
+  cursor: text;
+}
+.tiptap-content p.is-editor-empty:first-child::before {
+  color: var(--t4);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+/* TaskList (checkbox) 表示調整 */
+.tiptap-content ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+.tiptap-content ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.tiptap-content ul[data-type="taskList"] li > label {
+  margin-top: 4px;
+  user-select: none;
+}
+.tiptap-content ul[data-type="taskList"] li > div {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Playback speed pill + popover
+   ═══════════════════════════════════════════════════════════════════ */
+
+.rate-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--t2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+.rate-pill:hover {
+  background: var(--surface-2);
+  color: var(--t1);
+  border-color: color-mix(in srgb, var(--t3) 30%, var(--border));
+}
+.rate-pill.is-modified {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.rate-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  min-width: 96px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 30;
+}
+.rate-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 5px 9px;
+  border: none;
+  background: transparent;
+  color: var(--t2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 70ms ease, color 70ms ease;
+}
+.rate-option:hover {
+  background: var(--surface-2);
+  color: var(--t1);
+}
+.rate-option.is-current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Custom <Select>
+   ═══════════════════════════════════════════════════════════════════ */
+
+.select-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--t1);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+.select-trigger:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: color-mix(in srgb, var(--t3) 30%, var(--border));
+}
+.select-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.select-trigger:disabled,
+.select-trigger[data-disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.select-trigger-icon {
+  display: inline-flex;
+  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.select-trigger[data-state="open"] .select-trigger-icon {
+  transform: rotate(180deg);
+}
+
+.select-popover {
+  /* Radix Popper が positioning を担当するので、ここでは
+     見た目だけ。position/top/left を書くと Radix の collision detect
+     (auto-flip / shift) が効かず画面外に飛び出す。 */
+  min-width: var(--radix-select-trigger-width, 100%);
+  max-height: min(280px, var(--radix-select-content-available-height, 280px));
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 100;
+  margin: 0;
+  list-style: none;
+}
+
+.select-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  background: transparent;
+  color: var(--t2);
+  font-size: 12px;
+  text-align: left;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 70ms ease, color 70ms ease;
+}
+.select-option:hover,
+.select-option.is-highlight,
+.select-option[data-highlighted] {
+  background: var(--surface-2);
+  color: var(--t1);
+  outline: none;
+}
+.select-option.is-selected,
+.select-option[data-state="checked"] {
+  color: var(--accent);
+  font-weight: 500;
+}
+.select-option[data-disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Splash (バックエンド起動中)
+   ═══════════════════════════════════════════════════════════════════ */
+
+.splash-shell {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--shell-bg);
+}
+.splash-card {
+  width: min(540px, 90vw);
+  padding: 32px 32px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+}
+.splash-icon {
+  width: 88px;
+  height: 88px;
+  border-radius: 20px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  margin-bottom: 10px;
+}
+.splash-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--t1);
+  margin: 0;
+}
+.splash-message {
+  font-size: 12px;
+  color: var(--t2);
+  margin: 12px 0 8px;
+  line-height: 1.5;
+  min-height: 1.5em;
+}
+.splash-phase-hint {
+  color: var(--t3);
+}
+.splash-progress-wrap {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.splash-progress-track {
+  flex: 1;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+.splash-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.splash-progress-fill.is-indeterminate {
+  position: absolute;
+  width: 40%;
+  left: 0;
+  animation: splash-indeterminate 1.5s ease-in-out infinite;
+}
+@keyframes splash-indeterminate {
+  0%   { left: -40%; }
+  50%  { left: 50%; }
+  100% { left: 100%; }
+}
+/* 進捗値があっても常時走るシマー — 画面に必ず動きがある安心感を残す */
+.splash-progress-shimmer {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0) 0%,
+    rgba(255,255,255,0.45) 50%,
+    rgba(255,255,255,0) 100%
+  );
+  animation: splash-shimmer 1.6s linear infinite;
+  pointer-events: none;
+  mix-blend-mode: overlay;
+}
+@keyframes splash-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+.splash-progress-label {
+  font-size: 11px;
+  color: var(--t3);
+  min-width: 36px;
+  text-align: right;
+}
+.splash-detail {
+  font-size: 10.5px;
+  color: var(--t4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 10px 0 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.splash-note {
+  font-size: 11px;
+  color: var(--t3);
+  margin: 16px 0 0;
+  line-height: 1.6;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* バックエンドの生 stderr ログを表示するターミナル風エリア。 */
+.splash-log {
+  margin-top: 14px;
+  width: 100%;
+  height: 132px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--t3);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: thin;
+}
+.splash-log::-webkit-scrollbar { width: 6px; }
+.splash-log::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+.splash-log-empty {
+  color: var(--t4);
+  font-style: italic;
+}
+.splash-log-line {
+  padding: 1px 0;
+}
+.splash-log-line:last-child {
+  color: var(--t1);
+}
+@keyframes log-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.anim-log-in {
+  animation: log-in 180ms ease-out both;
+}
