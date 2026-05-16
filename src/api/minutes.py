@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -219,13 +220,78 @@ async def retranscribe_minutes(minutes_id: str) -> dict:
     if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
         raise conflict("ALREADY_RUNNING", "このセッションは現在処理中です")
 
-    asyncio.create_task(_run_retranscribe(minutes_id, session_id, str(wav_path),
-                                          m.get("project_id", "")))
+    cancel_event = threading.Event()
+    _retranscribe_cancel_events[session_id] = cancel_event
+
+    task = asyncio.create_task(
+        _run_retranscribe(
+            minutes_id,
+            session_id,
+            str(wav_path),
+            m.get("project_id", ""),
+            cancel_event,
+        )
+    )
+    _retranscribe_tasks[session_id] = task
+
+    def _cleanup_task(done: asyncio.Task) -> None:
+        current = _retranscribe_tasks.get(session_id)
+        if current is done:
+            _retranscribe_tasks.pop(session_id, None)
+
+    task.add_done_callback(_cleanup_task)
     return {"status": "started", "session_id": session_id}
 
 
 # 再文字起こしの逐次実行ロック(同時1件まで)
 _retranscribe_sem = asyncio.Semaphore(1)
+_retranscribe_tasks: dict[str, asyncio.Task] = {}
+_retranscribe_cancel_events: dict[str, threading.Event] = {}
+
+
+class RetranscribeCancelledError(RuntimeError):
+    """再文字起こしの協調キャンセル通知。"""
+
+
+@router.post("/{minutes_id}/retranscribe/cancel")
+async def cancel_retranscribe_minutes(minutes_id: str) -> dict:
+    """進行中の再文字起こし停止を要求する。"""
+    m = db.get_minutes(minutes_id)
+    if m is None:
+        raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
+
+    session_id = str(m.get("session_id") or "").strip()
+    if not session_id:
+        raise not_found("SESSION_NOT_FOUND", "セッションIDが見つかりません")
+
+    from src.api import recording as rec_mod
+    existing = rec_mod._pipelines.get(session_id)
+    cancel_event = _retranscribe_cancel_events.get(session_id)
+    running_task = _retranscribe_tasks.get(session_id)
+
+    if not existing or existing.get("state") not in ("transcribing", "stopping"):
+        if running_task and not running_task.done():
+            if cancel_event is None:
+                cancel_event = threading.Event()
+                _retranscribe_cancel_events[session_id] = cancel_event
+            cancel_event.set()
+            return {"status": "cancelling", "session_id": session_id}
+        return {"status": "not_running", "session_id": session_id}
+
+    if cancel_event is None:
+        cancel_event = threading.Event()
+        _retranscribe_cancel_events[session_id] = cancel_event
+    cancel_event.set()
+
+    from src.pipeline.state import Stage, STAGE_LABELS
+    existing.update({
+        "state": "stopping",
+        "stage": Stage.CANCELLED.value,
+        "stage_label": STAGE_LABELS[Stage.CANCELLED],
+        "message": "停止要求を受け付けました...",
+    })
+    await rec_mod._broadcast_pipeline(session_id)
+    return {"status": "cancelling", "session_id": session_id}
 
 
 def _load_wav_16k_mono_f32(path: str):
@@ -279,7 +345,8 @@ def _load_wav_16k_mono_f32(path: str):
 
 
 async def _run_retranscribe(minutes_id: str, session_id: str,
-                            wav_path: str, project_id: str) -> None:
+                            wav_path: str, project_id: str,
+                            cancel_event: threading.Event) -> None:
     """再文字起こし処理。
     - 同時実行は 1 件のみ(_retranscribe_sem)。複数キューイング時は FIFO 待ち
     - 録音中は待機して、新録音とそのストリーミング文字起こしを最優先
@@ -320,14 +387,21 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             "message": message or STAGE_LABELS[stage],
         })
 
+    def _assert_not_cancelled() -> None:
+        if cancel_event.is_set():
+            raise RetranscribeCancelledError("ユーザーにより停止されました")
+
     # 同時1件 FIFO
     async with _retranscribe_sem:
+        _assert_not_cancelled()
         # 録音中なら録音終了まで待機
         while rec_mod._active_session_id is not None:
+            _assert_not_cancelled()
             _set_retry_stage(Stage.QUEUED, "録音中のため待機中...")
             await rec_mod._broadcast_pipeline(session_id)
             await asyncio.sleep(2)
 
+        _assert_not_cancelled()
         _set_retry_stage(Stage.WHISPER_LOAD, "Whisperモデル準備中... (初回はダウンロードに数分)")
         rec_mod._pipelines[session_id]["progress"] = 0.0
         await rec_mod._broadcast_pipeline(session_id)
@@ -340,6 +414,10 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 os.nice(10)
             except (OSError, AttributeError):
                 pass
+
+            def _assert_not_cancelled_sync() -> None:
+                if cancel_event.is_set():
+                    raise RetranscribeCancelledError("ユーザーにより停止されました")
 
             import mlx_whisper
             from src.transcribe.hallucination_filter import HallucinationFilter
@@ -359,11 +437,14 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                     )
                 except Exception:
                     pass
+            _assert_not_cancelled_sync()
             _emit_stage(Stage.WHISPER_LOAD, f"Whisper モデル読込中 ({model_name})")
             get_or_load_model(model_name)
+            _assert_not_cancelled_sync()
             _emit_stage(Stage.AUDIO_ANALYZE, "音声を発話単位に分割中...")
 
             audio = _load_wav_16k_mono_f32(wav_path)
+            _assert_not_cancelled_sync()
             language = config.get("whisper", "language", default="ja")
 
             # プロジェクトの用語集 + corrections の正式表記を initial_prompt として使う
@@ -420,6 +501,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             jobs: list[tuple] = []  # (chunk_audio, start_offset_sec)
             elapsed = 0.0
             for i in range(0, max(0, len(audio) - BLOCK + 1), BLOCK):
+                _assert_not_cancelled_sync()
                 block = audio[i:i + BLOCK]
                 if len(block) == 0:
                     break
@@ -469,6 +551,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
 
             _emit_progress(0, message=f"再文字起こし中... 0/{total_jobs} (0%)")
             for idx, (chunk_audio, start_offset) in enumerate(jobs):
+                _assert_not_cancelled_sync()
                 initial_prompt = build_initial_prompt(glossary, recent_tail)
                 kwargs: dict = {
                     "path_or_hf_repo": repo,
@@ -540,6 +623,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                     merged = (recent_tail + " " + " ".join(chunk_texts)).strip()
                     recent_tail = merged[-PROMPT_RECENT_CHARS:]
                 _emit_progress(idx + 1)
+            _assert_not_cancelled_sync()
             if filtered_count:
                 logger.info(
                     "[retry] Hallucination filter dropped %d segments", filtered_count,
@@ -547,10 +631,32 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             return segments
 
         import time as _time
+        async def _publish_cancelled(message: str = "再文字起こしを停止しました") -> None:
+            _set_retry_stage(Stage.CANCELLED, message)
+            rec_mod._pipelines[session_id].update({
+                "state": "done",
+                "message": message,
+                "error": None,
+                "progress": 0.0,
+            })
+            rec_mod._evict_completed_pipelines()
+            await ws_manager.broadcast({
+                "type": "pipeline_done",
+                "data": {
+                    "session_id": session_id,
+                    "minutes_id": minutes_id,
+                    "retranscribe": True,
+                    "cancelled": True,
+                },
+            })
+            await rec_mod._broadcast_pipeline(session_id)
+
         try:
+            _assert_not_cancelled()
             t0 = _time.perf_counter()
             segments = await loop.run_in_executor(None, do_transcribe)
             t1 = _time.perf_counter()
+            _assert_not_cancelled()
             logger.info(
                 "[retry] transcribe done in %.1fs (%d segments)",
                 t1 - t0, len(segments),
@@ -582,6 +688,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 except Exception:
                     pass
 
+            _assert_not_cancelled()
             t2 = _time.perf_counter()
             segments = await loop.run_in_executor(
                 None,
@@ -593,6 +700,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 ),
             )
             t3 = _time.perf_counter()
+            _assert_not_cancelled()
             logger.info(
                 "[retry] diarization done in %.1fs (%d segments after split)",
                 t3 - t2, len(segments),
@@ -625,6 +733,12 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             await rec_mod._broadcast_pipeline(session_id)
             logger.info("Retranscribe done: %s (%d segments)", session_id, len(segments))
 
+        except RetranscribeCancelledError:
+            await _publish_cancelled()
+            logger.info("Retranscribe cancelled: %s", session_id)
+        except asyncio.CancelledError:
+            await _publish_cancelled()
+            logger.info("Retranscribe task cancelled: %s", session_id)
         except Exception as e:
             logger.error("Retranscribe failed: %s", e)
             rec_mod._pipelines[session_id].update({
@@ -638,3 +752,6 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 "data": {"session_id": session_id, "message": str(e)},
             })
             await rec_mod._broadcast_pipeline(session_id)
+        finally:
+            _retranscribe_tasks.pop(session_id, None)
+            _retranscribe_cancel_events.pop(session_id, None)

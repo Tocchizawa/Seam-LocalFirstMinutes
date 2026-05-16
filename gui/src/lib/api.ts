@@ -205,6 +205,12 @@ export const retranscribeMinutes = (id: string) =>
     { method: "POST" },
   );
 
+export const cancelRetranscribeMinutes = (id: string) =>
+  request<{ status: string; session_id: string }>(
+    `/api/minutes/${id}/retranscribe/cancel`,
+    { method: "POST" },
+  );
+
 // Devices
 export interface AudioDevice {
   id: number;

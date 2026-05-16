@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import {
   ArrowLeft, Copy, DownloadSimple, Trash, Play, Pause, ArrowsClockwise, PencilSimple,
-  CaretDown, CaretUp, MagnifyingGlass, X, MagicWand, WarningCircle,
+  CaretDown, CaretUp, MagnifyingGlass, X, MagicWand, WarningCircle, Stop,
 } from "@phosphor-icons/react";
 import type {
   Minutes, TranscriptSegment, PipelineStatus,
@@ -9,7 +9,7 @@ import type {
 } from "../lib/api";
 import {
   audioPlayUrl, exportMinutes, getMinutesMarkdown, deleteMinutes,
-  getPipelineStatus, getMinutes, retranscribeMinutes, updateMinutesTitle, WS_URL,
+  getPipelineStatus, getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle, WS_URL,
   triggerSummarize, getSummarizeStatus, cancelSummarize, getPipelineBySession,
   updateMinutesSummary, getSessionSegments, getSessionAudioInfo,
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
@@ -608,7 +608,7 @@ export function DetailView(props: Props) {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | null>(null);
+  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | null>(null);
 
   /* title edit */
   const [editingTitle, setEditingTitle] = useState(false);
@@ -716,7 +716,7 @@ export function DetailView(props: Props) {
     } finally { setBusy(null); }
   };
   const handleRetry = async () => {
-    if (!minutesId || busy) return;
+    if (!minutesId || busy || isRetranscribing) return;
     const ok = await ask(
       "文字起こしを再実行します。録音長によっては数分かかります。続行しますか?",
       {
@@ -735,6 +735,27 @@ export function DetailView(props: Props) {
     } catch (e) {
       showToast({ kind: "err", text: `再実行失敗: ${e instanceof Error ? e.message : ""}` });
       setRetryStatus(null);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleCancelRetry = async () => {
+    if (!minutesId || busy === "retry_cancel" || !isRetranscribing) return;
+    setBusy("retry_cancel");
+    try {
+      const r = await cancelRetranscribeMinutes(minutesId);
+      if (r.status === "not_running") {
+        setRetryStatus(null);
+      } else {
+        setRetryStatus((prev) => (
+          prev
+            ? { ...prev, state: "stopping", message: "停止中...", progress: prev.progress ?? 0 }
+            : { state: "stopping", message: "停止中...", progress: 0 }
+        ));
+      }
+    } catch (e) {
+      showToast({ kind: "err", text: `停止失敗: ${e instanceof Error ? e.message : ""}` });
     } finally {
       setBusy(null);
     }
@@ -761,6 +782,8 @@ export function DetailView(props: Props) {
   };
 
   const canAct = !isLive && !!minutesId;
+  const isRetranscribing = !!retryStatus && retryStatus.state !== "error";
+  const retryStopPending = busy === "retry_cancel" || retryStatus?.state === "stopping";
   const isSearching = findQuery.trim().length > 0;
   const tabs: Array<["summary" | "transcript", string, number | null]> = [
     [
@@ -844,9 +867,27 @@ export function DetailView(props: Props) {
 
         {canAct && (
           <div className="flex items-center gap-1 shrink-0">
-            <ActionBtn onClick={handleRetry} loading={busy === "retry"} title="文字起こしを再実行" label="再実行">
-              <ArrowsClockwise size={13} weight="regular" />
-            </ActionBtn>
+            {isRetranscribing ? (
+              <ActionBtn
+                onClick={handleCancelRetry}
+                loading={retryStopPending}
+                disabled={retryStopPending}
+                title="進行中の再文字起こしを停止"
+                label={retryStopPending ? "停止中" : "停止"}
+                danger
+              >
+                <Stop size={13} weight="regular" />
+              </ActionBtn>
+            ) : (
+              <ActionBtn
+                onClick={handleRetry}
+                loading={busy === "retry"}
+                title="文字起こしを再実行"
+                label="再実行"
+              >
+                <ArrowsClockwise size={13} weight="regular" />
+              </ActionBtn>
+            )}
             <ActionBtn onClick={handleCopy} loading={busy === "copy"} title="Markdown をコピー" label="コピー">
               <Copy size={13} weight="regular" />
             </ActionBtn>
@@ -1150,17 +1191,19 @@ export function DetailView(props: Props) {
 }
 
 function ActionBtn({
-  children, onClick, loading, title, label, danger,
+  children, onClick, loading, title, label, danger, disabled,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   loading?: boolean;
+  disabled?: boolean;
   title: string;
   label?: string;
   danger?: boolean;
 }) {
+  const blocked = Boolean(loading || disabled);
   return (
-    <button onClick={onClick} disabled={loading} title={title}
+    <button onClick={onClick} disabled={blocked} title={title}
       className={`btn h-8 px-3 text-[11px] ${danger ? "btn-danger btn-ghost" : "btn-ghost"}`}>
       {loading ? <Spinner size={12} /> : children}
       {label && <span>{label}</span>}
