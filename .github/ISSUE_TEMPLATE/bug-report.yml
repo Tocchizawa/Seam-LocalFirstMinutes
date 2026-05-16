@@ -1,0 +1,77 @@
+name: 不具合報告
+description: 動作不良・クラッシュ・期待外の挙動を報告する
+title: "[不具合] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        再現手順をできるだけ具体的に書いてください。
+        ログやスクリーンショットがあると調査が早くなります。
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きたかを1-3行で書いてください
+      placeholder: 例) 録音停止後に要約が開始されず、一覧に反映されない
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 手順を番号で書いてください
+      placeholder: |
+        1. xxx を開く
+        2. yyy を実行
+        3. zzz で失敗する
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した結果
+      placeholder: 例) 録音停止後に要約ジョブが queued になる
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の結果
+      placeholder: 例) 何も起きず、コンソールに timeout エラーが出る
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ / スクリーンショット / 補足
+      description: エラーログ、スクショ、再現頻度など
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: バージョン / コミット
+      description: 利用中のバージョンまたはコミットハッシュ
+      placeholder: 例) v0.1.0-beta.1 / 7b67216
+
+  - type: input
+    id: environment
+    attributes:
+      label: 実行環境
+      description: 端末・OSなど
+      placeholder: 例) macOS 14.7 (Apple Silicon)
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 確認事項
+      options:
+        - label: 既存Issueに同様の報告がないことを確認した
+          required: true
