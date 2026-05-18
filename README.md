@@ -1,7 +1,15 @@
+<p align="center">
+  <img src="./docs/images/seam-banner.png" alt="Seam - Local-first meeting minutes for macOS" width="100%">
+</p>
+
 # Seam - Local-First Minutes
 
 Seam は、**会議の録音・文字起こし・要約をローカル環境中心で完結**させる macOS 向けアプリです。  
 デスクトップUI（Tauri + React）とバックエンドAPI（FastAPI）を分離し、実運用しやすい構成で実装しています。
+
+<p align="center">
+  <img src="./docs/images/seam-main.png" alt="Seam main screen" width="100%">
+</p>
 
 ## プロジェクトの狙い
 
