@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 
 from src.api.errors import bad_request, conflict, not_found
 from src.api.ws import ws_manager
-from src.audio.recorder import SESSIONS_DIR, recorder
+from src.audio.recorder import FFMPEG, SESSIONS_DIR, recorder
 from src.audio.mixer import RealtimeMixer
 from src.config import config
 from src.project.manager import project_manager
@@ -36,6 +37,7 @@ SESSION_META_FILENAME = "session_meta.json"
 TRANSCRIPT_JSONL_FILENAME = "transcript.jsonl"
 _RECOVERABLE_STATES = {"stopping", "transcribing", "rediarizing", "saving"}
 AUDIO_FILE_PRIORITY = ("combined.flac", "combined.wav", "system.wav", "mic.wav")
+PLAYBACK_AUDIO_FILE_PRIORITY = ("combined.play.wav", "combined.wav", "combined.flac", "system.wav", "mic.wav")
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
 
@@ -122,6 +124,79 @@ def _require_safe_session_id(session_id: str) -> str:
     if not is_safe_session_id(sid):
         raise bad_request("INVALID_SESSION_ID", "不正な session_id です")
     return sid
+
+
+def _is_valid_audio_file(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_size > 44
+    except Exception:
+        return False
+
+
+def _ensure_playback_wav(flac_path: Path, wav_path: Path) -> Path | None:
+    """FLAC 再生互換のため、必要時に WAV を生成して返す。
+
+    Safari/WebView で FLAC seek が不安定なケースがあるため、
+    再生系は WAV 優先にする。
+    """
+    try:
+        if _is_valid_audio_file(wav_path):
+            # 元 FLAC より古い場合だけ再生成
+            if wav_path.stat().st_mtime >= flac_path.stat().st_mtime:
+                return wav_path
+        tmp_path = wav_path.with_suffix(".tmp.wav")
+        cmd = [
+            FFMPEG, "-y",
+            "-i", str(flac_path),
+            "-ar", "24000",
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            str(tmp_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode != 0:
+            logger.warning(
+                "playback wav generation failed for %s (code=%s): %s",
+                flac_path.name,
+                result.returncode,
+                (result.stderr or "")[-400:],
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+        if not _is_valid_audio_file(tmp_path):
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+        tmp_path.replace(wav_path)
+        return wav_path
+    except Exception as e:
+        logger.warning("playback wav generation error: %s", e)
+        return None
+
+
+def _pick_playback_audio(session_dir: Path) -> Path | None:
+    for name in PLAYBACK_AUDIO_FILE_PRIORITY:
+        path = session_dir / name
+        if not _is_valid_audio_file(path):
+            continue
+        if name == "combined.play.wav":
+            flac_path = session_dir / "combined.flac"
+            if _is_valid_audio_file(flac_path):
+                refreshed = _ensure_playback_wav(flac_path, path)
+                if refreshed is not None:
+                    return refreshed
+        if name == "combined.flac":
+            wav_path = session_dir / "combined.play.wav"
+            generated = _ensure_playback_wav(path, wav_path)
+            if generated is not None:
+                return generated
+        return path
+    return None
 
 
 def build_pipeline_transcript_payload(segments: list[dict]) -> dict:
@@ -934,11 +1009,10 @@ async def play_audio(session_id: str) -> FileResponse:
     from src.config import APP_DIR
     sid = _require_safe_session_id(session_id)
     session_dir = APP_DIR / "sessions" / sid
-    for name in AUDIO_FILE_PRIORITY:
-        wav = session_dir / name
-        if wav.exists() and wav.stat().st_size > 44:
-            media_type = "audio/flac" if wav.suffix.lower() == ".flac" else "audio/wav"
-            return FileResponse(str(wav), media_type=media_type)
+    audio = _pick_playback_audio(session_dir)
+    if audio is not None:
+        media_type = "audio/flac" if audio.suffix.lower() == ".flac" else "audio/wav"
+        return FileResponse(str(audio), media_type=media_type)
     raise not_found("FILE_NOT_FOUND", f"音声ファイルが見つかりません: {sid}")
 
 
@@ -956,18 +1030,17 @@ async def get_session_segments(session_id: str) -> list[dict]:
 @router.get("/sessions/{session_id}/audio_info")
 async def get_session_audio_info(session_id: str) -> dict:
     """セッションの再生対象音声ファイルのメタ情報を返す。
-    優先: combined.flac → combined.wav → system.wav → mic.wav (play_audio の picker と同じ)。
+    優先: combined.play.wav → combined.wav → combined.flac → system.wav → mic.wav。
     """
     from src.config import APP_DIR
     sid = _require_safe_session_id(session_id)
     session_dir = APP_DIR / "sessions" / sid
-    for name in AUDIO_FILE_PRIORITY:
-        wav = session_dir / name
-        if wav.exists() and wav.stat().st_size > 44:
-            return {
-                "name": name,
-                "size_bytes": int(wav.stat().st_size),
-            }
+    audio = _pick_playback_audio(session_dir)
+    if audio is not None:
+        return {
+            "name": audio.name,
+            "size_bytes": int(audio.stat().st_size),
+        }
     raise not_found("FILE_NOT_FOUND", f"音声ファイルが見つかりません: {sid}")
 
 
@@ -1101,6 +1174,109 @@ def _recover_one_session(session_dir: Path, meta: dict) -> bool:
     return True
 
 
+async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
+    """1セッション分の救済処理(非同期版)。成功なら True / 対象外なら False。"""
+    from src.storage.db import db
+
+    session_id = meta.get("session_id") or session_dir.name
+
+    if db.has_minutes_for_session(session_id):
+        try:
+            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    state = meta.get("state")
+    if state not in _RECOVERABLE_STATES:
+        logger.info(
+            "[recovery] cleaning up unrecoverable session %s (state=%s)",
+            session_id, state,
+        )
+        try:
+            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("[recovery] failed to remove stale meta %s: %s",
+                           session_id, e)
+        return False
+
+    segments = _load_persisted_segments(session_id)
+    wav_path = _pick_recovery_wav(session_dir)
+
+    if not segments and wav_path is None:
+        logger.info("[recovery] skipping session %s (no transcript, no wav)", session_id)
+        try:
+            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    transcript: list[dict] = segments
+    if segments and wav_path is not None:
+        try:
+            transcript = await asyncio.to_thread(
+                speaker_memory.rediarize_segments,
+                segments,
+                wav_path=str(wav_path),
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.warning("[recovery] rediarize failed for %s, using raw segments: %s", session_id, e)
+            transcript = segments
+
+    duration_sec = _wav_duration_sec(wav_path) if wav_path else 0
+
+    started_at = meta.get("started_at") or datetime.now(timezone.utc).isoformat()
+    try:
+        date_str = started_at[:10]
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except Exception:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    hhmm = "??:??"
+    if len(session_id) >= 13 and session_id[8] == "_":
+        hhmm = f"{session_id[9:11]}:{session_id[11:13]}"
+    title = f"[復元] {hhmm} の会議"
+    minutes_id = uuid.uuid4().hex[:12]
+    now = datetime.now(timezone.utc).isoformat()
+
+    db.insert_minutes({
+        "id": minutes_id,
+        "session_id": session_id,
+        "project_id": meta.get("project_id") or "default",
+        "title": title,
+        "date": date_str,
+        "started_at": started_at,
+        "duration_sec": int(duration_sec),
+        "transcript": transcript,
+        "summary": "",
+        "whisper_model": config.get("whisper", "model", default="medium"),
+        "llm_model": "",
+        "created_at": now,
+        "updated_at": now,
+    })
+    try:
+        (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+    except Exception:
+        pass
+    logger.info(
+        "[recovery] recovered: %s (%d segments, wav=%s, prior_state=%s)",
+        session_id, len(transcript), wav_path.name if wav_path else None, state,
+    )
+
+    if transcript and bool(config.get("minutes_ai", "auto_generate", default=True)):
+        try:
+            from src.summarize.runner import get_runner
+
+            get_runner().enqueue(minutes_id)
+            logger.info("[recovery] auto-summary enqueued for recovered: %s", minutes_id)
+        except Exception as e:
+            logger.warning(
+                "[recovery] failed to enqueue auto-summary for %s: %s", minutes_id, e,
+            )
+    return True
+
+
 def recover_pending_sessions() -> int:
     """起動時、finalize 中に落ちたセッションを DB に書き戻す。
 
@@ -1128,6 +1304,38 @@ def recover_pending_sessions() -> int:
                 recovered += 1
         except Exception as e:
             logger.error("[recovery] failed for %s: %s", session_dir.name, e)
+
+    if recovered:
+        logger.info("[recovery] recovered %d pending session(s)", recovered)
+    return recovered
+
+
+async def recover_pending_sessions_async() -> int:
+    """非同期版の起動時セッション復旧。
+
+    DB 書き込みはメインスレッドで行い、重い再話者分離だけ thread offload する。
+    """
+    if not SESSIONS_DIR.exists():
+        return 0
+
+    recovered = 0
+    for session_dir in sorted(SESSIONS_DIR.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        meta_path = session_dir / SESSION_META_FILENAME
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("[recovery] failed to read meta %s: %s", session_dir, e)
+            continue
+        try:
+            if await _recover_one_session_async(session_dir, meta):
+                recovered += 1
+        except Exception as e:
+            logger.error("[recovery] failed for %s: %s", session_dir.name, e)
+        await asyncio.sleep(0)
 
     if recovered:
         logger.info("[recovery] recovered %d pending session(s)", recovered)

@@ -554,16 +554,25 @@ class Recorder:
             return None
         combined = self._session_dir / "combined.flac"
         cmd: list[str] = [FFMPEG, "-y"]
-        delay_ms = int(round(max(0.0, float(system_delay_sec or 0.0)) * 1000.0))
-        # 200ms未満は実測誤差として扱い、補正を入れない。
-        if delay_ms < 200:
-            delay_ms = 0
-        # 暴走値のガード: 10秒以上は異常値として無効化。
-        if delay_ms > 10_000:
-            logger.warning("Ignoring suspicious system delay: %dms", delay_ms)
-            delay_ms = 0
-        elif delay_ms > 0:
-            logger.info("Applying system audio delay compensation: %dms", delay_ms)
+        rec_cfg = config.get("recording", default={}) or {}
+        delay_enabled = bool(rec_cfg.get("system_delay_compensation_enabled", False))
+        delay_ms = 0
+        if delay_enabled:
+            delay_ms = int(round(max(0.0, float(system_delay_sec or 0.0)) * 1000.0))
+            # 200ms未満は実測誤差として扱い、補正を入れない。
+            if delay_ms < 200:
+                delay_ms = 0
+            # 暴走値のガード: 10秒以上は異常値として無効化。
+            if delay_ms > 10_000:
+                logger.warning("Ignoring suspicious system delay: %dms", delay_ms)
+                delay_ms = 0
+            elif delay_ms > 0:
+                logger.info("Applying system audio delay compensation: %dms", delay_ms)
+        elif system_delay_sec:
+            logger.info(
+                "System delay measured (%.3fs) but compensation is disabled",
+                float(system_delay_sec),
+            )
         if mic and sys:
             if delay_ms > 0:
                 cmd += [

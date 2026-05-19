@@ -256,7 +256,7 @@ export const getLastRecording = () =>
   request<RecordingResult>("/api/recording/last");
 
 export const audioPlayUrl = (sessionId: string) =>
-  `${BASE_URL}/api/recording/play/${sessionId}`;
+  `${BASE_URL}/api/recording/play/${encodeURIComponent(sessionId)}?v=wav-playback-1`;
 
 // Pipeline
 export interface TranscriptSegment {

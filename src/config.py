@@ -146,6 +146,9 @@ DEFAULTS: dict[str, Any] = {
             "max_reopen": 8,
             "reopen_on_overflow": False,
         },
+        # system track 遅延補正は transcript タイムラインとの整合を崩しやすいため、
+        # 既定では無効。必要時のみ明示的に有効化する。
+        "system_delay_compensation_enabled": False,
         # 完了済みパイプラインの保持上限(メモリガード)。
         "memory_guard": {
             "max_retained_pipelines": 40,

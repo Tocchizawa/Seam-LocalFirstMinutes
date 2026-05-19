@@ -178,6 +178,41 @@ fn runtime_dir() -> PathBuf {
     app_dir().join("runtime")
 }
 
+/// Finder/Dock から起動した .app は launchd の最小 PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) しか持たず、Homebrew や cargo 等で
+/// 入れた `codex` / `claude` 等の CLI を解決できない。
+/// よく使われるインストール先を先頭に足した PATH を返し、backend に渡す。
+fn augmented_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut prefixes: Vec<String> = vec![
+        "/opt/homebrew/bin".into(),
+        "/opt/homebrew/sbin".into(),
+        "/usr/local/bin".into(),
+    ];
+    if !home.is_empty() {
+        prefixes.push(format!("{home}/.local/bin"));
+        prefixes.push(format!("{home}/.cargo/bin"));
+        prefixes.push(format!("{home}/.bun/bin"));
+        prefixes.push(format!("{home}/.deno/bin"));
+        prefixes.push(format!("{home}/.npm-global/bin"));
+    }
+
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for p in prefixes
+        .into_iter()
+        .chain(existing.split(':').map(|s| s.to_string()))
+        .chain(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].iter().map(|s| s.to_string()))
+    {
+        if p.is_empty() || !seen.insert(p.clone()) {
+            continue;
+        }
+        out.push(p);
+    }
+    out.join(":")
+}
+
 fn ensure_runtime_dirs() -> PathBuf {
     let runtime = runtime_dir();
     let dirs = [
@@ -341,6 +376,9 @@ fn start_backend(runtime_root: &Path) -> Option<Child> {
         .env("SEAM_APP_DIR", &app_root_s)
         .env("SEAM_PARENT_PID", &parent_pid_s)
         .env("SEAM_RUNTIME_DIR", runtime_root.display().to_string())
+        // Finder/Dock 起動時の最小 PATH を補い、Homebrew/cargo 等で入れた
+        // codex/claude CLI を backend が解決できるようにする
+        .env("PATH", augmented_path())
         .env("HF_HOME", &hf_home_s)
         .env("HF_HUB_CACHE", &hf_hub_cache_s)
         .env("HUGGINGFACE_HUB_CACHE", &hf_hub_cache_s)

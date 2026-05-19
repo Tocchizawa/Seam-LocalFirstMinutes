@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16000
 BLOCK_MS = 100
 MAX_BUFFER_SEC = 5
-SYSTEM_LATENCY_FRAMES = 3  # mic の方が早く着く分、system 待ちで多少 lag
 
 
 class RealtimeMixer:
@@ -40,7 +39,7 @@ class RealtimeMixer:
         self._running = False
         self._has_system = False
         self._system_seen = False
-        self._waited_frames = 0
+        self._mic_seen = False
         self._consumer_restarts = 0
         self._last_restart_reason: str | None = None
         self._last_restart_at: float = 0.0
@@ -49,7 +48,7 @@ class RealtimeMixer:
         self._running = True
         self._has_system = has_system
         self._system_seen = False
-        self._waited_frames = 0
+        self._mic_seen = False
         with self._lock:
             self._mic_buf = np.zeros(0, dtype=np.float32)
             self._sys_buf = np.zeros(0, dtype=np.float32)
@@ -130,6 +129,7 @@ class RealtimeMixer:
             self._mic_buf = np.concatenate([self._mic_buf, f32])
             if len(self._mic_buf) > self._max_buf:
                 self._mic_buf = self._mic_buf[-self._max_buf:]
+            self._mic_seen = True
             self._cond.notify()
 
     def feed_system(self, samples_f32: np.ndarray, sample_rate: int = 48000) -> None:
@@ -166,18 +166,19 @@ class RealtimeMixer:
                         mic_n = len(self._mic_buf)
                         sys_n = len(self._sys_buf)
                         if self._has_system:
-                            if not self._system_seen and self._waited_frames >= SYSTEM_LATENCY_FRAMES:
-                                if mic_n >= self._block_size:
-                                    mic = self._mic_buf[:self._block_size].copy()
-                                    self._mic_buf = self._mic_buf[self._block_size:]
-                                    mixed = mic
-                                    break
-                            elif mic_n >= self._block_size and sys_n >= self._block_size:
+                            # タイムライン基準は mic 側に固定する。
+                            # system が遅延/欠落しても mic の時間を止めず、欠損ぶんは無音で埋める。
+                            if mic_n >= self._block_size:
                                 mic = self._mic_buf[:self._block_size].copy()
-                                sys = self._sys_buf[:self._block_size].copy()
                                 self._mic_buf = self._mic_buf[self._block_size:]
-                                self._sys_buf = self._sys_buf[self._block_size:]
+                                sys = self._take_with_silence("_sys_buf", self._block_size)
                                 mixed = self._mix(mic, sys)
+                                break
+                            # mic が一度も来ていない特殊ケースでは system 単体も通す。
+                            if not self._mic_seen and sys_n >= self._block_size:
+                                sys = self._sys_buf[:self._block_size].copy()
+                                self._sys_buf = self._sys_buf[self._block_size:]
+                                mixed = sys
                                 break
                         else:
                             if mic_n >= self._block_size:
@@ -186,10 +187,8 @@ class RealtimeMixer:
                                 mixed = mic
                                 break
                         self._cond.wait(timeout=0.5)
-                        self._waited_frames += 1
                     else:
                         return
-                self._waited_frames = 0
                 self._dispatch(mixed)
             except KeyboardInterrupt:
                 raise
@@ -201,14 +200,19 @@ class RealtimeMixer:
 
     def _flush_remaining(self) -> None:
         with self._lock:
-            if self._has_system and self._system_seen:
-                n = min(len(self._mic_buf), len(self._sys_buf))
+            if self._has_system:
+                n = len(self._mic_buf)
                 if n > 0:
-                    mic = self._mic_buf[:n]
-                    sys = self._sys_buf[:n]
+                    mic = self._mic_buf.copy()
+                    sys = np.zeros(n, dtype=np.float32)
+                    if len(self._sys_buf) > 0:
+                        take = min(n, len(self._sys_buf))
+                        sys[:take] = self._sys_buf[:take]
                     mixed = self._mix(mic, sys)
+                elif not self._mic_seen and len(self._sys_buf) > 0:
+                    mixed = self._sys_buf.copy()
                 else:
-                    mixed = self._mic_buf if len(self._mic_buf) > 0 else None
+                    mixed = None
             else:
                 mixed = self._mic_buf if len(self._mic_buf) > 0 else None
             self._mic_buf = np.zeros(0, dtype=np.float32)
@@ -229,6 +233,15 @@ class RealtimeMixer:
     @staticmethod
     def _mix(mic: np.ndarray, sys: np.ndarray) -> np.ndarray:
         return np.clip(mic + sys, -1.0, 1.0).astype(np.float32)
+
+    def _take_with_silence(self, attr: str, n: int) -> np.ndarray:
+        buf = getattr(self, attr)
+        out = np.zeros(n, dtype=np.float32)
+        if len(buf) > 0:
+            take = min(n, len(buf))
+            out[:take] = buf[:take]
+            setattr(self, attr, buf[take:])
+        return out
 
     @staticmethod
     def _resample(samples: np.ndarray, sample_rate: int) -> np.ndarray:
