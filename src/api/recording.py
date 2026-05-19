@@ -1067,111 +1067,37 @@ def _wav_duration_sec(wav: Path) -> int:
         return 0
 
 
+def _run_recovery_coro_sync(coro):
+    """同期 API 互換用: 復旧コルーチンを同期実行する。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError("sync recovery API cannot run inside an active event loop")
+
+
+def _iter_pending_recovery_metas() -> list[tuple[Path, dict]]:
+    if not SESSIONS_DIR.exists():
+        return []
+    out: list[tuple[Path, dict]] = []
+    for session_dir in sorted(SESSIONS_DIR.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        meta_path = session_dir / SESSION_META_FILENAME
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("[recovery] failed to read meta %s: %s", session_dir, e)
+            continue
+        out.append((session_dir, meta))
+    return out
+
+
 def _recover_one_session(session_dir: Path, meta: dict) -> bool:
-    """1セッション分の救済処理。成功なら True / 対象外なら False。"""
-    from src.storage.db import db
-
-    session_id = meta.get("session_id") or session_dir.name
-
-    # 既に DB に存在(=保存成功後に meta 削除に失敗しただけ)→ meta だけ消して終了
-    if db.has_minutes_for_session(session_id):
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception:
-            pass
-        return False
-
-    state = meta.get("state")
-    if state not in _RECOVERABLE_STATES:
-        # state="recording" (録音中に強制終了) などは復旧不能 = 残しても意味が無い。
-        # session_meta.json は削除して次回起動のスキャン対象から外す。
-        # session_dir 自体は WAV 等が残っている可能性があるので残す。
-        logger.info(
-            "[recovery] cleaning up unrecoverable session %s (state=%s)",
-            session_id, state,
-        )
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning("[recovery] failed to remove stale meta %s: %s",
-                           session_id, e)
-        return False
-
-    segments = _load_persisted_segments(session_id)
-    wav_path = _pick_recovery_wav(session_dir)
-
-    if not segments and wav_path is None:
-        logger.info("[recovery] skipping session %s (no transcript, no wav)", session_id)
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception:
-            pass
-        return False
-
-    transcript: list[dict] = segments
-    if segments and wav_path is not None:
-        try:
-            transcript = speaker_memory.rediarize_segments(
-                segments,
-                wav_path=str(wav_path),
-                session_id=session_id,
-            )
-        except Exception as e:
-            logger.warning("[recovery] rediarize failed for %s, using raw segments: %s", session_id, e)
-            transcript = segments
-
-    duration_sec = _wav_duration_sec(wav_path) if wav_path else 0
-
-    started_at = meta.get("started_at") or datetime.now(timezone.utc).isoformat()
-    try:
-        date_str = started_at[:10]
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except Exception:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-
-    hhmm = "??:??"
-    if len(session_id) >= 13 and session_id[8] == "_":
-        hhmm = f"{session_id[9:11]}:{session_id[11:13]}"
-    title = f"[復元] {hhmm} の会議"
-    minutes_id = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc).isoformat()
-
-    db.insert_minutes({
-        "id": minutes_id,
-        "session_id": session_id,
-        "project_id": meta.get("project_id") or "default",
-        "title": title,
-        "date": date_str,
-        "started_at": started_at,
-        "duration_sec": int(duration_sec),
-        "transcript": transcript,
-        "summary": "",
-        "whisper_model": config.get("whisper", "model", default="medium"),
-        "llm_model": "",
-        "created_at": now,
-        "updated_at": now,
-    })
-    try:
-        (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-    except Exception:
-        pass
-    logger.info(
-        "[recovery] recovered: %s (%d segments, wav=%s, prior_state=%s)",
-        session_id, len(transcript), wav_path.name if wav_path else None, state,
-    )
-
-    # 復元した議事録にも自動要約をかける (auto_generate=true 時)
-    if transcript and bool(config.get("minutes_ai", "auto_generate", default=True)):
-        try:
-            from src.summarize.runner import get_runner
-
-            get_runner().enqueue(minutes_id)
-            logger.info("[recovery] auto-summary enqueued for recovered: %s", minutes_id)
-        except Exception as e:
-            logger.warning(
-                "[recovery] failed to enqueue auto-summary for %s: %s", minutes_id, e,
-            )
-    return True
+    """同期版互換 API。実体は async 実装を利用する。"""
+    return _run_recovery_coro_sync(_recover_one_session_async(session_dir, meta))
 
 
 async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
@@ -1278,36 +1204,8 @@ async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
 
 
 def recover_pending_sessions() -> int:
-    """起動時、finalize 中に落ちたセッションを DB に書き戻す。
-
-    対象: ~/.seam/sessions/<id>/session_meta.json が state in {stopping, transcribing,
-    rediarizing, saving} かつ DB に対応 minutes 行が無いもの。
-    録音中(state=recording)で落ちたセッションは対象外。
-    """
-    if not SESSIONS_DIR.exists():
-        return 0
-
-    recovered = 0
-    for session_dir in sorted(SESSIONS_DIR.iterdir()):
-        if not session_dir.is_dir():
-            continue
-        meta_path = session_dir / SESSION_META_FILENAME
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning("[recovery] failed to read meta %s: %s", session_dir, e)
-            continue
-        try:
-            if _recover_one_session(session_dir, meta):
-                recovered += 1
-        except Exception as e:
-            logger.error("[recovery] failed for %s: %s", session_dir.name, e)
-
-    if recovered:
-        logger.info("[recovery] recovered %d pending session(s)", recovered)
-    return recovered
+    """同期版互換 API。実体は async 実装を利用する。"""
+    return _run_recovery_coro_sync(recover_pending_sessions_async())
 
 
 async def recover_pending_sessions_async() -> int:
@@ -1315,21 +1213,8 @@ async def recover_pending_sessions_async() -> int:
 
     DB 書き込みはメインスレッドで行い、重い再話者分離だけ thread offload する。
     """
-    if not SESSIONS_DIR.exists():
-        return 0
-
     recovered = 0
-    for session_dir in sorted(SESSIONS_DIR.iterdir()):
-        if not session_dir.is_dir():
-            continue
-        meta_path = session_dir / SESSION_META_FILENAME
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning("[recovery] failed to read meta %s: %s", session_dir, e)
-            continue
+    for session_dir, meta in _iter_pending_recovery_metas():
         try:
             if await _recover_one_session_async(session_dir, meta):
                 recovered += 1

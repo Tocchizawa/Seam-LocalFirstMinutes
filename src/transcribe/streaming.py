@@ -369,6 +369,45 @@ def build_initial_prompt(glossary: list[str], recent_text: str = "") -> str:
     return glossary_str
 
 
+def estimate_chunker_pending_sec(chunker: object, sample_rate: int = SAMPLE_RATE) -> float:
+    """chunker 内に未確定で保持されている末尾 audio 秒数を返す。"""
+    pending = 0.0
+    frames_ms = getattr(chunker, "_frames_ms", None)
+    if frames_ms is not None:
+        try:
+            pending += max(0.0, float(frames_ms) / 1000.0)
+        except Exception:
+            pass
+    stream_buf = getattr(chunker, "_stream_buffer", None)
+    if stream_buf is not None:
+        try:
+            pending += max(0.0, len(stream_buf) / sample_rate)
+        except Exception:
+            pass
+    pending_emit = getattr(chunker, "_pending_emit", None)
+    if pending_emit is not None:
+        try:
+            pending += sum(
+                max(0.0, len(ch) / sample_rate) for ch in pending_emit if ch is not None
+            )
+        except Exception:
+            pass
+    return pending
+
+
+def compute_chunk_start_offset(
+    total_audio_sec: float,
+    chunk_samples: int,
+    chunker: object,
+    sample_rate: int = SAMPLE_RATE,
+) -> float:
+    """feed 済み総時間と chunker の保留分から、確定 chunk の開始時刻を計算する。"""
+    chunk_dur = chunk_samples / sample_rate
+    pending_after_emit = estimate_chunker_pending_sec(chunker, sample_rate=sample_rate)
+    chunk_end = max(0.0, total_audio_sec - pending_after_emit)
+    return max(0.0, chunk_end - chunk_dur)
+
+
 class VADChunker:
     """エネルギーベースの VAD でチャンクを切り出す。"""
 
@@ -1024,34 +1063,7 @@ class StreamingTranscriber:
                 return
 
     def _chunker_pending_sec(self) -> float:
-        """chunker 内に未確定で保持されている末尾 audio 秒数を返す。
-
-        - `_frames_ms`: VAD 窓として確定済みの保持分
-        - `_stream_buffer`: Silero の 512sample 未満の端数
-        - `_pending_emit`: 既に確定済みだが未取り出しの chunk
-        """
-        pending = 0.0
-        frames_ms = getattr(self._chunker, "_frames_ms", None)
-        if frames_ms is not None:
-            try:
-                pending += max(0.0, float(frames_ms) / 1000.0)
-            except Exception:
-                pass
-        stream_buf = getattr(self._chunker, "_stream_buffer", None)
-        if stream_buf is not None:
-            try:
-                pending += max(0.0, len(stream_buf) / SAMPLE_RATE)
-            except Exception:
-                pass
-        pending_emit = getattr(self._chunker, "_pending_emit", None)
-        if pending_emit is not None:
-            try:
-                pending += sum(
-                    max(0.0, len(ch) / SAMPLE_RATE) for ch in pending_emit if ch is not None
-                )
-            except Exception:
-                pass
-        return pending
+        return estimate_chunker_pending_sec(self._chunker, sample_rate=SAMPLE_RATE)
 
     def _enqueue(self, chunk: np.ndarray) -> None:
         chunk_dur = len(chunk) / SAMPLE_RATE
