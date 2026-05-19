@@ -442,6 +442,7 @@ async def _stream_levels() -> None:
     started_at = _time.monotonic()
     mic_seen_audio = False
     mic_silent_warned = False
+    mic_failure_handled = False
     MIC_SILENT_WARN_SEC = 15.0   # 15秒以上 level がほぼ0なら警告
     MIC_AUDIO_THRESHOLD = 0.005  # この値を超えたら有効音声と判定
     while recorder.is_recording:
@@ -533,6 +534,21 @@ async def _stream_levels() -> None:
         # watchdog: 5秒に1回ワーカースレッドの生死確認 + 死んでたら streamer 再起動
         if (now - last_watchdog) >= 5.0 and sid:
             try:
+                if (
+                    not mic_failure_handled
+                    and recorder.error
+                    and not recorder.mic_stream_alive
+                ):
+                    mic_failure_handled = True
+                    msg = str(recorder.error)
+                    logger.error("[watchdog] mic stream dead for %s: %s", sid, msg)
+                    _set_state(sid, state="error", message=msg, error=msg)
+                    await ws_manager.broadcast({
+                        "type": "pipeline_error",
+                        "data": {"session_id": sid, "message": msg},
+                    })
+                    await _broadcast_pipeline(sid)
+
                 streamer = _streamers.get(sid)
                 mixer = _mixers.get(sid)
                 if mixer is not None and not mixer.consumer_alive:

@@ -120,10 +120,174 @@ class Recorder:
         return self._error
 
     @property
+    def mic_stream_alive(self) -> bool:
+        t = self._mic_thread
+        return bool(t and t.is_alive())
+
+    @property
     def elapsed_sec(self) -> float:
         if not self._recording:
             return 0
         return time.monotonic() - self._start_time
+
+    def _default_input_device_index(self) -> int | None:
+        try:
+            dev = sd.default.device
+        except Exception:
+            return None
+        candidate = None
+        if isinstance(dev, (list, tuple)):
+            candidate = dev[0] if len(dev) >= 1 else None
+        else:
+            candidate = dev
+        if candidate is None:
+            return None
+        try:
+            idx = int(candidate)
+        except Exception:
+            return None
+        return idx if idx >= 0 else None
+
+    def _build_mic_start_error_message(
+        self,
+        raw_error: str,
+        requested_device: int | None,
+        default_device: int | None,
+        fallback_attempted: bool,
+    ) -> str:
+        kind = "マイク入力を開始できませんでした"
+        if "PaErrorCode -9986" in raw_error:
+            kind = "PortAudio内部エラー(-9986)でマイク入力を開始できませんでした"
+        elif "PaErrorCode -9996" in raw_error:
+            kind = "選択したマイクデバイスが無効です (PaErrorCode -9996)"
+        elif "PaErrorCode -9998" in raw_error:
+            kind = "選択したマイクのチャンネル設定が不正です (PaErrorCode -9998)"
+        elif "PaErrorCode -9997" in raw_error:
+            kind = "選択したマイクのサンプルレート設定が不正です (PaErrorCode -9997)"
+
+        requested = (
+            f"選択デバイスID={requested_device}"
+            if requested_device is not None
+            else "選択デバイス=default"
+        )
+        default_hint = (
+            f"既定入力デバイスID={default_device}"
+            if default_device is not None
+            else "既定入力デバイスなし"
+        )
+        fallback_hint = " / 既定入力デバイスへのフォールバックも失敗"
+        if not fallback_attempted:
+            fallback_hint = ""
+        return (
+            f"{kind}。"
+            "macOSのマイク権限・入力デバイス接続・他アプリ占有・デバイス設定を確認して再試行してください。"
+            f" ({requested} / {default_hint}{fallback_hint})"
+            f" 元エラー: {raw_error}"
+        )
+
+    def _probe_input_stream(self, device_idx: int) -> None:
+        dev_info = sd.query_devices(device_idx)
+        max_in_ch = int(dev_info.get("max_input_channels") or 0)
+        if max_in_ch <= 0:
+            raise RuntimeError(f"入力チャンネルがありません (device={device_idx})")
+
+        native_rate = int(dev_info["default_samplerate"])
+        recording_cfg = config.get("recording", default={}) or {}
+        preferred_rate_raw = recording_cfg.get("sample_rate", SAMPLE_RATE)
+        try:
+            preferred_rate = int(preferred_rate_raw)
+        except Exception:
+            preferred_rate = SAMPLE_RATE
+        preferred_rate = max(8000, min(48000, preferred_rate))
+
+        old_device = self._mic_device
+        self._mic_device = device_idx
+        try:
+            capture_rate = self._pick_input_sample_rate(preferred_rate, native_rate, max_in_ch)
+            channels = self._pick_input_channels(capture_rate, max_in_ch)
+        finally:
+            self._mic_device = old_device
+
+        stream_cfg = config.get("recording", "mic_stream", default={}) or {}
+        latency = str(stream_cfg.get("latency", "high")).lower()
+        if latency not in {"high", "low"}:
+            latency = "high"
+        block_ms = max(40, int(stream_cfg.get("block_ms", 100)))
+        block_size = int(capture_rate * block_ms / 1000)
+
+        stream = sd.InputStream(
+            device=device_idx,
+            samplerate=capture_rate,
+            channels=channels,
+            dtype="int16",
+            blocksize=block_size,
+            latency=latency,
+        )
+        try:
+            stream.start()
+        finally:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            stream.close()
+
+    def _prepare_mic_device_for_start(self, requested_device: int | None) -> int:
+        default_device = self._default_input_device_index()
+        candidates: list[int] = []
+        if requested_device is not None:
+            candidates.append(int(requested_device))
+        elif default_device is not None:
+            candidates.append(default_device)
+
+        fallback_attempted = False
+        if (
+            requested_device is not None
+            and default_device is not None
+            and default_device != int(requested_device)
+        ):
+            candidates.append(default_device)
+            fallback_attempted = True
+
+        if not candidates:
+            raise RuntimeError(
+                self._build_mic_start_error_message(
+                    "入力デバイスが見つかりません",
+                    requested_device,
+                    default_device,
+                    fallback_attempted=False,
+                )
+            )
+
+        last_error: Exception | None = None
+        chosen: int | None = None
+        for idx, device_idx in enumerate(candidates):
+            try:
+                self._probe_input_stream(device_idx)
+                chosen = device_idx
+                if idx > 0:
+                    logger.warning(
+                        "Mic preflight fallback succeeded: requested=%s -> default=%s",
+                        requested_device,
+                        device_idx,
+                    )
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("Mic preflight failed (device=%s): %s", device_idx, e)
+                continue
+
+        if chosen is None:
+            raw = str(last_error) if last_error else "unknown"
+            raise RuntimeError(
+                self._build_mic_start_error_message(
+                    raw,
+                    requested_device,
+                    default_device,
+                    fallback_attempted=fallback_attempted,
+                )
+            )
+        return chosen
 
     def start(
         self,
@@ -137,7 +301,7 @@ class Recorder:
         if self._recording:
             raise RuntimeError("Already recording")
 
-        self._mic_device = mic_device
+        self._mic_device = self._prepare_mic_device_for_start(mic_device)
         self._level_callback = level_callback
         self._pcm_callback = pcm_callback
         self._system_pcm_callback = system_pcm_callback
@@ -192,11 +356,11 @@ class Recorder:
                 self._sys_capture = None
 
         logger.info("Recording started (mic=%s, system=%s, session=%s)",
-                     mic_device, has_system, self._session_id)
+                     self._mic_device, has_system, self._session_id)
 
         return {
             "session_id": self._session_id,
-            "mic_device": mic_device,
+            "mic_device": self._mic_device,
             "has_system_audio": has_system,
             "system_error": sys_error,
         }
@@ -625,7 +789,9 @@ class Recorder:
             "elapsed_sec": round(self.elapsed_sec, 1) if self._recording else 0,
             "mic_overflow_total": self._mic_overflow_total,
             "mic_reopen_total": self._mic_reopen_total,
+            "mic_stream_alive": self.mic_stream_alive,
             "mic_muted": self._mic_muted,
+            "error": self._error,
             "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)
             if self._system_first_pcm_delay_sec is not None else None,
         }
