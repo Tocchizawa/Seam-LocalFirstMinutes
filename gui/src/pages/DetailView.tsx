@@ -11,7 +11,7 @@ import {
   audioPlayUrl, exportMinutes, getMinutesMarkdown, deleteMinutes,
   getPipelineStatus, getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle, WS_URL,
   triggerSummarize, getSummarizeStatus, cancelSummarize, getPipelineBySession,
-  updateMinutesSummary, getSessionSegments, getSessionAudioInfo,
+  updateMinutesSummary, getSessionSegments, getSessionAudioInfo, recoverSessionMinutes,
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
 } from "../lib/api";
 import { Spinner } from "../components/Spinner";
@@ -614,7 +614,7 @@ export function DetailView(props: Props) {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | null>(null);
+  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | "recover" | null>(null);
 
   /* title edit */
   const [editingTitle, setEditingTitle] = useState(false);
@@ -799,7 +799,35 @@ export function DetailView(props: Props) {
     }
   };
 
-  const canAct = !isLive && !!minutesId;
+  const handleRecoverSession = async (startRetranscribe: boolean) => {
+    if (!sessionId || busy) return;
+    setBusy("recover");
+    try {
+      const res = await recoverSessionMinutes(sessionId, startRetranscribe);
+      setCurrentMinutes(res.minutes);
+      window.dispatchEvent(new CustomEvent("minutes-updated"));
+      if (startRetranscribe) {
+        const retryState = String(res.retranscribe?.status || "");
+        if (retryState === "started") {
+          showToast({ kind: "ok", text: "救済保存して再文字起こしを開始しました" });
+        } else if (retryState === "skipped") {
+          showToast({ kind: "info", text: "救済保存しました（音声がないため再文字起こしはスキップ）" });
+        } else {
+          showToast({ kind: "ok", text: "救済保存しました" });
+        }
+      } else {
+        showToast({ kind: "ok", text: "救済保存しました" });
+      }
+    } catch (e) {
+      showToast({ kind: "err", text: `救済保存に失敗: ${e instanceof Error ? e.message : "不明なエラー"}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const canAct = !!minutesId;
+  const canRecoverSession = isLive && !minutesId && !!sessionId
+    && (stateLive === "error" || stateLive === "done");
   const isRetranscribing = !!retryStatus && retryStatus.state !== "error";
   const retryStopPending = busy === "retry_cancel" || retryStatus?.state === "stopping";
   const isSearching = findQuery.trim().length > 0;
@@ -963,8 +991,34 @@ export function DetailView(props: Props) {
           </div>
         </div>
       )}
-      {liveError && (
-        <p className="px-4 py-2 text-[11px] text-(--danger) border-b border-(--border)">{liveError}</p>
+      {(liveError || canRecoverSession) && (
+        <div className="px-4 py-2 border-b border-(--border) flex items-center gap-2">
+          {liveError && (
+            <p className="text-[11px] text-(--danger) flex-1 min-w-0 truncate">{liveError}</p>
+          )}
+          {canRecoverSession && (
+            <div className="flex items-center gap-1 shrink-0">
+              <ActionBtn
+                onClick={() => handleRecoverSession(false)}
+                loading={busy === "recover"}
+                disabled={busy === "recover"}
+                title="既存の文字起こしを議事録として保存"
+                label="救済保存"
+              >
+                <DownloadSimple size={13} weight="regular" />
+              </ActionBtn>
+              <ActionBtn
+                onClick={() => handleRecoverSession(true)}
+                loading={busy === "recover"}
+                disabled={busy === "recover"}
+                title="救済保存して再文字起こしを開始"
+                label="救済して再実行"
+              >
+                <ArrowsClockwise size={13} weight="regular" />
+              </ActionBtn>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Retranscribe status banner (非-live のみ) */}

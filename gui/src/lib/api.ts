@@ -283,6 +283,25 @@ export const getSessionAudioInfo = (sessionId: string) =>
     `/api/recording/sessions/${encodeURIComponent(sessionId)}/audio_info`,
   );
 
+export interface RecoverSessionResponse {
+  status: string;
+  created: boolean;
+  used_audio: boolean;
+  used_segments: boolean;
+  minutes: Minutes;
+  retranscribe?: {
+    status: string;
+    reason?: string;
+    session_id?: string;
+  };
+}
+
+export const recoverSessionMinutes = (sessionId: string, startRetranscribe = false) =>
+  request<RecoverSessionResponse>(
+    `/api/recording/sessions/${encodeURIComponent(sessionId)}/recover?start_retranscribe=${startRetranscribe ? "true" : "false"}`,
+    { method: "POST" },
+  );
+
 export interface PipelineStatus {
   session_id?: string;
   project_id?: string;
