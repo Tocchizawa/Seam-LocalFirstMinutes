@@ -1,6 +1,7 @@
 from __future__ import annotations
 # ruff: noqa: E402
 
+import asyncio
 import logging
 import os
 import signal
@@ -27,6 +28,7 @@ from src.security import (
 from src.startup_progress import emit as emit_progress
 
 logger = logging.getLogger(__name__)
+_startup_background_tasks: set[asyncio.Task] = set()
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -230,14 +232,26 @@ async def _recover_summary_drafts() -> None:
 
 @app.on_event("startup")
 async def _recover_pending_sessions() -> None:
-    """録音停止後の文字起こし / 保存途中で落ちたセッションを救済。"""
-    emit_progress("recovery", "未完了の録音セッションを確認中", 0.90)
-    try:
-        from src.api.recording import recover_pending_sessions
+    """録音停止後の文字起こし / 保存途中で落ちたセッションを救済。
 
-        recover_pending_sessions()
-    except Exception as e:
-        logger.warning("session recovery failed: %s", e)
+    NOTE:
+    セッション復旧は長時間化しうる(長尺音声の再話者分離など)ため、
+    起動シーケンスをブロックしないようバックグラウンドで実行する。
+    """
+    emit_progress("recovery", "未完了の録音セッションを確認中", 0.90)
+    from src.api.recording import recover_pending_sessions_async
+
+    async def _run() -> None:
+        try:
+            recovered = await recover_pending_sessions_async()
+            if recovered:
+                logger.info("startup background recovery completed: %d", recovered)
+        except Exception as e:
+            logger.warning("session recovery failed: %s", e)
+
+    task = asyncio.create_task(_run(), name="startup-session-recovery")
+    _startup_background_tasks.add(task)
+    task.add_done_callback(_startup_background_tasks.discard)
 
 
 @app.on_event("startup")

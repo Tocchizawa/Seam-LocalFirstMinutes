@@ -129,6 +129,16 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def get_minutes_by_session(self, session_id: str) -> dict | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM minutes WHERE session_id = ? LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
     # 一覧表示で必要な列のみ。transcript / transcript_text / context_snapshot は重いので除外。
     # summary は preview 表示のため先頭 240 字だけに切り出す (markdown summary は長くなりがち)。
     _LIST_COLUMNS: tuple[str, ...] = (

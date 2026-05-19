@@ -256,7 +256,7 @@ export const getLastRecording = () =>
   request<RecordingResult>("/api/recording/last");
 
 export const audioPlayUrl = (sessionId: string) =>
-  `${BASE_URL}/api/recording/play/${sessionId}`;
+  `${BASE_URL}/api/recording/play/${encodeURIComponent(sessionId)}?v=wav-playback-1`;
 
 // Pipeline
 export interface TranscriptSegment {
@@ -281,6 +281,25 @@ export interface SessionAudioInfo {
 export const getSessionAudioInfo = (sessionId: string) =>
   request<SessionAudioInfo>(
     `/api/recording/sessions/${encodeURIComponent(sessionId)}/audio_info`,
+  );
+
+export interface RecoverSessionResponse {
+  status: string;
+  created: boolean;
+  used_audio: boolean;
+  used_segments: boolean;
+  minutes: Minutes;
+  retranscribe?: {
+    status: string;
+    reason?: string;
+    session_id?: string;
+  };
+}
+
+export const recoverSessionMinutes = (sessionId: string, startRetranscribe = false) =>
+  request<RecoverSessionResponse>(
+    `/api/recording/sessions/${encodeURIComponent(sessionId)}/recover?start_retranscribe=${startRetranscribe ? "true" : "false"}`,
+    { method: "POST" },
   );
 
 export interface PipelineStatus {

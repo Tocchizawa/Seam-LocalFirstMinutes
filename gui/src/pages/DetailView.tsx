@@ -11,7 +11,7 @@ import {
   audioPlayUrl, exportMinutes, getMinutesMarkdown, deleteMinutes,
   getPipelineStatus, getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle, WS_URL,
   triggerSummarize, getSummarizeStatus, cancelSummarize, getPipelineBySession,
-  updateMinutesSummary, getSessionSegments, getSessionAudioInfo,
+  updateMinutesSummary, getSessionSegments, getSessionAudioInfo, recoverSessionMinutes,
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
 } from "../lib/api";
 import { Spinner } from "../components/Spinner";
@@ -434,11 +434,16 @@ export function DetailView(props: Props) {
   const [playing, setPlaying] = useState(false);
   const [ct, setCt] = useState(0);
   const [rate, setRate] = useState(1.0);
+  const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [audioInfo, setAudioInfo] = useState<{ name: string; size_bytes: number } | null>(null);
+  const playbackDuration = (mediaDuration && Number.isFinite(mediaDuration) && mediaDuration > 0)
+    ? mediaDuration
+    : duration;
 
   useEffect(() => {
     if (!sessionId) {
       setAudioInfo(null);
+      setMediaDuration(null);
       return;
     }
     let cancelled = false;
@@ -465,6 +470,7 @@ export function DetailView(props: Props) {
       }
       setPlaying(false);
       setCt(0);
+      setMediaDuration(null);
     };
   }, [sessionId]);
 
@@ -608,7 +614,7 @@ export function DetailView(props: Props) {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | null>(null);
+  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | "recover" | null>(null);
 
   /* title edit */
   const [editingTitle, setEditingTitle] = useState(false);
@@ -657,10 +663,22 @@ export function DetailView(props: Props) {
 
   const aud = () => {
     if (!audioRef.current) {
-      audioRef.current = new Audio(audioPlayUrl(sessionId));
-      audioRef.current.onended = () => setPlaying(false);
-      audioRef.current.ontimeupdate = () => setCt(audioRef.current?.currentTime || 0);
-      try { audioRef.current.playbackRate = rate; } catch { /* noop */ }
+      const a = new Audio(audioPlayUrl(sessionId));
+      const syncDuration = () => {
+        const d = a.duration;
+        if (Number.isFinite(d) && d > 0) setMediaDuration(d);
+      };
+      a.onloadedmetadata = syncDuration;
+      a.ondurationchange = syncDuration;
+      a.onended = () => {
+        const d = a.duration;
+        const end = Number.isFinite(d) && d > 0 ? d : (a.currentTime || 0);
+        setCt(end);
+        setPlaying(false);
+      };
+      a.ontimeupdate = () => setCt(a.currentTime || 0);
+      try { a.playbackRate = rate; } catch { /* noop */ }
+      audioRef.current = a;
     }
     return audioRef.current;
   };
@@ -781,7 +799,35 @@ export function DetailView(props: Props) {
     }
   };
 
-  const canAct = !isLive && !!minutesId;
+  const handleRecoverSession = async (startRetranscribe: boolean) => {
+    if (!sessionId || busy) return;
+    setBusy("recover");
+    try {
+      const res = await recoverSessionMinutes(sessionId, startRetranscribe);
+      setCurrentMinutes(res.minutes);
+      window.dispatchEvent(new CustomEvent("minutes-updated"));
+      if (startRetranscribe) {
+        const retryState = String(res.retranscribe?.status || "");
+        if (retryState === "started") {
+          showToast({ kind: "ok", text: "救済保存して再文字起こしを開始しました" });
+        } else if (retryState === "skipped") {
+          showToast({ kind: "info", text: "救済保存しました（音声がないため再文字起こしはスキップ）" });
+        } else {
+          showToast({ kind: "ok", text: "救済保存しました" });
+        }
+      } else {
+        showToast({ kind: "ok", text: "救済保存しました" });
+      }
+    } catch (e) {
+      showToast({ kind: "err", text: `救済保存に失敗: ${e instanceof Error ? e.message : "不明なエラー"}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const canAct = !!minutesId;
+  const canRecoverSession = isLive && !minutesId && !!sessionId
+    && (stateLive === "error" || stateLive === "done");
   const isRetranscribing = !!retryStatus && retryStatus.state !== "error";
   const retryStopPending = busy === "retry_cancel" || retryStatus?.state === "stopping";
   const isSearching = findQuery.trim().length > 0;
@@ -798,7 +844,7 @@ export function DetailView(props: Props) {
     ],
   ];
 
-  const progress = duration > 0 ? (ct / duration) * 100 : 0;
+  const progress = playbackDuration > 0 ? (ct / playbackDuration) * 100 : 0;
 
   return (
     <div className="anim-fade-in flex flex-col h-full overflow-hidden">
@@ -945,8 +991,34 @@ export function DetailView(props: Props) {
           </div>
         </div>
       )}
-      {liveError && (
-        <p className="px-4 py-2 text-[11px] text-(--danger) border-b border-(--border)">{liveError}</p>
+      {(liveError || canRecoverSession) && (
+        <div className="px-4 py-2 border-b border-(--border) flex items-center gap-2">
+          {liveError && (
+            <p className="text-[11px] text-(--danger) flex-1 min-w-0 truncate">{liveError}</p>
+          )}
+          {canRecoverSession && (
+            <div className="flex items-center gap-1 shrink-0">
+              <ActionBtn
+                onClick={() => handleRecoverSession(false)}
+                loading={busy === "recover"}
+                disabled={busy === "recover"}
+                title="既存の文字起こしを議事録として保存"
+                label="救済保存"
+              >
+                <DownloadSimple size={13} weight="regular" />
+              </ActionBtn>
+              <ActionBtn
+                onClick={() => handleRecoverSession(true)}
+                loading={busy === "recover"}
+                disabled={busy === "recover"}
+                title="救済保存して再文字起こしを開始"
+                label="救済して再実行"
+              >
+                <ArrowsClockwise size={13} weight="regular" />
+              </ActionBtn>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Retranscribe status banner (非-live のみ) */}
@@ -1010,7 +1082,7 @@ export function DetailView(props: Props) {
       )}
 
       {/* Player */}
-      {sessionId && duration > 0 && (
+      {sessionId && playbackDuration > 0 && (
         <div className="relative border-b border-(--border) bg-(--surface)">
           <div className="px-4 pt-3 pb-1">
             <Waveform level={playing ? 0.5 : 0.1} alive={playing} height={64} />
@@ -1028,7 +1100,7 @@ export function DetailView(props: Props) {
           <div className="absolute inset-0 cursor-pointer"
             onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
-              seek(((e.clientX - r.left) / r.width) * duration);
+              seek(((e.clientX - r.left) / r.width) * playbackDuration);
             }} />
 
           <div className="relative flex items-center justify-between px-4 pb-2 gap-3">
@@ -1042,7 +1114,7 @@ export function DetailView(props: Props) {
               {playing ? <Pause size={12} weight="fill" /> : <Play size={12} weight="fill" />}
             </button>
             <div className="flex items-center gap-2 shrink-0">
-              <div className="num text-[11px] text-(--t3)">{fmt(duration)}</div>
+              <div className="num text-[11px] text-(--t3)">{fmt(playbackDuration)}</div>
               {audioInfo && (
                 <span
                   className="num text-[11px] text-(--t3) tabular-nums"

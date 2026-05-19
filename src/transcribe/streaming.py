@@ -369,6 +369,45 @@ def build_initial_prompt(glossary: list[str], recent_text: str = "") -> str:
     return glossary_str
 
 
+def estimate_chunker_pending_sec(chunker: object, sample_rate: int = SAMPLE_RATE) -> float:
+    """chunker 内に未確定で保持されている末尾 audio 秒数を返す。"""
+    pending = 0.0
+    frames_ms = getattr(chunker, "_frames_ms", None)
+    if frames_ms is not None:
+        try:
+            pending += max(0.0, float(frames_ms) / 1000.0)
+        except Exception:
+            pass
+    stream_buf = getattr(chunker, "_stream_buffer", None)
+    if stream_buf is not None:
+        try:
+            pending += max(0.0, len(stream_buf) / sample_rate)
+        except Exception:
+            pass
+    pending_emit = getattr(chunker, "_pending_emit", None)
+    if pending_emit is not None:
+        try:
+            pending += sum(
+                max(0.0, len(ch) / sample_rate) for ch in pending_emit if ch is not None
+            )
+        except Exception:
+            pass
+    return pending
+
+
+def compute_chunk_start_offset(
+    total_audio_sec: float,
+    chunk_samples: int,
+    chunker: object,
+    sample_rate: int = SAMPLE_RATE,
+) -> float:
+    """feed 済み総時間と chunker の保留分から、確定 chunk の開始時刻を計算する。"""
+    chunk_dur = chunk_samples / sample_rate
+    pending_after_emit = estimate_chunker_pending_sec(chunker, sample_rate=sample_rate)
+    chunk_end = max(0.0, total_audio_sec - pending_after_emit)
+    return max(0.0, chunk_end - chunk_dur)
+
+
 class VADChunker:
     """エネルギーベースの VAD でチャンクを切り出す。"""
 
@@ -904,15 +943,20 @@ class StreamingTranscriber:
         self._last_feed_at = time.monotonic()
         self._total_audio_sec += len(samples_f32) / SAMPLE_RATE
         chunk = self._chunker.feed(samples_f32)
-        if chunk is not None:
+        while chunk is not None:
             self._enqueue(chunk)
+            # SileroVADChunker は 1 feed で複数 chunk が確定し得るため、
+            # 空 feed で pending emit を取り切る。
+            chunk = self._chunker.feed(np.zeros(0, dtype=np.float32))
 
     def flush(self) -> list[dict]:
         """残バッファを処理してワーカー終了を待つ。全 segment を返す。"""
         if not self._running:
             return self.segments
-        chunk = self._chunker.flush()
-        if chunk is not None:
+        while True:
+            chunk = self._chunker.flush()
+            if chunk is None:
+                break
             self._enqueue(chunk)
         # ワーカー終了シグナル
         self._running = False
@@ -1018,9 +1062,17 @@ class StreamingTranscriber:
             except queue.Empty:
                 return
 
+    def _chunker_pending_sec(self) -> float:
+        return estimate_chunker_pending_sec(self._chunker, sample_rate=SAMPLE_RATE)
+
     def _enqueue(self, chunk: np.ndarray) -> None:
         chunk_dur = len(chunk) / SAMPLE_RATE
-        chunk_start = max(0.0, self._total_audio_sec - chunk_dur)
+        # 全 feed 済み audio から、chunker が保持している未確定末尾分を引くと、
+        # 「今回確定した chunk の終了時刻」が得られる。そこから dur を引いて先頭時刻化。
+        # これで smart-cut の tail 保持時も、無音ドロップ時も絶対時刻を維持できる。
+        pending_after_emit = self._chunker_pending_sec()
+        chunk_end = max(0.0, self._total_audio_sec - pending_after_emit)
+        chunk_start = max(0.0, chunk_end - chunk_dur)
         # backlog が溜まり過ぎるとメモリ逼迫で全体停止しやすいので古い chunk を破棄する。
         while self.pending_audio_sec >= self._max_pending_audio_sec:
             if not self._drop_oldest_chunk("pending limit"):

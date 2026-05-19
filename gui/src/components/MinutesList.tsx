@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import {
   MagnifyingGlass, X, DownloadSimple, Trash, Spinner as PhSpinner,
-  WarningCircle, FolderOpen,
+  WarningCircle, FolderOpen, ArrowSquareOut,
 } from "@phosphor-icons/react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { showToast } from "../lib/toast";
@@ -531,6 +531,13 @@ function ProcessingRow({
 
       {isError && (
         <div className="flat-row-actions flex items-center gap-0.5">
+          <button
+            onClick={(e) => { e.stopPropagation(); onOpen(); }}
+            className="icon-btn !w-7 !h-7"
+            title="詳細を開く"
+          >
+            <ArrowSquareOut size={11} weight="regular" />
+          </button>
           <button onClick={(e) => { e.stopPropagation(); onDismiss(); }}
             className="icon-btn !w-7 !h-7"
             title="リストから消す">

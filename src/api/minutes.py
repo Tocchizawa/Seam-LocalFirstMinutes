@@ -420,10 +420,12 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                     raise RetranscribeCancelledError("ユーザーにより停止されました")
 
             import mlx_whisper
+            import numpy as np
             from src.transcribe.hallucination_filter import HallucinationFilter
             from src.transcribe.streaming import (
                 _resolve_repo, get_or_load_model, VADChunker, SileroVADChunker,
                 SAMPLE_RATE, build_initial_prompt, PROMPT_RECENT_CHARS,
+                compute_chunk_start_offset,
             )
 
             model_name = config.get("whisper", "model", default="medium")
@@ -500,22 +502,33 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
 
             jobs: list[tuple] = []  # (chunk_audio, start_offset_sec)
             elapsed = 0.0
-            for i in range(0, max(0, len(audio) - BLOCK + 1), BLOCK):
+
+            def _append_job(chunk_audio: object) -> None:
+                start = compute_chunk_start_offset(
+                    total_audio_sec=elapsed,
+                    chunk_samples=len(chunk_audio),
+                    chunker=chunker,
+                    sample_rate=SAMPLE_RATE,
+                )
+                jobs.append((chunk_audio, start))
+
+            for i in range(0, len(audio), BLOCK):
                 _assert_not_cancelled_sync()
                 block = audio[i:i + BLOCK]
                 if len(block) == 0:
                     break
                 elapsed += len(block) / SAMPLE_RATE
                 ch = chunker.feed(block)
-                if ch is not None:
-                    dur = len(ch) / SAMPLE_RATE
-                    start = max(0.0, elapsed - dur)
-                    jobs.append((ch, start))
-            final = chunker.flush()
-            if final is not None:
-                dur = len(final) / SAMPLE_RATE
-                start = max(0.0, elapsed - dur)
-                jobs.append((final, start))
+                while ch is not None:
+                    _append_job(ch)
+                    # SileroVADChunker は 1 feed で複数 chunk を内部キューできるため、
+                    # 空 feed で pending を取り切る。
+                    ch = chunker.feed(np.zeros(0, dtype=np.float32))
+            while True:
+                final = chunker.flush()
+                if final is None:
+                    break
+                _append_job(final)
 
             segments: list[dict] = []
             filtered_count = 0
