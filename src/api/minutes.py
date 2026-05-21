@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import shutil
+import subprocess
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from src.api.errors import bad_request, conflict, not_found
 from src.project.manager import project_manager
-from src.security import is_safe_session_id
+from src.security import is_safe_session_id, resolve_existing_absolute_path
 from src.speakers import speaker_memory
 from src.storage.db import db
 from src.storage.export import export_to_dir, to_markdown
@@ -136,6 +140,224 @@ class SummaryUpdateRequest(BaseModel):
     summary: str = Field(max_length=200_000)
 
 
+class ImportAudioRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    source_path: str = Field(min_length=1)
+    title: str | None = Field(default=None, max_length=200)
+    start_retranscribe: bool | None = None
+
+
+_IMPORT_AUDIO_EXTS = {
+    ".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp3", ".mp4",
+    ".ogg", ".opus", ".wav", ".webm", ".mov",
+}
+
+
+def _new_import_session_id() -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"import_{stamp}_{uuid.uuid4().hex[:6]}"
+
+
+def _import_source_label(path: Path, audio_path: Path) -> str:
+    if path.is_dir():
+        return path.name
+    return audio_path.stem or audio_path.name
+
+
+def _parse_import_started_at(source_name: str) -> tuple[str, str]:
+    match = re.search(r"(\d{8})[_-]?(\d{6})", source_name)
+    if match:
+        raw = "".join(match.groups())
+        try:
+            # naive datetime はローカルタイムとして astimezone される。
+            local_dt = datetime.strptime(raw, "%Y%m%d%H%M%S").astimezone()
+            return local_dt.isoformat(), local_dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    now = datetime.now(timezone.utc)
+    return now.isoformat(), datetime.now().strftime("%Y-%m-%d")
+
+
+def _pick_import_audio_path(path: Path) -> Path:
+    if path.is_file():
+        if path.suffix.lower() not in _IMPORT_AUDIO_EXTS:
+            raise bad_request("UNSUPPORTED_AUDIO_FILE", "対応していない音声ファイル形式です")
+        return path
+
+    if not path.is_dir():
+        raise bad_request("IMPORT_PATH_INVALID", "音声ファイルまたはフォルダを選択してください")
+
+    preferred = (
+        "combined.flac", "combined.wav", "system.wav", "mic.wav",
+        "audio.flac", "audio.wav", "audio.m4a", "audio.mp3",
+    )
+    for name in preferred:
+        cand = path / name
+        if cand.exists() and cand.is_file() and cand.stat().st_size > 44:
+            return cand
+
+    for cand in sorted(path.iterdir()):
+        if cand.is_file() and cand.suffix.lower() in _IMPORT_AUDIO_EXTS and cand.stat().st_size > 44:
+            return cand
+    raise not_found("AUDIO_NOT_FOUND", "取り込み可能な音声ファイルが見つかりません")
+
+
+def _load_import_transcript(path: Path) -> list[dict]:
+    transcript_path = path / "transcript.jsonl" if path.is_dir() else None
+    if transcript_path is None or not transcript_path.exists():
+        return []
+
+    segments: list[dict] = []
+    try:
+        for line in transcript_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            if isinstance(item, dict) and item.get("text"):
+                segments.append(item)
+    except Exception as e:
+        logger.warning("failed to read import transcript %s: %s", transcript_path, e)
+        return []
+    return segments
+
+
+def _prepare_import_audio(source_audio: Path, session_dir: Path) -> Path:
+    from src.audio.recorder import FFMPEG
+
+    session_dir.mkdir(parents=True, exist_ok=False)
+    suffix = source_audio.suffix.lower()
+
+    if suffix in {".flac", ".wav"}:
+        dest = session_dir / f"combined{suffix}"
+        shutil.copy2(source_audio, dest)
+        if dest.stat().st_size <= 44:
+            raise bad_request("AUDIO_FILE_EMPTY", "音声ファイルが空です")
+        return dest
+
+    dest = session_dir / "combined.flac"
+    proc = subprocess.run(
+        [
+            FFMPEG, "-y",
+            "-loglevel", "error",
+            "-i", str(source_audio),
+            "-ar", "24000",
+            "-ac", "1",
+            "-c:a", "flac",
+            str(dest),
+        ],
+        capture_output=True,
+        timeout=900,
+    )
+    if proc.returncode != 0 or not dest.exists() or dest.stat().st_size <= 44:
+        detail = (proc.stderr or b"")[-500:].decode("utf-8", errors="replace")
+        raise bad_request("AUDIO_DECODE_FAILED", f"音声ファイルを読み込めませんでした: {detail}")
+    return dest
+
+
+def _enqueue_summary_if_empty(minutes_id: str) -> bool:
+    if not bool(config.get("minutes_ai", "auto_generate", default=True)):
+        return False
+    current = db.get_minutes(minutes_id)
+    if current is None or str(current.get("summary") or "").strip():
+        return False
+    from src.summarize.runner import get_runner
+
+    get_runner().enqueue(minutes_id)
+    return True
+
+
+@router.post("/import-audio")
+async def import_audio_minutes(body: ImportAudioRequest) -> dict:
+    project = project_manager.get(body.project_id)
+    if project is None:
+        raise not_found("PROJECT_NOT_FOUND", f"プロジェクト '{body.project_id}' が見つかりません")
+
+    try:
+        source_path = resolve_existing_absolute_path(body.source_path)
+    except Exception:
+        raise bad_request("IMPORT_PATH_INVALID", "存在する絶対パスを指定してください")
+
+    source_audio = _pick_import_audio_path(source_path)
+    source_label = _import_source_label(source_path, source_audio)
+    started_at, date_str = _parse_import_started_at(source_label)
+    requested_title = (body.title or "").strip()
+    title = requested_title or source_label or "取り込み音声"
+
+    session_id = _new_import_session_id()
+    session_dir = APP_DIR / "sessions" / session_id
+
+    try:
+        stored_audio = _prepare_import_audio(source_audio, session_dir)
+        initial_transcript = _load_import_transcript(source_path)
+
+        duration_sec = 0
+        try:
+            from src.api import recording as rec_mod
+            duration_sec = int(rec_mod._wav_duration_sec(stored_audio))
+        except Exception:
+            duration_sec = 0
+        if duration_sec <= 0 and initial_transcript:
+            try:
+                duration_sec = int(max(float(seg.get("end", 0.0)) for seg in initial_transcript))
+            except Exception:
+                duration_sec = 0
+
+        now = datetime.now(timezone.utc).isoformat()
+        minutes_id = uuid.uuid4().hex[:12]
+        db.insert_minutes({
+            "id": minutes_id,
+            "session_id": session_id,
+            "project_id": body.project_id,
+            "title": title,
+            "date": date_str,
+            "started_at": started_at,
+            "duration_sec": int(duration_sec),
+            "transcript": initial_transcript,
+            "summary": "",
+            "whisper_model": config.get("whisper", "model", default="medium"),
+            "llm_model": "",
+            "created_at": now,
+            "updated_at": now,
+        })
+    except Exception:
+        if session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
+        raise
+
+    minutes = db.get_minutes(minutes_id)
+    if minutes is None:
+        raise RuntimeError("minutes insert failed")
+
+    should_retranscribe = bool(body.start_retranscribe) or not bool(initial_transcript)
+    retranscribe = None
+    summary_enqueued = False
+    if should_retranscribe:
+        retranscribe = await _start_retranscribe_minutes(
+            minutes_id,
+            enqueue_summary_on_complete=True,
+        )
+    elif initial_transcript:
+        try:
+            summary_enqueued = _enqueue_summary_if_empty(minutes_id)
+            if summary_enqueued:
+                logger.info("[import] auto-summary enqueued: %s", minutes_id)
+        except Exception as e:
+            logger.warning("[import] failed to enqueue auto-summary for %s: %s", minutes_id, e)
+
+    return {
+        "status": "started",
+        "minutes": _apply_latest_speaker_labels(minutes),
+        "session_id": session_id,
+        "audio_path": str(stored_audio),
+        "source_path": str(source_path),
+        "used_existing_transcript": bool(initial_transcript),
+        "start_retranscribe": should_retranscribe,
+        "summary_enqueued": summary_enqueued,
+        "retranscribe": retranscribe,
+    }
+
+
 @router.patch("/{minutes_id}/summary")
 async def update_summary(minutes_id: str, body: SummaryUpdateRequest) -> dict:
     """ユーザーによる要約手動編集。LLM モデル列は更新しない(provenance を保持)。"""
@@ -191,6 +413,14 @@ async def delete_minutes(minutes_id: str) -> dict:
 
 @router.post("/{minutes_id}/retranscribe")
 async def retranscribe_minutes(minutes_id: str) -> dict:
+    return await _start_retranscribe_minutes(minutes_id)
+
+
+async def _start_retranscribe_minutes(
+    minutes_id: str,
+    *,
+    enqueue_summary_on_complete: bool = False,
+) -> dict:
     """既存セッションの音声を使って文字起こしを再実行する。
     バックグラウンドで走り、進捗は _pipelines 経由で WS broadcast される。
     """
@@ -230,6 +460,7 @@ async def retranscribe_minutes(minutes_id: str) -> dict:
             str(wav_path),
             m.get("project_id", ""),
             cancel_event,
+            enqueue_summary_on_complete=enqueue_summary_on_complete,
         )
     )
     _retranscribe_tasks[session_id] = task
@@ -346,7 +577,9 @@ def _load_wav_16k_mono_f32(path: str):
 
 async def _run_retranscribe(minutes_id: str, session_id: str,
                             wav_path: str, project_id: str,
-                            cancel_event: threading.Event) -> None:
+                            cancel_event: threading.Event,
+                            *,
+                            enqueue_summary_on_complete: bool = False) -> None:
     """再文字起こし処理。
     - 同時実行は 1 件のみ(_retranscribe_sem)。複数キューイング時は FIFO 待ち
     - 録音中は待機して、新録音とそのストリーミング文字起こしを最優先
@@ -744,6 +977,12 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 },
             })
             await rec_mod._broadcast_pipeline(session_id)
+            if enqueue_summary_on_complete:
+                try:
+                    if _enqueue_summary_if_empty(minutes_id):
+                        logger.info("[import] auto-summary enqueued: %s", minutes_id)
+                except Exception as e:
+                    logger.warning("[import] failed to enqueue auto-summary for %s: %s", minutes_id, e)
             logger.info("Retranscribe done: %s (%d segments)", session_id, len(segments))
 
         except RetranscribeCancelledError:

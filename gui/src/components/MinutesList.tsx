@@ -1,15 +1,16 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   MagnifyingGlass, X, DownloadSimple, Trash, Spinner as PhSpinner,
-  WarningCircle, FolderOpen, ArrowSquareOut,
+  WarningCircle, FolderOpen, ArrowSquareOut, UploadSimple, FileAudio,
 } from "@phosphor-icons/react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { showToast } from "../lib/toast";
 import type {
   Minutes, MinutesSearchResult, PipelineStatus, Project,
 } from "../lib/api";
 import {
   searchMinutes, exportMinutes, deleteMinutes, moveMinutesToProject,
+  importAudioMinutes,
 } from "../lib/api";
 import { Spinner } from "./Spinner";
 import { MoveToProjectModal } from "./MoveToProjectModal";
@@ -127,8 +128,22 @@ export function MinutesList({
   const [searching, setSearching] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [moveTarget, setMoveTarget] = useState<Minutes | MinutesSearchResult | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const importMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
+
+  useEffect(() => {
+    if (!importMenuOpen) return;
+    const onDown = (ev: MouseEvent) => {
+      if (!importMenuRef.current?.contains(ev.target as Node)) {
+        setImportMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [importMenuOpen]);
 
   useEffect(() => {
     const trimmed = q.trim();
@@ -206,6 +221,62 @@ export function MinutesList({
     } finally { setBusyId(null); }
   };
 
+  const handleImportPick = async (kind: "file" | "folder") => {
+    if (importing) return;
+    setImportMenuOpen(false);
+    setImporting(true);
+    try {
+      const selected = await open(
+        kind === "folder"
+          ? {
+              title: "セッションフォルダを選択",
+              directory: true,
+              multiple: false,
+            }
+          : {
+              title: "音声ファイルを選択",
+              multiple: false,
+              filters: [{
+                name: "Audio",
+                extensions: [
+                  "wav", "flac", "mp3", "m4a", "aac", "ogg", "opus",
+                  "webm", "mp4", "mov", "aif", "aiff",
+                ],
+              }],
+            },
+      );
+      const sourcePath = Array.isArray(selected) ? selected[0] : selected;
+      if (!sourcePath) return;
+
+      const startRetranscribe = kind === "file"
+        ? true
+        : await ask("既存の文字起こしがある場合、再文字起こしも実行しますか?", {
+            title: "取り込み設定",
+            okLabel: "再文字起こしする",
+            cancelLabel: "取り込みのみ",
+          });
+
+      const result = await importAudioMinutes(projectId, sourcePath, { startRetranscribe });
+      showToast({
+        kind: "ok",
+        text: result.retranscribe
+          ? (result.used_existing_transcript
+              ? "取り込み開始: 既存文字起こしを読み込み、再文字起こし中"
+              : "取り込み開始: 文字起こし中")
+          : result.summary_enqueued
+            ? "取り込み完了: 要約を開始しました"
+            : result.used_existing_transcript
+              ? "取り込み完了: 既存文字起こしを読み込みました"
+              : "取り込み完了",
+      });
+      onMutated();
+    } catch (e) {
+      showToast({ kind: "err", text: `取り込み失敗: ${e instanceof Error ? e.message : ""}` });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   // 他に移動先となるプロジェクトがあるかどうか
   const hasOtherProjects = allProjects.some((p) => p.id !== projectId);
 
@@ -234,33 +305,77 @@ export function MinutesList({
 
   return (
     <div className="flex flex-col">
-      {(minutes.length > 0 || showSearchResults) && (
-        <div className="minutes-search-wrap">
-          <div className="search-bar">
-            <MagnifyingGlass size={13} weight="regular" className="text-(--t3) shrink-0" />
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="タイトル・要約・本文を検索..."
-              className="search-bar-input"
-            />
-            {searching && <Spinner size={12} />}
-            {q && !searching && (
-              <button
-                onClick={() => setQ("")}
-                className="icon-btn !w-5 !h-5"
-                aria-label="クリア"
-              >
-                <X size={11} weight="bold" />
-              </button>
+      <div className="minutes-search-wrap">
+        <div className="minutes-list-toolbar">
+          {(minutes.length > 0 || showSearchResults) ? (
+            <div className="search-bar">
+              <MagnifyingGlass size={13} weight="regular" className="text-(--t3) shrink-0" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="タイトル・要約・本文を検索..."
+                className="search-bar-input"
+              />
+              {searching && <Spinner size={12} />}
+              {q && !searching && (
+                <button
+                  onClick={() => setQ("")}
+                  className="icon-btn !w-5 !h-5"
+                  aria-label="クリア"
+                >
+                  <X size={11} weight="bold" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="minutes-list-toolbar-spacer" />
+          )}
+          <div className="minutes-import-menu-wrap" ref={importMenuRef}>
+            <button
+              type="button"
+              className="icon-btn minutes-import-btn"
+              title="音声を取り込み"
+              aria-label="音声を取り込み"
+              aria-haspopup="menu"
+              aria-expanded={importMenuOpen}
+              disabled={importing}
+              onClick={() => setImportMenuOpen((v) => !v)}
+            >
+              {importing ? (
+                <PhSpinner size={13} className="anim-spin" />
+              ) : (
+                <UploadSimple size={14} weight="regular" />
+              )}
+            </button>
+            {importMenuOpen && (
+              <div className="minutes-import-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="minutes-import-menu-item"
+                  onClick={() => handleImportPick("file")}
+                >
+                  <FileAudio size={14} weight="regular" />
+                  <span>音声ファイル</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="minutes-import-menu-item"
+                  onClick={() => handleImportPick("folder")}
+                >
+                  <FolderOpen size={14} weight="regular" />
+                  <span>セッションフォルダ</span>
+                </button>
+              </div>
             )}
           </div>
         </div>
-      )}
+      </div>
 
       {empty && (
         <p className="text-[12px] text-(--t3) text-center py-12">
-          録音するとここに議事録が表示されます
+          録音または音声取り込みでここに議事録が表示されます
         </p>
       )}
 

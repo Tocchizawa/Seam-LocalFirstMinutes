@@ -288,7 +288,7 @@ export function MainView({
             onOpenMin={handleOpenMin}
             onOpenPipeline={onOpenPipelineSession}
             onDismissPipeline={handleDismiss}
-            onMutated={refreshMinutes}
+            onMutated={() => { refreshMinutes(); refreshPipelines(); }}
           />
         </div>
       </div>

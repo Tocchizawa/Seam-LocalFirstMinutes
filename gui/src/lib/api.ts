@@ -177,6 +177,36 @@ export const moveMinutesToProject = (id: string, projectId: string) =>
     body: JSON.stringify({ project_id: projectId }),
   });
 
+export interface ImportAudioResponse {
+  status: string;
+  minutes: Minutes;
+  session_id: string;
+  audio_path: string;
+  source_path: string;
+  used_existing_transcript: boolean;
+  start_retranscribe: boolean;
+  summary_enqueued: boolean;
+  retranscribe: {
+    status: string;
+    session_id: string;
+  } | null;
+}
+
+export const importAudioMinutes = (
+  projectId: string,
+  sourcePath: string,
+  options: { title?: string; startRetranscribe?: boolean } = {},
+) =>
+  request<ImportAudioResponse>("/api/minutes/import-audio", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: projectId,
+      source_path: sourcePath,
+      title: options.title?.trim() || undefined,
+      start_retranscribe: options.startRetranscribe,
+    }),
+  });
+
 export interface MinutesSearchResult extends Minutes {
   highlights?: {
     title: string | null;
