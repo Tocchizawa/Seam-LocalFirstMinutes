@@ -1052,7 +1052,16 @@ class SpeakerMemory:
                 pass
 
         _emit("extract", 0.0, "pyannote で話者分離中...")
-        turns, centroids = pyannote_runner.diarize_with_embeddings(wav_path)
+
+        def _on_pyannote_progress(prog: float, msg: str | None) -> None:
+            # pyannote 内部 (segmentation → embedding → clustering) の進捗を
+            # extract ステージに 0..0.95 でマップ。残りはこの呼び出し後の
+            # 集約/分割/ラベル付与処理に充てる。
+            _emit("extract", min(0.95, max(0.0, prog)), msg)
+
+        turns, centroids = pyannote_runner.diarize_with_embeddings(
+            wav_path, on_progress=_on_pyannote_progress,
+        )
         if not turns:
             logger.info("pyannote returned no turns, falling back to legacy")
             raise RuntimeError("pyannote returned empty diarization")
