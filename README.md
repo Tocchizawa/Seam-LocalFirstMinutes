@@ -11,6 +11,13 @@ Seam は、**会議の録音・文字起こし・要約をローカル環境中�
   <img src="./docs/images/seam-main.png" alt="Seam main screen" width="100%">
 </p>
 
+## ダウンロード
+
+最新版の DMG は [Releases ページ](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases/latest) からダウンロードできます。
+DMG を開いて `Seam.app` を `Applications` にドラッグするだけでインストール完了です（Apple Developer ID 署名 + 公証済み）。
+
+ビルドはご自身でも可能です。手順は [ローカル実行（開発）](#ローカル実行開発) と [ビルド](#ビルド) を参照してください。
+
 ## プロジェクトの狙い
 
 - ローカルで高速に議事録を作れること
@@ -106,7 +113,7 @@ pnpm build
 生成物:
 
 - `gui/src-tauri/target/release/bundle/macos/Seam.app`
-- `gui/src-tauri/target/release/bundle/dmg/Seam_0.1.0_aarch64.dmg`
+- `gui/src-tauri/target/release/bundle/dmg/Seam_<version>_aarch64.dmg`
 
 ## セキュリティ / プライバシー方針（要点）
 
