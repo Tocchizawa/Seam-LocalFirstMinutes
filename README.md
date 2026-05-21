@@ -181,4 +181,4 @@ SKIP_GUI_BUILD=1 ./scripts/oss_preflight.sh
 
 - コントリビュート: [CONTRIBUTING.md](./CONTRIBUTING.md)
 - セキュリティ: [SECURITY.md](./SECURITY.md)
-- ライセンス: [MIT](./LICENSE)
+- ライセンス: [Apache 2.0](./LICENSE)
