@@ -11,6 +11,19 @@ if [ ! -d "$APP_PATH" ]; then
   exit 1
 fi
 
+# ─── 既存 DMG が最新かつ公証・staple 済みなら全スキップ ─
+# Apple ID をリトライで不要に notarytool に投げないための安全弁。
+# .app の主バイナリより DMG が新しく、staple ticket が有効なら何もしない。
+# 強制再ビルドしたければ DMG を削除して再実行する。
+if [ -f "$DMG_PATH" ] \
+  && [ "$DMG_PATH" -nt "$APP_PATH/Contents/MacOS/gui" ] \
+  && xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
+  echo "[skip] $DMG_PATH は最新かつ公証・staple 済みです"
+  echo "       強制再生成するには DMG を削除してから再実行してください"
+  ls -lh "$DMG_PATH"
+  exit 0
+fi
+
 # ─── macOS 権限キーを Info.plist に注入 ─────────────────
 # Tauri は Info.plist のカスタムキーをサポートしないため、ここで PlistBuddy を使って追加する。
 # これがないと macOS はマイク/画面録音を silent deny するため、録音が無音になる。
@@ -73,34 +86,13 @@ else
   # 検証
   codesign --verify --deep --strict --verbose=2 "$APP_PATH" \
     && echo "[codesign] verify OK"
-
-  # ─── 公証 (Notarization) ──────────────────────────────
-  if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_APP_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
-    echo "[notarize] APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID 未設定 → 公証スキップ"
-  else
-    ZIP_PATH="$(mktemp -t seam-notarize.XXXXXX).zip"
-    rm -f "$ZIP_PATH"
-    ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
-    echo "[notarize] submitting to Apple (これに数分〜十数分かかります)..."
-    xcrun notarytool submit "$ZIP_PATH" \
-      --apple-id "$APPLE_ID" \
-      --password "$APPLE_APP_PASSWORD" \
-      --team-id "$APPLE_TEAM_ID" \
-      --wait
-    NOTARY_EXIT=$?
-    rm -f "$ZIP_PATH"
-    if [ "$NOTARY_EXIT" -ne 0 ]; then
-      echo "Error: notarization failed (exit $NOTARY_EXIT)"
-      exit "$NOTARY_EXIT"
-    fi
-
-    echo "[notarize] stapling..."
-    xcrun stapler staple "$APP_PATH"
-    xcrun stapler validate "$APP_PATH" && echo "[notarize] stapled OK"
-  fi
 fi
 
 # ─── DMG 作成 ───────────────────────────────────────────
+# Apple 公式ワークフローに合わせ、.app は staple せずに DMG に詰めてから
+# DMG 自体を notarize / staple する。.app を先に staple すると macOS
+# Sequoia の App Management 保護 (公証済みアプリの cross-volume 書き込み禁止)
+# に hdiutil が引っかかり「Operation not permitted」で失敗する。
 mkdir -p "$DMG_DIR"
 rm -f "$DMG_PATH"
 
@@ -110,7 +102,44 @@ trap 'rm -rf "$STAGE_DIR"' EXIT
 cp -R "$APP_PATH" "$STAGE_DIR/"
 ln -s /Applications "$STAGE_DIR/Applications"
 
-hdiutil create -volname "Seam" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH"
+# 重要: volname を .app のベース名 "Seam" にすると macOS Sequoia が
+# /Volumes/Seam/Seam.app への書き込みを自己参照保護で拒否する
+# (= "Operation not permitted")。.app 名と被らない名前を必ず使う。
+hdiutil create -volname "Seam Installer" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH"
+echo "[dmg] created: $DMG_PATH"
+
+# ─── DMG 自体を Developer ID で署名 ─────────────────────
+# Gatekeeper が DMG のダウンロード時に署名チェックする経路に備える。
+# adhoc 署名の場合はスキップ。
+if [ -n "$SIGN_ID" ]; then
+  codesign --force --sign "$SIGN_ID" --timestamp "$DMG_PATH"
+  echo "[codesign] DMG signed"
+fi
+
+# ─── 公証 (Notarization) — DMG に対して行う ─────────────
+if [ -z "$SIGN_ID" ]; then
+  echo "[notarize] adhoc 署名のため公証スキップ"
+elif [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_APP_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+  echo "[notarize] APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID 未設定 → 公証スキップ"
+else
+  echo "[notarize] submitting DMG to Apple (これに数分〜十数分かかります)..."
+  set +e
+  xcrun notarytool submit "$DMG_PATH" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait
+  NOTARY_EXIT=$?
+  set -e
+  if [ "$NOTARY_EXIT" -ne 0 ]; then
+    echo "Error: notarization failed (exit $NOTARY_EXIT)"
+    exit "$NOTARY_EXIT"
+  fi
+
+  echo "[notarize] stapling DMG..."
+  xcrun stapler staple "$DMG_PATH"
+  xcrun stapler validate "$DMG_PATH" && echo "[notarize] DMG stapled OK"
+fi
 
 echo ""
 echo "DMG created: $DMG_PATH"

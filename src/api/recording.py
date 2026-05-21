@@ -65,6 +65,16 @@ _latest_level: float = 0.0       # マイク入力 RMS (0.0-1.0)
 _latest_system_level: float = 0.0  # システム音声 RMS (0.0-1.0)
 _last_result: dict | None = None
 
+# 起動時セッション復元の進捗 (GUI からの照会用)
+_recovery_state: dict = {
+    "state": "idle",   # idle | running | done
+    "total": 0,
+    "current": 0,
+    "item": None,      # 現在処理中の item
+    "recovered": 0,
+    "finished_at": None,
+}
+
 _ACTIVE_PIPELINE_STATES = {"recording", "stopping", "transcribing"}
 
 
@@ -1044,6 +1054,12 @@ async def last_result() -> dict:
     return {"error": "まだ録音がありません"}
 
 
+@router.get("/recovery/status")
+async def recovery_status() -> dict:
+    """起動時のセッション復元の現在状態を返す (GUI 同期用)。"""
+    return dict(_recovery_state)
+
+
 @router.get("/play/{session_id}")
 async def play_audio(session_id: str) -> FileResponse:
     from src.config import APP_DIR
@@ -1385,14 +1401,66 @@ async def recover_pending_sessions_async() -> int:
 
     DB 書き込みはメインスレッドで行い、重い再話者分離だけ thread offload する。
     """
+    metas = _iter_pending_recovery_metas()
+    if not metas:
+        _recovery_state.update({
+            "state": "idle", "total": 0, "current": 0,
+            "item": None, "recovered": 0,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return 0
+
+    total = len(metas)
+    _recovery_state.update({
+        "state": "running", "total": total, "current": 0,
+        "item": None, "recovered": 0, "finished_at": None,
+    })
+    try:
+        await ws_manager.broadcast({
+            "type": "session_recovery_started",
+            "data": {"total": total},
+        })
+    except Exception:
+        pass
+
     recovered = 0
-    for session_dir, meta in _iter_pending_recovery_metas():
+    for idx, (session_dir, meta) in enumerate(metas, start=1):
+        session_id = meta.get("session_id") or session_dir.name
+        started_at = meta.get("started_at")
+        item = {
+            "session_id": session_id,
+            "started_at": started_at,
+            "date": _parse_date_from_started_at(started_at),
+            "hhmm": _guess_hhmm(session_id, started_at),
+            "prior_state": meta.get("state"),
+        }
+        _recovery_state.update({"current": idx, "item": item})
+        try:
+            await ws_manager.broadcast({
+                "type": "session_recovery_progress",
+                "data": {"current": idx, "total": total, "item": item},
+            })
+        except Exception:
+            pass
         try:
             if await _recover_one_session_async(session_dir, meta):
                 recovered += 1
+                _recovery_state["recovered"] = recovered
         except Exception as e:
             logger.error("[recovery] failed for %s: %s", session_dir.name, e)
         await asyncio.sleep(0)
+
+    _recovery_state.update({
+        "state": "done", "item": None,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    })
+    try:
+        await ws_manager.broadcast({
+            "type": "session_recovery_finished",
+            "data": {"total": total, "recovered": recovered},
+        })
+    except Exception:
+        pass
 
     if recovered:
         logger.info("[recovery] recovered %d pending session(s)", recovered)

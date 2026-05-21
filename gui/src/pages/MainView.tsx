@@ -1,14 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
-import type { Project, Minutes, PipelineStatus } from "../lib/api";
+import type {
+  Project, Minutes, PipelineStatus, RecoveryStatus, RecoveryItem,
+} from "../lib/api";
 import type { OpenMinutesOpts } from "../components/MinutesList";
 import {
   listMinutes, getMinutes, getPipelines, dismissPipeline, listDevices,
-  getSettings, getDebugStatus,
+  getSettings, getDebugStatus, getRecoveryStatus,
 } from "../lib/api";
 import { RecordToolbar } from "../components/RecordToolbar";
 import { MinutesList } from "../components/MinutesList";
 import { DeviceSettingsModal } from "../components/DeviceSettingsModal";
 import { LatestSegmentPreview } from "../components/LatestSegmentPreview";
+import { Spinner } from "../components/Spinner";
+import { CheckCircle, X } from "@phosphor-icons/react";
 import { useRecording } from "../lib/recording-context";
 
 interface Props {
@@ -33,6 +37,8 @@ export function MainView({
 
   const [minutes, setMinutes] = useState<Minutes[]>([]);
   const [pipelines, setPipelines] = useState<PipelineStatus[]>([]);
+  const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
+  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
   const [debugStatus, setDebugStatus] = useState<Record<string, any> | null>(null);
@@ -131,20 +137,91 @@ export function MainView({
   useEffect(() => {
     const onPipeline = () => { refreshPipelines(); };
     const onDone = () => { refreshPipelines(); refreshMinutes(); };
-    const onOpen = () => { refreshPipelines(); refreshMinutes(); };
+    const onOpen = () => {
+      refreshPipelines();
+      refreshMinutes();
+      getRecoveryStatus().then(setRecovery).catch(() => {});
+    };
+    const onRecoveryStarted = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ total: number }>).detail;
+      setRecovery({
+        state: "running",
+        total: detail?.total ?? 0,
+        current: 0,
+        item: null,
+        recovered: 0,
+        finished_at: null,
+      });
+      setRecoveryDismissed(false);
+    };
+    const onRecoveryProgress = (ev: Event) => {
+      const detail = (ev as CustomEvent<{
+        current: number; total: number; item: RecoveryItem | null;
+      }>).detail;
+      setRecovery((prev) => ({
+        state: "running",
+        total: detail?.total ?? prev?.total ?? 0,
+        current: detail?.current ?? 0,
+        item: detail?.item ?? null,
+        recovered: prev?.recovered ?? 0,
+        finished_at: null,
+      }));
+    };
+    const onRecoveryFinished = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ total: number; recovered: number }>).detail;
+      setRecovery({
+        state: "done",
+        total: detail?.total ?? 0,
+        current: detail?.total ?? 0,
+        item: null,
+        recovered: detail?.recovered ?? 0,
+        finished_at: new Date().toISOString(),
+      });
+      refreshMinutes();
+    };
+    // 要約完了 / タイトル自動生成 / 話者改名なども一覧に反映する
+    const onMinutesMutated = () => refreshMinutes();
     window.addEventListener("recording-ws:pipeline_progress", onPipeline);
     window.addEventListener("recording-ws:pipeline_error", onPipeline);
     window.addEventListener("recording-ws:recording_stopped", onPipeline);
     window.addEventListener("recording-ws:pipeline_done", onDone);
     window.addEventListener("recording-ws:__open", onOpen);
+    window.addEventListener("recording-ws:session_recovery_started", onRecoveryStarted);
+    window.addEventListener("recording-ws:session_recovery_progress", onRecoveryProgress);
+    window.addEventListener("recording-ws:session_recovery_finished", onRecoveryFinished);
+    window.addEventListener("recording-ws:summary_done", onMinutesMutated);
+    window.addEventListener("recording-ws:summary_failed", onMinutesMutated);
+    window.addEventListener("recording-ws:summary_cancelled", onMinutesMutated);
+    window.addEventListener("recording-ws:summary_skipped", onMinutesMutated);
+    window.addEventListener("recording-ws:minutes_title_updated", onMinutesMutated);
     return () => {
       window.removeEventListener("recording-ws:pipeline_progress", onPipeline);
       window.removeEventListener("recording-ws:pipeline_error", onPipeline);
       window.removeEventListener("recording-ws:recording_stopped", onPipeline);
       window.removeEventListener("recording-ws:pipeline_done", onDone);
       window.removeEventListener("recording-ws:__open", onOpen);
+      window.removeEventListener("recording-ws:session_recovery_started", onRecoveryStarted);
+      window.removeEventListener("recording-ws:session_recovery_progress", onRecoveryProgress);
+      window.removeEventListener("recording-ws:session_recovery_finished", onRecoveryFinished);
+      window.removeEventListener("recording-ws:summary_done", onMinutesMutated);
+      window.removeEventListener("recording-ws:summary_failed", onMinutesMutated);
+      window.removeEventListener("recording-ws:summary_cancelled", onMinutesMutated);
+      window.removeEventListener("recording-ws:summary_skipped", onMinutesMutated);
+      window.removeEventListener("recording-ws:minutes_title_updated", onMinutesMutated);
     };
   }, [refreshPipelines, refreshMinutes]);
+
+  // 起動時の復元状態を最初に一度同期 (WS 接続前に終わっていた場合の保険)
+  useEffect(() => {
+    getRecoveryStatus().then(setRecovery).catch(() => {});
+  }, []);
+
+  // done 状態は数秒で自動的に閉じる
+  useEffect(() => {
+    if (recovery?.state !== "done") return;
+    const t = window.setTimeout(() => setRecoveryDismissed(true), 6000);
+    return () => window.clearTimeout(t);
+  }, [recovery?.state, recovery?.finished_at]);
 
   const handleOpenMin = async (m: Minutes, opts?: OpenMinutesOpts) => {
     try { onOpenMinutes(await getMinutes(m.id), opts); }
@@ -178,6 +255,16 @@ export function MainView({
 
       {recording && streamStatus && (
         <StreamStatusBar status={streamStatus} />
+      )}
+
+      {recovery && !recoveryDismissed
+        && (recovery.state === "running" || recovery.state === "done")
+        && (recovery.total > 0 || recovery.recovered > 0)
+        && (
+          <RecoveryBanner
+            status={recovery}
+            onDismiss={() => setRecoveryDismissed(true)}
+          />
       )}
 
       {recording && <LatestSegmentPreview onExpand={onOpenLive} />}
@@ -284,6 +371,85 @@ function StreamStatusBar({ status }: {
         ) : null}
         <span>確定 {status.total_segments}件</span>
       </span>
+    </div>
+  );
+}
+
+function RecoveryBanner({
+  status, onDismiss,
+}: {
+  status: RecoveryStatus;
+  onDismiss: () => void;
+}) {
+  const isDone = status.state === "done";
+  const itemLabel = (() => {
+    const it = status.item;
+    if (!it) return null;
+    const date = it.date || "";
+    const md = (() => {
+      if (!date) return "";
+      const parts = date.split("-");
+      if (parts.length !== 3) return date;
+      return `${Number(parts[1])}/${Number(parts[2])}`;
+    })();
+    const hhmm = it.hhmm && it.hhmm !== "??:??" ? it.hhmm : "";
+    return [md, hhmm].filter(Boolean).join(" ");
+  })();
+
+  return (
+    <div className="recovery-banner">
+      <div className="recovery-banner-icon">
+        {isDone ? (
+          <CheckCircle size={14} weight="fill" className="text-(--accent)" />
+        ) : (
+          <Spinner size={12} color="var(--accent)" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2">
+          <span className="text-[12px] font-medium text-(--t1)">
+            {isDone ? "未完了セッションを復元しました" : "未完了セッションを復元中"}
+          </span>
+          {!isDone && status.total > 0 && (
+            <span className="num text-[11px] text-(--t3) tabular-nums">
+              {status.current}/{status.total}
+            </span>
+          )}
+          {isDone && (
+            <span className="num text-[11px] text-(--t3) tabular-nums">
+              {status.recovered}/{status.total} 件
+            </span>
+          )}
+        </div>
+        {!isDone && itemLabel && (
+          <p className="text-[11px] text-(--t3) truncate mt-0.5">
+            復元中: {itemLabel} の会議
+          </p>
+        )}
+      </div>
+      {!isDone && status.total > 0 && (
+        <div className="recovery-progress">
+          <div
+            className="recovery-progress-fill"
+            style={{
+              width: `${Math.max(
+                3,
+                Math.round((status.current / Math.max(1, status.total)) * 100),
+              )}%`,
+            }}
+          />
+        </div>
+      )}
+      {isDone && (
+        <button
+          onClick={onDismiss}
+          className="icon-btn !w-6 !h-6"
+          aria-label="閉じる"
+          title="閉じる"
+        >
+          <X size={11} weight="bold" />
+        </button>
+      )}
     </div>
   );
 }

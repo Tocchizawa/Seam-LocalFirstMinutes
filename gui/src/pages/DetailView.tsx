@@ -293,7 +293,14 @@ export function DetailView(props: Props) {
     let stopped = false;
 
     const reload = async () => {
-      try { setCurrentMinutes(await getMinutes(minutesId)); } catch {}
+      try {
+        const fresh = await getMinutes(minutesId);
+        setCurrentMinutes(fresh);
+        // 一覧画面など他コンポーネントも同期できるよう通知
+        window.dispatchEvent(
+          new CustomEvent("minutes-updated", { detail: { id: minutesId } }),
+        );
+      } catch {}
     };
     const handle = (e: MessageEvent) => {
       try {
@@ -519,48 +526,42 @@ export function DetailView(props: Props) {
     return out;
   }, [transcript, findQuery]);
 
-  const summaryMatchCount = useMemo(() => {
-    const q = findQuery.trim();
-    if (!q || !summary) return 0;
-    const lcq = q.toLowerCase();
-    const lcs = summary.toLowerCase();
-    let pos = 0, count = 0;
-    while (pos < lcs.length) {
-      const f = lcs.indexOf(lcq, pos);
-      if (f < 0) break;
-      count++;
-      pos = f + lcq.length;
-    }
-    return count;
-  }, [summary, findQuery]);
+  // 要約タブの検索ヒット件数は MarkdownView (tiptap) 側で実体テキストから数える。
+  // (markdown 構文文字を含めない正確な件数 + 各マッチに decoration を貼るため)
+  const [summaryMatchCount, setSummaryMatchCount] = useState(0);
+
+  // タブ切替時に findIndex を 0 に戻す (各タブごとにマッチ集合が違うため)
+  useEffect(() => { setFindIndex(0); }, [tab]);
+
+  // アクティブタブのマッチ件数
+  const activeMatchCount = tab === "summary" ? summaryMatchCount : matches.length;
 
   // findIndex がレンジ外にならないようにクランプ
   useEffect(() => {
-    if (matches.length === 0) {
+    if (activeMatchCount === 0) {
       if (findIndex !== 0) setFindIndex(0);
-    } else if (findIndex >= matches.length) {
+    } else if (findIndex >= activeMatchCount) {
       setFindIndex(0);
     }
-  }, [matches.length, findIndex]);
+  }, [activeMatchCount, findIndex]);
 
-  // 検索クエリ/インデックスが変わったら active な mark を画面中央へ
+  // 検索クエリ/インデックスが変わったら active な mark を画面中央へ (文字起こしタブ用)
   useEffect(() => {
-    if (matches.length === 0) return;
-    // mark がレンダリングされた直後にスクロール (初期マウント時にも確実に動かす)
+    if (tab !== "transcript" || matches.length === 0) return;
     const id = requestAnimationFrame(() => {
       const el = document.getElementById(FIND_ACTIVE_ID);
       if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
     });
     return () => cancelAnimationFrame(id);
-  }, [findIndex, matches.length, findQuery]);
+  }, [findIndex, matches.length, findQuery, tab]);
 
   const nextMatch = () => {
-    if (matches.length === 0) return;
-    setFindIndex((i) => (i + 1) % matches.length);
+    if (activeMatchCount === 0) return;
+    setFindIndex((i) => (i + 1) % activeMatchCount);
   };
   const prevMatch = () => {
-    if (matches.length === 0) return;
-    setFindIndex((i) => (i - 1 + matches.length) % matches.length);
+    if (activeMatchCount === 0) return;
+    setFindIndex((i) => (i - 1 + activeMatchCount) % activeMatchCount);
   };
 
   const openFind = () => {
@@ -1170,9 +1171,9 @@ export function DetailView(props: Props) {
           query={findQuery}
           onChange={(v) => { setFindQuery(v); setFindIndex(0); }}
           inputRef={findInputRef}
-          matches={matches.length}
-          index={matches.length === 0 ? 0 : findIndex + 1}
-          summaryMatchCount={summaryMatchCount}
+          matches={activeMatchCount}
+          index={activeMatchCount === 0 ? 0 : findIndex + 1}
+          otherCount={tab === "summary" ? matches.length : summaryMatchCount}
           activeTab={tab}
           onJumpSummary={() => { setTab("summary"); }}
           onJumpTranscript={() => { setTab("transcript"); }}
@@ -1193,6 +1194,9 @@ export function DetailView(props: Props) {
             job={summaryJob}
             canAct={canAct}
             busy={summaryBusy}
+            searchQuery={findOpen ? findQuery : ""}
+            activeMatchIndex={tab === "summary" ? findIndex : -1}
+            onMatchesChange={setSummaryMatchCount}
             onGenerate={startSummarize}
             onCancel={handleCancelSummary}
             onSaved={(next) => {
@@ -1322,7 +1326,9 @@ function PlaybackRatePill({
      - summary 無し & job なし: 空状態 + 「要約を生成」ボタン
    ボタン高さは ActionBtn と同じ h-8 で揃え、視覚的に統一感を保つ。 */
 function SummaryPanel({
-  minutesId, savedSummary, savedModel, job, canAct, busy, onGenerate, onCancel, onSaved,
+  minutesId, savedSummary, savedModel, job, canAct, busy,
+  searchQuery, activeMatchIndex, onMatchesChange,
+  onGenerate, onCancel, onSaved,
 }: {
   minutesId?: string;
   savedSummary: string;
@@ -1330,6 +1336,9 @@ function SummaryPanel({
   job: SummarizeStatus | null;
   canAct: boolean;
   busy: boolean;
+  searchQuery?: string;
+  activeMatchIndex?: number;
+  onMatchesChange?: (n: number) => void;
   onGenerate: (provider?: SummarizeProvider) => void;
   onCancel: () => void;
   onSaved?: (next: Minutes) => void;
@@ -1342,10 +1351,11 @@ function SummaryPanel({
 
   // 表示するMarkdown本文の決定:
   // 生成中は partial_text を表示 (ストリーミング)
-  // 完了後は savedSummary (DB 由来) を表示
+  // 完了後は savedSummary (DB 由来)。ただし summary_done 直後で reload が間に合っていない
+  // 場合 (savedSummary が空) は partial_text を fallback で表示し続けてフリッカーを防ぐ。
   const displayText = isRunning
-    ? (job?.partial_text || "")
-    : savedSummary;
+    ? (job?.partial_text || savedSummary || "")
+    : (savedSummary || job?.partial_text || "");
 
   // Status banner があるかどうか (生成中・失敗・skip・cancel)
   const showBanner = isRunning || isFailed || isSkipped || isCancelled;
@@ -1440,7 +1450,12 @@ function SummaryPanel({
         <div className="flex-1 overflow-y-auto">
           {displayText ? (
             <div className="px-6 py-6">
-              <MarkdownView value={displayText} />
+              <MarkdownView
+                value={displayText}
+                searchQuery={searchQuery}
+                activeMatchIndex={activeMatchIndex}
+                onMatchesChange={onMatchesChange}
+              />
               {savedSummary && !isRunning && (
                 <SummaryFooter
                   savedModel={savedModel}
@@ -1733,7 +1748,7 @@ function SegmentText({
 
 function FindBar({
   query, onChange, inputRef, matches, index,
-  summaryMatchCount, activeTab,
+  otherCount, activeTab,
   onJumpSummary, onJumpTranscript,
   onPrev, onNext, onClose,
 }: {
@@ -1742,7 +1757,7 @@ function FindBar({
   inputRef: React.MutableRefObject<HTMLInputElement | null>;
   matches: number;
   index: number;
-  summaryMatchCount: number;
+  otherCount: number;
   activeTab: "summary" | "transcript";
   onJumpSummary: () => void;
   onJumpTranscript: () => void;
@@ -1750,8 +1765,6 @@ function FindBar({
   onNext: () => void;
   onClose: () => void;
 }) {
-  const otherCount =
-    activeTab === "transcript" ? summaryMatchCount : 0; // summary タブでは transcript 件数を別表示しない (現状はまだ計算していない)
   const otherLabel = activeTab === "transcript" ? "要約" : "本文";
   const onJumpOther = activeTab === "transcript" ? onJumpSummary : onJumpTranscript;
 
@@ -1773,9 +1786,9 @@ function FindBar({
             onClose();
           }
         }}
-        placeholder={activeTab === "transcript" ? "本文を検索" : "本文タブで検索 (要約は別)"}
+        placeholder={activeTab === "transcript" ? "本文を検索" : "要約を検索"}
         className="find-bar-input"
-        aria-label="本文を検索"
+        aria-label={activeTab === "transcript" ? "本文を検索" : "要約を検索"}
       />
       <span className="num text-[11px] text-(--t3) shrink-0">
         {matches === 0 ? "0/0" : `${index}/${matches}`}
