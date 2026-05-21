@@ -7,7 +7,7 @@
 #   1. validate args / git state / tag uniqueness
 #   2. bump version in gui/package.json, gui/src-tauri/tauri.conf.json,
 #      gui/src-tauri/Cargo.toml (and let cargo update Cargo.lock at build)
-#   3. pnpm build  (= bundle backend + tauri build + sign + notarize + staple DMG)
+#   3. pnpm build  (= bundle backend + tauri build + sign + notarize + staple .app/DMG)
 #   4. prepend CHANGELOG.md entry with auto-generated git log notes
 #      (edits opened in $EDITOR; user can refine before commit)
 #   5. commit "chore(release): vX.Y.Z" + annotated tag vX.Y.Z
@@ -101,7 +101,7 @@ mv gui/src-tauri/Cargo.toml.new gui/src-tauri/Cargo.toml
 
 echo "[release] versions updated"
 
-# ─── DMG ビルド (署名・公証・staple まで一気通貫) ──────
+# ─── DMG ビルド (.app/DMG の署名・公証・staple まで一気通貫) ──────
 echo "[release] building DMG (this can take 5-15 min for notarization)..."
 pnpm build
 
