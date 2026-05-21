@@ -350,6 +350,24 @@ export const resetPipeline = () =>
     { method: "POST" },
   );
 
+export interface RecoveryItem {
+  session_id: string;
+  started_at: string | null;
+  date: string;
+  hhmm: string;
+  prior_state: string | null;
+}
+export interface RecoveryStatus {
+  state: "idle" | "running" | "done";
+  total: number;
+  current: number;
+  item: RecoveryItem | null;
+  recovered: number;
+  finished_at: string | null;
+}
+export const getRecoveryStatus = () =>
+  request<RecoveryStatus>("/api/recording/recovery/status");
+
 // WebSocket
 export const WS_URL = "ws://127.0.0.1:18900/ws";
 

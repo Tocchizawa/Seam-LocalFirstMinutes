@@ -51,33 +51,19 @@ function fmtDate(iso: string) {
     return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
   } catch { return ""; }
 }
-function startOfDay(d: Date) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+function fmtShortDate(iso: string) {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return `${d.getMonth() + 1}/${d.getDate()} (${WEEKDAYS[d.getDay()]})`;
+  } catch { return ""; }
 }
-function isoToLocalDate(iso: string | undefined | null): string {
-  if (!iso) {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  }
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso.slice(0, 10);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function startedAtTs(iso: string | undefined | null): number {
+  if (!iso) return 0;
+  const t = new Date(iso).getTime();
+  return isNaN(t) ? 0 : t;
 }
-
-function groupKey(dateStr: string, now: Date): string {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "それ以前";
-  const today = startOfDay(now);
-  const that = startOfDay(d);
-  const dayMs = 86400000;
-  const diffDays = Math.round((today - that) / dayMs);
-  if (diffDays <= 0) return "今日";
-  if (diffDays === 1) return "昨日";
-  if (diffDays < 7) return "今週";
-  if (now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth()) return "今月";
-  return "それ以前";
-}
-const GROUP_ORDER = ["今日", "昨日", "今週", "今月", "それ以前"];
 
 function summaryPreview(s: string | undefined, len = 80): string {
   if (!s) return "";
@@ -177,30 +163,22 @@ export function MinutesList({
     | { kind: "min"; m: Minutes; pipeline?: PipelineStatus }
     | { kind: "orphan"; p: PipelineStatus };
 
-  type GroupItem = { label: string; items: Item[] };
-
-  const groups = useMemo<GroupItem[]>(() => {
+  const items = useMemo<Item[]>(() => {
     if (searched) return [];
-    const now = new Date();
-    const map = new Map<string, Item[]>();
-    for (const m of minutes) {
-      const k = groupKey(m.date, now);
-      if (!map.has(k)) map.set(k, []);
-      map.get(k)!.push({
-        kind: "min",
-        m,
-        pipeline: pipelineByMinSid.get(m.session_id),
-      });
-    }
+    const arr: Item[] = minutes.map((m) => ({
+      kind: "min" as const,
+      m,
+      pipeline: pipelineByMinSid.get(m.session_id),
+    }));
     for (const p of orphanPipelines) {
-      const dStr = isoToLocalDate(p.started_at);
-      const k = groupKey(dStr, now);
-      if (!map.has(k)) map.set(k, []);
-      map.get(k)!.unshift({ kind: "orphan", p });
+      arr.push({ kind: "orphan" as const, p });
     }
-    return GROUP_ORDER
-      .filter((k) => map.has(k))
-      .map((k) => ({ label: k, items: map.get(k)! }));
+    arr.sort((a, b) => {
+      const ta = a.kind === "min" ? startedAtTs(a.m.started_at) : startedAtTs(a.p.started_at);
+      const tb = b.kind === "min" ? startedAtTs(b.m.started_at) : startedAtTs(b.p.started_at);
+      return tb - ta;
+    });
+    return arr;
   }, [minutes, searched, orphanPipelines, pipelineByMinSid]);
 
   const handleExport = async (e: React.MouseEvent, id: string) => {
@@ -252,12 +230,12 @@ export function MinutesList({
   };
 
   const showSearchResults = searched !== null;
-  const empty = !showSearchResults && groups.length === 0;
+  const empty = !showSearchResults && items.length === 0;
 
   return (
     <div className="flex flex-col">
       {(minutes.length > 0 || showSearchResults) && (
-        <div className="px-5 pt-4 pb-2">
+        <div className="minutes-search-wrap">
           <div className="search-bar">
             <MagnifyingGlass size={13} weight="regular" className="text-(--t3) shrink-0" />
             <input
@@ -300,10 +278,9 @@ export function MinutesList({
         />
       )}
 
-      {!showSearchResults && groups.map((g) => (
-        <section key={g.label} className="anim-fade-in">
-          <h3 className="flat-group-label">{g.label}</h3>
-          {g.items.map((it, idx) => {
+      {!showSearchResults && (
+        <div className="anim-fade-in">
+          {items.map((it, idx) => {
             if (it.kind === "min") {
               return (
                 <MinutesRow key={it.m.id}
@@ -325,8 +302,8 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
-        </section>
-      ))}
+        </div>
+      )}
 
       {moveTarget && (
         <MoveToProjectModal
@@ -482,6 +459,7 @@ function ProcessingRow({
   const time = startedAt
     ? `${String(startedAt.getHours()).padStart(2, "0")}:${String(startedAt.getMinutes()).padStart(2, "0")}`
     : "";
+  const shortDate = p.started_at ? fmtShortDate(p.started_at) : "";
   const title = `${time} の会議`;
 
   type Phase = "active" | "leaving";
@@ -503,34 +481,28 @@ function ProcessingRow({
       : "文字起こし中";
 
   return (
-    <div className="flat-row proc-row group"
+    <div className="minutes-card proc-card group"
       data-anim={phase}
       onClick={onOpen}>
-      <div className="shrink-0 flex items-center justify-center w-4">
-        {isError ? (
-          <WarningCircle size={14} weight="fill" className="text-(--danger)" />
-        ) : (
-          <Spinner size={12} color="var(--accent)" />
-        )}
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <p className="text-[13px] truncate text-(--t1)">{title}</p>
-          <span className={`text-[11px] flex-1 min-w-0 truncate ${
-            isError ? "text-(--danger)" : "text-(--accent)"
-          }`}>
-            — {p.message || activeLabel}
-          </span>
+      <div className="minutes-card-body">
+        <div className="minutes-card-meta num">
+          {shortDate && <span>{shortDate}</span>}
+          {shortDate && time && <span className="minutes-card-meta-sep">·</span>}
+          {time && <span>{time}</span>}
         </div>
-      </div>
-
-      <div className="flex items-center gap-3 shrink-0 text-[11px] text-(--t3) num">
-        <span>{time}</span>
+        <h4 className="minutes-card-title">{title}</h4>
+        <p className={`minutes-card-status ${isError ? "is-error" : ""}`}>
+          {isError ? (
+            <WarningCircle size={11} weight="fill" />
+          ) : (
+            <Spinner size={10} color="var(--accent)" />
+          )}
+          <span className="truncate">{p.message || activeLabel}</span>
+        </p>
       </div>
 
       {isError && (
-        <div className="flat-row-actions flex items-center gap-0.5">
+        <div className="minutes-card-actions">
           <button
             onClick={(e) => { e.stopPropagation(); onOpen(); }}
             className="icon-btn !w-7 !h-7"
@@ -563,8 +535,9 @@ function MinutesRow({
   onDelete: (e: React.MouseEvent) => void;
   onStartMove: () => void;
 }) {
-  const preview = summaryPreview(m.summary);
+  const preview = summaryPreview(m.summary, 140);
   const time = fmtTime(m.started_at);
+  const shortDate = fmtShortDate(m.date || m.started_at);
   const isProcessing = pipeline && (
     pipeline.state === "stopping" || pipeline.state === "transcribing"
   );
@@ -585,28 +558,31 @@ function MinutesRow({
   })();
 
   return (
-    <div onClick={onOpen} className="flat-row group">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <p className="text-[13px] truncate text-(--t1)">{m.title}</p>
-          {statusText ? (
-            <span className={`flex items-center gap-1.5 text-[11px] truncate min-w-0 flex-1 ${
-              isError ? "text-(--danger)" : "text-(--accent)"
-            }`}>
-              {(isProcessing || isSummarizing) && <Spinner size={10} color="var(--accent)" />}
-              {isError && <WarningCircle size={11} weight="fill" />}
-              <span className="truncate">— {statusText}</span>
-            </span>
-          ) : preview ? (
-            <span className="text-[11px] text-(--t3) truncate flex-1 min-w-0">— {preview}</span>
-          ) : null}
+    <div onClick={onOpen} className="minutes-card group">
+      <div className="minutes-card-body">
+        <div className="minutes-card-meta num">
+          {shortDate && <span>{shortDate}</span>}
+          {shortDate && time && <span className="minutes-card-meta-sep">·</span>}
+          {time && <span>{time}</span>}
+          {m.duration_sec > 0 && <>
+            <span className="minutes-card-meta-sep">·</span>
+            <span>{fmtDur(m.duration_sec)}</span>
+          </>}
         </div>
+        <h4 className="minutes-card-title">{m.title}</h4>
+        {statusText ? (
+          <p className={`minutes-card-status ${isError ? "is-error" : ""}`}>
+            {(isProcessing || isSummarizing) && <Spinner size={10} color="var(--accent)" />}
+            {isError && <WarningCircle size={11} weight="fill" />}
+            <span className="truncate">{statusText}</span>
+          </p>
+        ) : preview ? (
+          <p className="minutes-card-preview">{preview}</p>
+        ) : (
+          <p className="minutes-card-preview is-empty">要約待ち</p>
+        )}
       </div>
-      <div className="flex items-center gap-3 shrink-0 num text-[11px] text-(--t3)">
-        <span>{time}</span>
-        {m.duration_sec > 0 && <span className="text-(--t4)">{fmtDur(m.duration_sec)}</span>}
-      </div>
-      <div className="flat-row-actions flex items-center gap-0.5">
+      <div className="minutes-card-actions">
         {canMove && (
           <RowAction
             onClick={(e) => { e.stopPropagation(); onStartMove(); }}
