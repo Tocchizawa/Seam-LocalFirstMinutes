@@ -3,8 +3,14 @@ set -e
 
 APP_PATH="gui/src-tauri/target/release/bundle/macos/Seam.app"
 DMG_DIR="gui/src-tauri/target/release/bundle/dmg"
-DMG_PATH="${DMG_DIR}/Seam_0.1.0_aarch64.dmg"
 ENTITLEMENTS="gui/src-tauri/entitlements.plist"
+
+# Tauri が DMG ファイル名に使うバージョンは tauri.conf.json の major.minor.patch のみ
+# (pre-release suffix "-beta.x" は落とされる)。配布物の命名と一致させるため
+# ここでも同じ規則で導出する。
+TAURI_VERSION=$(node -e 'console.log(require("./gui/src-tauri/tauri.conf.json").version)')
+SHORT_VERSION="${TAURI_VERSION%%-*}"
+DMG_PATH="${DMG_DIR}/Seam_${SHORT_VERSION}_aarch64.dmg"
 
 if [ ! -d "$APP_PATH" ]; then
   echo "Error: $APP_PATH not found"
