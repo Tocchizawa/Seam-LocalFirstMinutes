@@ -109,6 +109,21 @@ export function DetailView(props: Props) {
         if (["pipeline_progress", "pipeline_done", "pipeline_error", "recording_stopped"].includes(m.type)) {
           fetchPipeline();
         }
+        // pipeline-detail モードでこの session が finalize されたら、
+        // バックエンドが作成した minutes を fetch して state を切替える。
+        // これがないと currentMinutes が undefined のままになり、
+        // canRecoverSession (= !minutesId && stateLive==="done") が誤って真になり
+        // 「救済ボタン」が表示される。
+        if (
+          m.type === "pipeline_done"
+          && m.data?.session_id === props.sessionId
+          && typeof m.data?.minutes_id === "string"
+        ) {
+          const newId = m.data.minutes_id as string;
+          getMinutes(newId)
+            .then((fresh) => setCurrentMinutes(fresh))
+            .catch(() => {});
+        }
       } catch {}
     };
 
@@ -238,9 +253,11 @@ export function DetailView(props: Props) {
   /* 要約ジョブ状態 (in-flight / done / failed / cancelled) */
   const [summaryJob, setSummaryJob] = useState<SummarizeStatus | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);   // 連打debounce
-  // mount 時に in-flight ジョブが無いか確認 (アプリ再接続/別タブで起動時の復元)
+  // mount 時 / minutes 確定時に in-flight ジョブが無いか確認。
+  // pipeline-detail (live) モードでも minutesId が手に入った瞬間に呼ぶことで、
+  // 文字起こし完了直後に走る自動要約のステータスを取りこぼさない。
   useEffect(() => {
-    if (isLive || !minutesId) return;
+    if (!minutesId) return;
     let cancelled = false;
     (async () => {
       try {
@@ -252,7 +269,7 @@ export function DetailView(props: Props) {
       } catch {/* ignore */}
     })();
     return () => { cancelled = true; };
-  }, [isLive, minutesId]);
+  }, [minutesId]);
 
   const startSummarize = useCallback(async (provider?: SummarizeProvider) => {
     if (!minutesId || summaryBusy) return;
@@ -284,9 +301,11 @@ export function DetailView(props: Props) {
     try { await cancelSummarize(minutesId); } catch {/* ignore */}
   }, [minutesId]);
 
-  /* 非-live モードでも WS を貼って、pipeline_done で議事録をリロード */
+  /* minutesId が手に入った時点で WS を貼り、pipeline_done での reload と
+     要約イベントを購読する。pipeline-detail (live) モードでも文字起こし完了で
+     minutesId が確定し次第購読を開始するので、自動要約のイベントを取りこぼさない。 */
   useEffect(() => {
-    if (isLive || !minutesId || !sessionId) return;
+    if (!minutesId || !sessionId) return;
     let ws: WebSocket | null = null;
     let timer: number | null = null;
     let attempt = 0;
@@ -305,7 +324,10 @@ export function DetailView(props: Props) {
     const handle = (e: MessageEvent) => {
       try {
         const m = JSON.parse(e.data);
-        if (m.type === "pipeline_progress" && m.data?.session_id === sessionId) {
+        // retry banner は「既存議事録の再文字起こし」を可視化するためのもの。
+        // pipeline-detail (live) モードでは初回文字起こしの pipeline_progress と
+        // 区別できないので、live モードでは setRetryStatus を呼ばない。
+        if (!isLive && m.type === "pipeline_progress" && m.data?.session_id === sessionId) {
           const st = String(m.data?.state || "");
           if (["transcribing", "stopping"].includes(st)) {
             setRetryStatus({
@@ -320,10 +342,10 @@ export function DetailView(props: Props) {
           }
         }
         if (m.type === "pipeline_done" && m.data?.session_id === sessionId) {
-          setRetryStatus(null);
+          if (!isLive) setRetryStatus(null);
           reload();
         }
-        if (m.type === "pipeline_error" && m.data?.session_id === sessionId) {
+        if (!isLive && m.type === "pipeline_error" && m.data?.session_id === sessionId) {
           setRetryStatus({
             state: "error",
             message: String(m.data?.message || "エラー"),

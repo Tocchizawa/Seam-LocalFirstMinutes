@@ -806,7 +806,15 @@ async def _finalize_session(session_id: str) -> None:
 
         await ws_manager.broadcast({
             "type": "pipeline_done",
-            "data": {"session_id": session_id, **transcript_payload},
+            "data": {
+                "session_id": session_id,
+                # 文字起こし完了時に作成した minutes の ID を伝える。
+                # pipeline-detail モードで詳細を開いていた DetailView が
+                # この ID を使って即座に DB から fetch し、currentMinutes を
+                # 切替える (= 救済ボタン誤表示と要約イベント取りこぼしを防ぐ)。
+                "minutes_id": minutes_id,
+                **transcript_payload,
+            },
         })
         await _broadcast_pipeline(session_id)
 
