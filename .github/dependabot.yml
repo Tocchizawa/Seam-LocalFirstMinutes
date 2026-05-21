@@ -1,46 +1,60 @@
 version: 2
 
+# Keep Dependabot quiet by default.
+# Version updates are disabled; security updates are grouped per ecosystem.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0
+    groups:
+      github-actions-security:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
     labels:
       - "dependencies"
+      - "security"
 
   - package-ecosystem: "npm"
     directory: "/gui"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0
     groups:
-      frontend-dependencies:
+      frontend-security:
+        applies-to: "security-updates"
         patterns:
           - "*"
     labels:
       - "dependencies"
+      - "security"
 
   - package-ecosystem: "cargo"
     directory: "/gui/src-tauri"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0
     groups:
-      rust-dependencies:
+      rust-security:
+        applies-to: "security-updates"
         patterns:
           - "*"
     labels:
       - "dependencies"
+      - "security"
 
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 0
     groups:
-      python-dependencies:
+      python-security:
+        applies-to: "security-updates"
         patterns:
           - "*"
     labels:
       - "dependencies"
+      - "security"
