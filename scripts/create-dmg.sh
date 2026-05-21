@@ -11,6 +11,37 @@ ENTITLEMENTS="gui/src-tauri/entitlements.plist"
 TAURI_VERSION=$(node -e 'console.log(require("./gui/src-tauri/tauri.conf.json").version)')
 SHORT_VERSION="${TAURI_VERSION%%-*}"
 DMG_PATH="${DMG_DIR}/Seam_${SHORT_VERSION}_aarch64.dmg"
+SIGN_ID="${APPLE_SIGNING_IDENTITY:-}"
+
+cleanup() {
+  rm -rf "${STAGE_DIR:-}" "${NOTARY_TMP_DIR:-}"
+}
+trap cleanup EXIT
+
+has_notary_credentials() {
+  [ -n "${APPLE_ID:-}" ] \
+    && [ -n "${APPLE_APP_PASSWORD:-}" ] \
+    && [ -n "${APPLE_TEAM_ID:-}" ]
+}
+
+notarize_artifact() {
+  local artifact_path="$1"
+  local label="$2"
+
+  echo "[notarize] submitting ${label} to Apple (これに数分〜十数分かかります)..."
+  set +e
+  xcrun notarytool submit "$artifact_path" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait
+  local notary_exit=$?
+  set -e
+  if [ "$notary_exit" -ne 0 ]; then
+    echo "Error: notarization failed for ${label} (exit $notary_exit)"
+    exit "$notary_exit"
+  fi
+}
 
 if [ ! -d "$APP_PATH" ]; then
   echo "Error: $APP_PATH not found"
@@ -23,6 +54,7 @@ fi
 # 強制再ビルドしたければ DMG を削除して再実行する。
 if [ -f "$DMG_PATH" ] \
   && [ "$DMG_PATH" -nt "$APP_PATH/Contents/MacOS/gui" ] \
+  && xcrun stapler validate "$APP_PATH" >/dev/null 2>&1 \
   && xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
   echo "[skip] $DMG_PATH は最新かつ公証・staple 済みです"
   echo "       強制再生成するには DMG を削除してから再実行してください"
@@ -52,7 +84,6 @@ echo "[plist] injected privacy keys"
 # ─── 署名 ───────────────────────────────────────────────
 # APPLE_SIGNING_IDENTITY が定義されていれば Developer ID で署名 (= 配布可)。
 # 未定義なら従来通り adhoc 署名 (= ローカル動作のみ可、配布不可)。
-SIGN_ID="${APPLE_SIGNING_IDENTITY:-}"
 
 if [ -z "$SIGN_ID" ]; then
   echo "[codesign] APPLE_SIGNING_IDENTITY 未設定 → adhoc 署名 (公証スキップ)"
@@ -92,20 +123,35 @@ else
   # 検証
   codesign --verify --deep --strict --verbose=2 "$APP_PATH" \
     && echo "[codesign] verify OK"
+
+  if ! has_notary_credentials; then
+    echo "Error: Developer ID 署名には .app / DMG の公証が必要です"
+    echo "       APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID を設定してください"
+    echo "       ローカル検証だけなら APPLE_SIGNING_IDENTITY を unset してください"
+    exit 1
+  fi
+
+  # .app 単体でも Gatekeeper が検証できるよう、DMG 作成前に app bundle を
+  # zip で公証提出し、ticket を app に staple しておく。
+  NOTARY_TMP_DIR=$(mktemp -d)
+  APP_ZIP_PATH="$NOTARY_TMP_DIR/Seam.app.zip"
+  ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP_PATH"
+  notarize_artifact "$APP_ZIP_PATH" "Seam.app"
+
+  echo "[notarize] stapling app..."
+  xcrun stapler staple "$APP_PATH"
+  xcrun stapler validate "$APP_PATH" && echo "[notarize] app stapled OK"
 fi
 
 # ─── DMG 作成 ───────────────────────────────────────────
-# Apple 公式ワークフローに合わせ、.app は staple せずに DMG に詰めてから
-# DMG 自体を notarize / staple する。.app を先に staple すると macOS
-# Sequoia の App Management 保護 (公証済みアプリの cross-volume 書き込み禁止)
-# に hdiutil が引っかかり「Operation not permitted」で失敗する。
+# .app 単体にも ticket を持たせたうえで DMG に詰める。コピー時に ticket や
+# 拡張属性を落とさないよう、app bundle には ditto を使う。
 mkdir -p "$DMG_DIR"
 rm -f "$DMG_PATH"
 
 STAGE_DIR=$(mktemp -d)
-trap 'rm -rf "$STAGE_DIR"' EXIT
 
-cp -R "$APP_PATH" "$STAGE_DIR/"
+ditto "$APP_PATH" "$STAGE_DIR/Seam.app"
 ln -s /Applications "$STAGE_DIR/Applications"
 
 # 重要: volname を .app のベース名 "Seam" にすると macOS Sequoia が
@@ -125,23 +171,8 @@ fi
 # ─── 公証 (Notarization) — DMG に対して行う ─────────────
 if [ -z "$SIGN_ID" ]; then
   echo "[notarize] adhoc 署名のため公証スキップ"
-elif [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_APP_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
-  echo "[notarize] APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID 未設定 → 公証スキップ"
 else
-  echo "[notarize] submitting DMG to Apple (これに数分〜十数分かかります)..."
-  set +e
-  xcrun notarytool submit "$DMG_PATH" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_APP_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
-  NOTARY_EXIT=$?
-  set -e
-  if [ "$NOTARY_EXIT" -ne 0 ]; then
-    echo "Error: notarization failed (exit $NOTARY_EXIT)"
-    exit "$NOTARY_EXIT"
-  fi
-
+  notarize_artifact "$DMG_PATH" "DMG"
   echo "[notarize] stapling DMG..."
   xcrun stapler staple "$DMG_PATH"
   xcrun stapler validate "$DMG_PATH" && echo "[notarize] DMG stapled OK"

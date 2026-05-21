@@ -20,7 +20,7 @@ Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- DMG notarize/staple ワークフローを Apple 公式手順に合わせ刷新 (.app は staple せず DMG を staple、`Seam Installer` volname で macOS Sequoia の自己参照保護も回避)
+- DMG notarize/staple ワークフローを Apple 公式手順に合わせ刷新 (`Seam.app` と DMG の両方に staple ticket を付与、`Seam Installer` volname で macOS Sequoia の自己参照保護も回避)
 - `create-dmg.sh` の DMG ファイル名を `tauri.conf.json` から動的導出
 
 ### Fixed
