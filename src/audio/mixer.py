@@ -15,6 +15,8 @@ from typing import Callable
 
 import numpy as np
 
+from src.audio.leveling import AdaptiveSpeechGain
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +28,12 @@ MAX_BUFFER_SEC = 5
 class RealtimeMixer:
     """ミックス済み 16kHz float32 mono サンプルを on_chunk に渡す。"""
 
-    def __init__(self, on_chunk: Callable[[np.ndarray], None] | None = None) -> None:
+    def __init__(
+        self,
+        on_chunk: Callable[[np.ndarray], None] | None = None,
+        *,
+        audio_leveling: dict | None = None,
+    ) -> None:
         self._on_chunk = on_chunk
         self._block_size = int(SAMPLE_RATE * BLOCK_MS / 1000)
         self._max_buf = int(SAMPLE_RATE * MAX_BUFFER_SEC)
@@ -43,6 +50,7 @@ class RealtimeMixer:
         self._consumer_restarts = 0
         self._last_restart_reason: str | None = None
         self._last_restart_at: float = 0.0
+        self._gain = AdaptiveSpeechGain.from_config(audio_leveling or {}, sample_rate=SAMPLE_RATE)
 
     def start(self, has_system: bool = False) -> None:
         self._running = True
@@ -103,7 +111,7 @@ class RealtimeMixer:
             mic_buf_sec = round(len(self._mic_buf) / SAMPLE_RATE, 2)
             sys_buf_sec = round(len(self._sys_buf) / SAMPLE_RATE, 2)
             system_seen = self._system_seen
-        return {
+        snapshot = {
             "consumer_alive": self.consumer_alive,
             "consumer_restarts": self._consumer_restarts,
             "last_restart_reason": self._last_restart_reason,
@@ -113,6 +121,10 @@ class RealtimeMixer:
             "mic_buffer_sec": mic_buf_sec,
             "system_buffer_sec": sys_buf_sec,
         }
+        if self._gain is not None:
+            snapshot["auto_gain"] = round(float(self._gain.last_gain), 2)
+            snapshot["auto_gain_rms"] = round(float(self._gain.last_rms), 4)
+        return snapshot
 
     # ─── feeds ───────────────────────────────────────────────
 
@@ -223,6 +235,8 @@ class RealtimeMixer:
     def _dispatch(self, samples: np.ndarray) -> None:
         if self._on_chunk is None:
             return
+        if self._gain is not None:
+            samples = self._gain.process(samples)
         try:
             self._on_chunk(samples)
         except Exception as e:

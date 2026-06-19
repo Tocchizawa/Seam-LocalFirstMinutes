@@ -128,7 +128,7 @@ src/
 │   ├── recorder.py          # 2トラック同時録音オーケストレーション
 │   ├── mic_capture.py       # sounddevice でマイク録音
 │   ├── system_capture.py    # Rust IPC からシステム音声受信
-│   ├── mixer.py             # リアルタイムミキシング + WAVミキシング (ffmpeg でレベル正規化・変換)
+│   ├── mixer.py             # リアルタイムミキシング + 自動ゲイン補正
 │   ├── devices.py           # デバイス一覧
 │   ├── raw_writer.py        # RAW PCM 書き込み
 │   ├── converter.py         # RAW→WAV 変換 (ffmpeg subprocess)
@@ -238,8 +238,9 @@ Unix socket ─────(raw PCM)─────→ system_capture.py
 #### ffmpeg の使用箇所
 
 - **RAW → WAV 変換**: `ffmpeg -f s16le -ar 16000 -ac 1 -i mic.raw mic.wav`
-- **レベル正規化**: `ffmpeg -i mic.wav -filter:a loudnorm ...` で mic と system の音量を揃える
-- **ミキシング**: `ffmpeg -i mic.wav -i system.wav -filter_complex amix=inputs=2 combined.wav`
+- **リアルタイム補正**: Whisper 投入前に RMS ベースの自動ゲイン補正をかける
+- **レベル正規化**: `dynaudnorm + alimiter` で録音途中の音量低下を補正する
+- **ミキシング**: `ffmpeg -i mic.wav -i system.wav -filter_complex amix=inputs=2:duration=longest:normalize=0,... combined.flac`
 - ffmpeg バイナリは .app 内の `Resources/ffmpeg/` に同梱。subprocess で呼び出す
 
 #### クラッシュ耐性
@@ -566,7 +567,7 @@ class PipelineStage(Enum):
 ├── state.json                   # パイプライン状態
 ├── mic.raw → mic.wav            # ← 完了後に全削除
 ├── system.raw → system.wav      # ←
-├── combined.wav                 # ←
+├── combined.flac                # ←
 ├── streaming_transcript.json    # ←
 ├── context.json                 # ←
 └── minutes.md                   # ←

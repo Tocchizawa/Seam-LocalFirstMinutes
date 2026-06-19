@@ -149,6 +149,21 @@ DEFAULTS: dict[str, Any] = {
         # system track 遅延補正は transcript タイムラインとの整合を崩しやすいため、
         # 既定では無効。必要時のみ明示的に有効化する。
         "system_delay_compensation_enabled": False,
+        # macOS 側の入力ゲイン変化や ScreenCaptureKit 側の音量低下を吸収する。
+        "audio_leveling": {
+            "enabled": True,
+            "realtime_enabled": True,
+            "final_normalize": True,
+            "target_rms": 0.08,
+            "noise_floor": 0.003,
+            "max_gain": 12.0,
+            "attack": 0.18,
+            "release": 0.55,
+            "peak_limit": 0.95,
+            "frame_ms": 100,
+            "gauss_size": 3,
+        },
+        "finalize_timeout_sec": 300,
         # 完了済みパイプラインの保持上限(メモリガード)。
         "memory_guard": {
             "max_retained_pipelines": 40,
@@ -455,6 +470,54 @@ class Config:
             recording["mic_stream"] = mic_stream
         if "reopen_on_overflow" not in mic_stream:
             mic_stream["reopen_on_overflow"] = False
+        leveling = recording.setdefault("audio_leveling", {})
+        if not isinstance(leveling, dict):
+            leveling = {}
+            recording["audio_leveling"] = leveling
+        leveling["enabled"] = bool(leveling.get("enabled", True))
+        leveling["realtime_enabled"] = bool(leveling.get("realtime_enabled", True))
+        leveling["final_normalize"] = bool(leveling.get("final_normalize", True))
+        try:
+            leveling["target_rms"] = max(0.01, min(0.30, float(leveling.get("target_rms", 0.08))))
+        except Exception:
+            leveling["target_rms"] = 0.08
+        try:
+            leveling["noise_floor"] = max(0.0001, min(0.05, float(leveling.get("noise_floor", 0.003))))
+        except Exception:
+            leveling["noise_floor"] = 0.003
+        try:
+            leveling["max_gain"] = max(1.0, min(20.0, float(leveling.get("max_gain", 12.0))))
+        except Exception:
+            leveling["max_gain"] = 12.0
+        try:
+            leveling["attack"] = max(0.01, min(1.0, float(leveling.get("attack", 0.18))))
+        except Exception:
+            leveling["attack"] = 0.18
+        try:
+            leveling["release"] = max(0.01, min(1.0, float(leveling.get("release", 0.55))))
+        except Exception:
+            leveling["release"] = 0.55
+        try:
+            leveling["peak_limit"] = max(0.50, min(1.0, float(leveling.get("peak_limit", 0.95))))
+        except Exception:
+            leveling["peak_limit"] = 0.95
+        try:
+            leveling["frame_ms"] = max(50, min(5000, int(leveling.get("frame_ms", 100))))
+        except Exception:
+            leveling["frame_ms"] = 100
+        try:
+            gauss_size = max(3, min(301, int(leveling.get("gauss_size", 3))))
+            if gauss_size % 2 == 0:
+                gauss_size += 1
+            leveling["gauss_size"] = min(301, gauss_size)
+        except Exception:
+            leveling["gauss_size"] = 3
+        try:
+            recording["finalize_timeout_sec"] = max(
+                60, min(900, int(recording.get("finalize_timeout_sec", 300)))
+            )
+        except Exception:
+            recording["finalize_timeout_sec"] = 300
 
         whisper = self._data.setdefault("whisper", {})
         if not isinstance(whisper, dict):
