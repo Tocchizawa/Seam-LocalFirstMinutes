@@ -29,7 +29,7 @@ export function RecordToolbar({
     recording, setRecording, paused, togglePaused,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed, level,
-    resetLive, micDevice, captureSystem,
+    resetLive, micDevice, captureSystem, setActiveSessionId,
   } = useRecording();
   const [error, setError] = useState("");
 
@@ -47,7 +47,7 @@ export function RecordToolbar({
   const handleStart = async () => {
     setError("");
     try {
-      await startRecording(project.id, micDevice, captureSystem);
+      const started = await startRecording(project.id, micDevice, captureSystem);
       void updateSettings({
         recording: {
           last_project_id: project.id,
@@ -57,6 +57,7 @@ export function RecordToolbar({
       }).catch(() => {});
       resetLive();
       resetElapsed();
+      setActiveSessionId(started.session_id);
       setRecording(true);
     } catch (e: any) {
       setError(e.message || "録音の開始に失敗しました");
@@ -66,9 +67,10 @@ export function RecordToolbar({
   const handleStop = useCallback(async () => {
     try { await stopRecording(); } catch {}
     setRecording(false);
+    setActiveSessionId(null);
     setError("");
     onStopped();
-  }, [setRecording, onStopped]);
+  }, [setRecording, setActiveSessionId, onStopped]);
 
   const handleMainClick = recording ? handleStop : handleStart;
 

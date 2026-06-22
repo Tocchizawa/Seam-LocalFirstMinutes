@@ -1,0 +1,253 @@
+"""Recording pipeline failure handling tests."""
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.api import recording
+
+
+class FakeWs:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def broadcast(self, event: dict) -> None:
+        self.events.append(event)
+
+
+class FakeRecorder:
+    def __init__(self, result: dict, *, error: str | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.stopped = False
+
+    def stop(self) -> dict:
+        self.stopped = True
+        return dict(self.result)
+
+
+class FakeStreamer:
+    def __init__(self, segments: list[dict] | None = None) -> None:
+        self.segments = segments or []
+        self.model_error = None
+        self.cleaned = False
+
+    def flush(self) -> list[dict]:
+        return list(self.segments)
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
+class FakeMixer:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+class FailingDb:
+    def insert_minutes(self, _data: dict) -> None:
+        raise RuntimeError("database is locked")
+
+    def get_minutes(self, _minutes_id: str) -> dict | None:
+        return None
+
+
+def reset_state(tmp: Path, ws: FakeWs) -> dict:
+    saved = {
+        "SESSIONS_DIR": recording.SESSIONS_DIR,
+        "recorder": recording.recorder,
+        "speaker_memory": recording.speaker_memory,
+        "ws_manager": recording.ws_manager,
+        "_active_session_id": recording._active_session_id,
+        "_last_result": recording._last_result,
+    }
+    recording.SESSIONS_DIR = tmp
+    recording.recorder = None  # type: ignore[assignment]
+    recording.speaker_memory = types.SimpleNamespace(
+        rediarize_segments=lambda segments, **_kwargs: list(segments),
+    )
+    recording.ws_manager = ws
+    recording._pipelines.clear()
+    recording._streamers.clear()
+    recording._mixers.clear()
+    recording._active_session_id = None
+    recording._last_result = None
+    return saved
+
+
+def restore_state(saved: dict) -> None:
+    recording.SESSIONS_DIR = saved["SESSIONS_DIR"]
+    recording.recorder = saved["recorder"]
+    recording.speaker_memory = saved["speaker_memory"]
+    recording.ws_manager = saved["ws_manager"]
+    recording._active_session_id = saved["_active_session_id"]
+    recording._last_result = saved["_last_result"]
+    recording._pipelines.clear()
+    recording._streamers.clear()
+    recording._mixers.clear()
+
+
+async def _run_db_save_failure_is_not_done() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        old_db_module = sys.modules.get("src.storage.db")
+        sys.modules["src.storage.db"] = types.SimpleNamespace(db=FailingDb())  # type: ignore[assignment]
+        try:
+            sid = "20260622_120000"
+            recording._pipelines[sid] = recording._new_pipeline(sid, "project-a")
+            recording._active_session_id = sid
+            recording.recorder = FakeRecorder({  # type: ignore[assignment]
+                "session_id": sid,
+                "session_dir": str(Path(td) / sid),
+                "wav_path": None,
+                "duration_sec": 1,
+                "error": None,
+            })
+            recording._streamers[sid] = FakeStreamer([
+                {"start": 0.0, "end": 1.0, "text": "hello"},
+            ])  # type: ignore[assignment]
+            recording._mixers[sid] = FakeMixer()  # type: ignore[assignment]
+
+            await recording._finalize_session(sid)
+
+            event_types = [e.get("type") for e in ws.events]
+            pipeline = recording._pipelines[sid]
+            meta = json.loads(
+                (Path(td) / sid / recording.SESSION_META_FILENAME).read_text(encoding="utf-8"),
+            )
+            assert pipeline.get("state") == "error"
+            assert "pipeline_done" not in event_types
+            assert "pipeline_error" in event_types
+            assert meta.get("state") == "saving"
+        finally:
+            if old_db_module is None:
+                sys.modules.pop("src.storage.db", None)
+            else:
+                sys.modules["src.storage.db"] = old_db_module
+            restore_state(saved)
+
+
+async def _run_mic_failure_releases_active_recording() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        try:
+            sid = "20260622_121500"
+            recording._pipelines[sid] = recording._new_pipeline(sid, "project-a")
+            recording._active_session_id = sid
+            fake_recorder = FakeRecorder({
+                "session_id": sid,
+                "session_dir": str(Path(td) / sid),
+                "wav_path": None,
+                "duration_sec": 2,
+                "error": "mic stream dead",
+            }, error="mic stream dead")
+            fake_streamer = FakeStreamer()
+            fake_mixer = FakeMixer()
+            recording.recorder = fake_recorder  # type: ignore[assignment]
+            recording._streamers[sid] = fake_streamer  # type: ignore[assignment]
+            recording._mixers[sid] = fake_mixer  # type: ignore[assignment]
+
+            await recording._stop_failed_active_recording(sid, "mic stream dead")
+
+            event_types = [e.get("type") for e in ws.events]
+            meta = json.loads(
+                (Path(td) / sid / recording.SESSION_META_FILENAME).read_text(encoding="utf-8"),
+            )
+            assert fake_recorder.stopped
+            assert recording._active_session_id is None
+            assert recording._pipelines[sid].get("state") == "error"
+            assert "recording_stopped" in event_types
+            assert "pipeline_error" in event_types
+            assert fake_streamer.cleaned
+            assert fake_mixer.stopped
+            assert meta.get("state") == "stopping"
+        finally:
+            restore_state(saved)
+
+
+async def _run_system_audio_failure_is_not_done() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        try:
+            sid = "20260622_122000"
+            session_dir = Path(td) / sid
+            session_dir.mkdir()
+            combined = session_dir / "combined.flac"
+            combined.write_bytes(b"0" * 128)
+            recording._pipelines[sid] = recording._new_pipeline(
+                sid,
+                "project-a",
+                capture_system=True,
+            )
+            recording._active_session_id = sid
+            recording.recorder = FakeRecorder({  # type: ignore[assignment]
+                "session_id": sid,
+                "session_dir": str(session_dir),
+                "wav_path": str(combined),
+                "combined_wav": str(combined),
+                "duration_sec": 3,
+                "error": "System audio conversion failed: ffmpeg exited 1",
+            })
+            recording._streamers[sid] = FakeStreamer([
+                {"start": 0.0, "end": 1.0, "text": "mic only"},
+            ])  # type: ignore[assignment]
+            recording._mixers[sid] = FakeMixer()  # type: ignore[assignment]
+
+            await recording._finalize_session(sid)
+
+            event_types = [e.get("type") for e in ws.events]
+            pipeline = recording._pipelines[sid]
+            assert pipeline.get("state") == "error"
+            assert "内部音声" in str(pipeline.get("error"))
+            assert "pipeline_done" not in event_types
+            assert "pipeline_error" in event_types
+        finally:
+            restore_state(saved)
+
+
+def test_db_save_failure_is_not_done() -> None:
+    asyncio.run(_run_db_save_failure_is_not_done())
+
+
+def test_mic_failure_releases_active_recording() -> None:
+    asyncio.run(_run_mic_failure_releases_active_recording())
+
+
+def test_system_audio_failure_is_not_done() -> None:
+    asyncio.run(_run_system_audio_failure_is_not_done())
+
+
+def _run_as_script(tests: list[Callable[[], None]]) -> int:
+    failed = 0
+    for test in tests:
+        try:
+            test()
+            print(f"PASS: {test.__name__}")
+        except Exception as e:
+            failed += 1
+            print(f"FAIL: {test.__name__}: {e}")
+    print("\n=========================================")
+    print(f"  結果: {len(tests) - failed} passed, {failed} failed")
+    print("=========================================")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(_run_as_script([
+        test_db_save_failure_is_not_done,
+        test_mic_failure_releases_active_recording,
+        test_system_audio_failure_is_not_done,
+    ]))

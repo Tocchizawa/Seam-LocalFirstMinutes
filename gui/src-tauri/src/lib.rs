@@ -258,6 +258,123 @@ struct BackendLayout {
     uv_path: String,
 }
 
+fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else if path.exists() {
+        fs::remove_file(path)
+    } else {
+        Ok(())
+    }
+}
+
+fn restore_backend_backup(work_dir: &Path, backup_dir: &Path) -> bool {
+    if !backup_dir.exists() {
+        return true;
+    }
+    for name in ["src", "pyproject.toml", "uv.lock"] {
+        let target = work_dir.join(name);
+        if let Err(e) = remove_path_if_exists(&target) {
+            eprintln!("[backend] cleanup partial {} failed: {}", name, e);
+            return false;
+        }
+        let backup = backup_dir.join(name);
+        if backup.exists() {
+            if let Err(e) = fs::rename(&backup, &target) {
+                eprintln!("[backend] restore previous {} failed: {}", name, e);
+                return false;
+            }
+        }
+    }
+    if let Err(e) = remove_path_if_exists(backup_dir) {
+        eprintln!("[backend] cleanup restored backup failed: {}", e);
+        return false;
+    }
+    true
+}
+
+fn replace_bundled_backend(work_dir: &Path, bundle_tar: &Path) -> bool {
+    let temp_dir = work_dir.join(".extracting-backend");
+    let backup_dir = work_dir.join(".previous-backend");
+    if !restore_backend_backup(work_dir, &backup_dir) {
+        return false;
+    }
+    if let Err(e) = remove_path_if_exists(&temp_dir) {
+        eprintln!("[backend] cleanup temp extract failed: {}", e);
+        return false;
+    }
+    if let Err(e) = fs::create_dir_all(&temp_dir) {
+        eprintln!("[backend] temp mkdir failed: {}", e);
+        return false;
+    }
+
+    let status = Command::new("/usr/bin/tar")
+        .arg("-xzf")
+        .arg(bundle_tar)
+        .arg("-C")
+        .arg(&temp_dir)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("[backend] tar exited: {:?}", s.code());
+            let _ = remove_path_if_exists(&temp_dir);
+            return false;
+        }
+        Err(e) => {
+            eprintln!("[backend] tar failed: {}", e);
+            let _ = remove_path_if_exists(&temp_dir);
+            return false;
+        }
+    }
+
+    for name in ["src", "pyproject.toml", "uv.lock"] {
+        if !temp_dir.join(name).exists() {
+            eprintln!("[backend] extracted backend missing {}", name);
+            let _ = remove_path_if_exists(&temp_dir);
+            return false;
+        }
+    }
+
+    if let Err(e) = fs::create_dir_all(&backup_dir) {
+        eprintln!("[backend] backup mkdir failed: {}", e);
+        let _ = remove_path_if_exists(&temp_dir);
+        return false;
+    }
+
+    for name in ["src", "pyproject.toml", "uv.lock"] {
+        let target = work_dir.join(name);
+        if target.exists() {
+            if let Err(e) = fs::rename(&target, backup_dir.join(name)) {
+                eprintln!("[backend] backup old {} failed: {}", name, e);
+                let _ = restore_backend_backup(work_dir, &backup_dir);
+                let _ = remove_path_if_exists(&temp_dir);
+                return false;
+            }
+        }
+    }
+
+    for name in ["src", "pyproject.toml", "uv.lock"] {
+        let from = temp_dir.join(name);
+        let to = work_dir.join(name);
+        if let Err(e) = fs::rename(&from, &to) {
+            eprintln!("[backend] install {} failed: {}", name, e);
+            if !restore_backend_backup(work_dir, &backup_dir) {
+                eprintln!("[backend] previous backend restore is incomplete");
+            }
+            let _ = remove_path_if_exists(&temp_dir);
+            return false;
+        }
+    }
+
+    let _ = remove_path_if_exists(&temp_dir);
+    if let Err(e) = remove_path_if_exists(&backup_dir) {
+        eprintln!("[backend] cleanup backup failed after install: {}", e);
+        return false;
+    }
+    true
+}
+
 fn detect_bundled_layout() -> Option<BackendLayout> {
     // exe: .app/Contents/MacOS/Seam → resources: .app/Contents/Resources/
     let exe = std::env::current_exe().ok()?;
@@ -295,25 +412,10 @@ fn detect_bundled_layout() -> Option<BackendLayout> {
             eprintln!("[backend] mkdir failed: {}", e);
             return None;
         }
-        let status = Command::new("/usr/bin/tar")
-            .arg("-xzf")
-            .arg(&bundle_tar)
-            .arg("-C")
-            .arg(&work_dir)
-            .status();
-        match status {
-            Ok(s) if s.success() => {
-                let _ = fs::write(&marker, &current_sig);
-            }
-            Ok(s) => {
-                eprintln!("[backend] tar exited: {:?}", s.code());
-                return None;
-            }
-            Err(e) => {
-                eprintln!("[backend] tar failed: {}", e);
-                return None;
-            }
+        if !replace_bundled_backend(&work_dir, &bundle_tar) {
+            return None;
         }
+        let _ = fs::write(&marker, &current_sig);
     }
 
     Some(BackendLayout {

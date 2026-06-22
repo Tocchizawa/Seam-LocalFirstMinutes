@@ -148,6 +148,38 @@ class Recorder:
             return None
         return idx if idx >= 0 else None
 
+    def _is_portaudio_internal_error(self, error: object) -> bool:
+        return "PaErrorCode -9986" in str(error)
+
+    def _mic_internal_error_recovery_settings(self) -> tuple[bool, int, float]:
+        stream_cfg = config.get("recording", "mic_stream", default={}) or {}
+        reset_enabled = bool(stream_cfg.get("reset_backend_on_internal_error", True))
+        try:
+            retries = int(stream_cfg.get("internal_error_retries", 2))
+        except Exception:
+            retries = 2
+        try:
+            delay_sec = float(stream_cfg.get("internal_error_retry_delay_sec", 0.4))
+        except Exception:
+            delay_sec = 0.4
+        return reset_enabled, max(0, min(retries, 5)), max(0.0, min(delay_sec, 3.0))
+
+    def _reset_audio_backend(self, reason: str) -> bool:
+        terminate = getattr(sd, "_terminate", None)
+        initialize = getattr(sd, "_initialize", None)
+        if not (callable(terminate) and callable(initialize)):
+            logger.warning("PortAudio reset is unavailable after %s", reason)
+            return False
+        try:
+            logger.warning("Resetting PortAudio after %s", reason)
+            terminate()
+            time.sleep(0.2)
+            initialize()
+            return True
+        except Exception as e:
+            logger.warning("PortAudio reset failed after %s: %s", reason, e)
+            return False
+
     def _build_mic_start_error_message(
         self,
         raw_error: str,
@@ -178,12 +210,15 @@ class Recorder:
         fallback_hint = " / 既定入力デバイスへのフォールバックも失敗"
         if not fallback_attempted:
             fallback_hint = ""
-        return (
-            f"{kind}。"
-            "macOSのマイク権限・入力デバイス接続・他アプリ占有・デバイス設定を確認して再試行してください。"
-            f" ({requested} / {default_hint}{fallback_hint})"
-            f" 元エラー: {raw_error}"
-        )
+        if self._is_portaudio_internal_error(raw_error):
+            hint = (
+                "CoreAudio/PortAudioの一時的な不調、長時間常駐後の音声入力復帰失敗、"
+                "入力デバイスの切断/占有、またはmacOSのマイク権限が原因の可能性があります。"
+                "アプリ再起動またはデバイス再選択で復旧する場合があります。"
+            )
+        else:
+            hint = "macOSのマイク権限・入力デバイス接続・他アプリ占有・デバイス設定を確認して再試行してください。"
+        return f"{kind}。{hint} ({requested} / {default_hint}{fallback_hint}) 元エラー: {raw_error}"
 
     def _probe_input_stream(self, device_idx: int) -> None:
         dev_info = sd.query_devices(device_idx)
@@ -261,21 +296,51 @@ class Recorder:
 
         last_error: Exception | None = None
         chosen: int | None = None
+        reset_enabled, internal_retries, retry_delay_sec = self._mic_internal_error_recovery_settings()
         for idx, device_idx in enumerate(candidates):
-            try:
-                self._probe_input_stream(device_idx)
-                chosen = device_idx
-                if idx > 0:
-                    logger.warning(
-                        "Mic preflight fallback succeeded: requested=%s -> default=%s",
-                        requested_device,
-                        device_idx,
-                    )
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    self._probe_input_stream(device_idx)
+                    chosen = device_idx
+                    if idx > 0:
+                        logger.warning(
+                            "Mic preflight fallback succeeded: requested=%s -> default=%s",
+                            requested_device,
+                            device_idx,
+                        )
+                    break
+                except Exception as e:
+                    last_error = e
+                    is_internal = self._is_portaudio_internal_error(e)
+                    can_retry = reset_enabled and is_internal and attempt <= internal_retries
+                    if can_retry:
+                        logger.warning(
+                            "Mic preflight failed with PortAudio internal error "
+                            "(device=%s, attempt=%d/%d): %s",
+                            device_idx,
+                            attempt,
+                            internal_retries + 1,
+                            e,
+                        )
+                        reset_ok = self._reset_audio_backend(
+                            f"mic preflight failed on device {device_idx}",
+                        )
+                        if not reset_ok:
+                            logger.warning(
+                                "Mic preflight recovery skipped because PortAudio reset failed "
+                                "(device=%s)",
+                                device_idx,
+                            )
+                            break
+                        if retry_delay_sec > 0:
+                            time.sleep(retry_delay_sec)
+                        continue
+                    logger.warning("Mic preflight failed (device=%s): %s", device_idx, e)
+                    break
+            if chosen is not None:
                 break
-            except Exception as e:
-                last_error = e
-                logger.warning("Mic preflight failed (device=%s): %s", device_idx, e)
-                continue
 
         if chosen is None:
             raw = str(last_error) if last_error else "unknown"
@@ -456,6 +521,10 @@ class Recorder:
             max_stream_reopen = min(20, max(5, int(stream_cfg.get("max_reopen", 8))))
             overflow_reopen_streak = max(3, int(stream_cfg.get("overflow_reopen_streak", 6)))
             reopen_on_overflow = bool(stream_cfg.get("reopen_on_overflow", False))
+            reset_on_internal, internal_reset_retries, internal_retry_delay = (
+                self._mic_internal_error_recovery_settings()
+            )
+            internal_resets = 0
 
             # 対応チャンネル数を確定: 1ch を試して NG なら 2ch (max_in_ch)
             channels = self._pick_input_channels(capture_rate, max_in_ch)
@@ -511,6 +580,19 @@ class Recorder:
                     else:
                         logger.error("InputStream open failed (try %d/%d): %s",
                                      stream_opens, max_stream_reopen, e)
+                        if (
+                            reset_on_internal
+                            and self._is_portaudio_internal_error(e)
+                            and internal_resets < internal_reset_retries
+                        ):
+                            internal_resets += 1
+                            reset_ok = self._reset_audio_backend(
+                                f"mic stream open failed on device {self._mic_device}",
+                            )
+                            if reset_ok:
+                                if internal_retry_delay > 0:
+                                    time.sleep(internal_retry_delay)
+                                continue
                         if stream_opens >= max_stream_reopen:
                             self._error = msg
                             return
@@ -648,8 +730,12 @@ class Recorder:
         if self._sys_capture:
             try:
                 self._sys_capture.stop()
+                if self._sys_capture.error:
+                    sys_error = self._sys_capture.error
+                    self._error = f"{self._error}; {sys_error}" if self._error else sys_error
             except Exception as e:
                 logger.warning("System capture stop error: %s", e)
+                self._error = f"{self._error}; {e}" if self._error else str(e)
             self._sys_capture = None
 
         # Check files
