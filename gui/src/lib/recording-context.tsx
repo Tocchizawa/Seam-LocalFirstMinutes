@@ -100,8 +100,10 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
   const startRef = useRef(0);
   const recordingRef = useRef(recording);
+  const activeSessionIdRef = useRef(activeSessionId);
   const pausedRef = useRef(paused);
   useEffect(() => { recordingRef.current = recording; }, [recording]);
+  useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
 
   // 起動時に既存のセッションを復元
@@ -109,6 +111,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     getRecordingStatus().then((s) => {
       if (s.recording) {
         setRecording(true);
+        setActiveSessionId(s.session_id ?? null);
         setElapsedSec(Math.floor(s.elapsed_sec));
         if (typeof s.mic_muted === "boolean") setMicMutedLocal(s.mic_muted);
       }
@@ -145,6 +148,31 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           const sec = Math.floor(m.data.elapsed_sec);
           setElapsedSec((prev) => (prev !== sec ? sec : prev));
         }
+        if (typeof m.data?.session_id === "string") {
+          setActiveSessionId(m.data.session_id);
+        }
+        return;
+      }
+      if (t === "recording_stopped") {
+        const stoppedSession = typeof m.data?.session_id === "string" ? m.data.session_id : null;
+        const activeSession = activeSessionIdRef.current;
+        if (!stoppedSession || stoppedSession === activeSession || (recordingRef.current && !activeSession)) {
+          setRecording(false);
+          setActiveSessionId(null);
+          setStreamStatus(null);
+        }
+        dispatch(t, m.data);
+        return;
+      }
+      if (t === "pipeline_error") {
+        const failedSession = typeof m.data?.session_id === "string" ? m.data.session_id : null;
+        const activeSession = activeSessionIdRef.current;
+        if (failedSession && recordingRef.current && (failedSession === activeSession || !activeSession)) {
+          setRecording(false);
+          setActiveSessionId(null);
+          setStreamStatus(null);
+        }
+        dispatch(t, m.data);
         return;
       }
       if (t === "transcript_chunk" && m.data) {

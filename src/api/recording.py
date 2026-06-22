@@ -159,6 +159,17 @@ def _has_usable_audio_from_result(result: dict | None) -> bool:
     return False
 
 
+def _is_system_audio_failure(message: str) -> bool:
+    text = message.lower()
+    return (
+        "system audio" in text
+        or "screencapturekit" in text
+        or "画面収録" in message
+        or "内部音声" in message
+        or "キャプチャ" in message
+    )
+
+
 def _ensure_playback_wav(flac_path: Path, wav_path: Path) -> Path | None:
     """FLAC 再生互換のため、必要時に WAV を生成して返す。
 
@@ -378,10 +389,11 @@ def _load_persisted_segments(session_id: str) -> list[dict]:
     return out
 
 
-def _new_pipeline(session_id: str, project_id: str) -> dict:
+def _new_pipeline(session_id: str, project_id: str, capture_system: bool = False) -> dict:
     return {
         "session_id": session_id,
         "project_id": project_id,
+        "capture_system": capture_system,
         "state": "recording",
         "message": "",
         "result": None,
@@ -552,12 +564,8 @@ async def _stream_levels() -> None:
                     mic_failure_handled = True
                     msg = str(recorder.error)
                     logger.error("[watchdog] mic stream dead for %s: %s", sid, msg)
-                    _set_state(sid, state="error", message=msg, error=msg)
-                    await ws_manager.broadcast({
-                        "type": "pipeline_error",
-                        "data": {"session_id": sid, "message": msg},
-                    })
-                    await _broadcast_pipeline(sid)
+                    await _stop_failed_active_recording(sid, msg)
+                    return
 
                 streamer = _streamers.get(sid)
                 mixer = _mixers.get(sid)
@@ -618,6 +626,48 @@ async def _broadcast_pipeline(session_id: str) -> None:
     await ws_manager.broadcast({"type": "pipeline_progress", "data": dict(p)})
 
 
+async def _mark_pipeline_error(session_id: str, message: str) -> None:
+    _set_state(session_id, state="error", message=message, error=message)
+    await ws_manager.broadcast({
+        "type": "pipeline_error",
+        "data": {"session_id": session_id, "message": message},
+    })
+    await _broadcast_pipeline(session_id)
+
+
+async def _stop_failed_active_recording(session_id: str, message: str) -> None:
+    """録音中の致命的な入力異常を停止状態へ寄せ、次の録音を塞がないようにする。"""
+    global _active_session_id, _last_result
+
+    _write_session_meta(session_id, state="stopping", error=message)
+    await _mark_pipeline_error(session_id, message)
+
+    result: dict | None = None
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, recorder.stop)
+        _last_result = result
+        _set_state(session_id, result=result)
+        _write_session_meta(
+            session_id,
+            state="stopping",
+            error=message,
+            wav_path=result.get("wav_path") if isinstance(result, dict) else None,
+        )
+        await ws_manager.broadcast({
+            "type": "recording_stopped",
+            "data": {**result, "session_id": session_id},
+        })
+    except Exception as e:
+        logger.error("failed to stop broken recording [%s]: %s", session_id, e)
+        _write_session_meta(session_id, state="stopping", error=f"{message}; stop failed: {e}")
+    finally:
+        if _active_session_id == session_id:
+            _active_session_id = None
+        _cleanup_session(session_id)
+        await _broadcast_pipeline(session_id)
+
+
 async def _finalize_session(session_id: str) -> None:
     """録音停止後の処理: mixer.stop + streamer.flush + DB 保存。
     録音中の他セッションがあっても並行して動く。"""
@@ -654,15 +704,27 @@ async def _finalize_session(session_id: str) -> None:
 
         recorder_error = str(result.get("error") or "").strip()
         if recorder_error:
-            if _has_usable_audio_from_result(result):
+            system_audio_required = bool(p.get("capture_system"))
+            system_audio_failed = system_audio_required and _is_system_audio_failure(recorder_error)
+            if _has_usable_audio_from_result(result) and not system_audio_failed:
                 logger.warning(
                     "recorder.stop returned error but usable audio exists [%s]: %s",
                     session_id,
                     recorder_error,
                 )
             else:
-                _set_state(session_id, state="error", message=recorder_error, error=recorder_error)
-                await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": recorder_error}})
+                msg = (
+                    f"内部音声の録音に失敗しました: {recorder_error}"
+                    if system_audio_failed else recorder_error
+                )
+                _set_state(session_id, state="error", message=msg, error=msg)
+                _write_session_meta(
+                    session_id,
+                    state="stopping",
+                    error=msg,
+                    wav_path=result.get("wav_path") if isinstance(result, dict) else None,
+                )
+                await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": msg}})
                 await _broadcast_pipeline(session_id)
                 _cleanup_session(session_id)
                 _active_session_id = None
@@ -768,11 +830,8 @@ async def _finalize_session(session_id: str) -> None:
         _set_record_stage(Stage.SAVING, "DB に保存中...")
         _write_session_meta(session_id, state="saving")
         await _broadcast_pipeline(session_id)
-        _set_state(session_id, state="done",
-                   transcript=transcript_payload)
 
-        # DB 保存 (insert 成功時のみ minutes_id を set。失敗時は None のまま)
-        minutes_id: str | None = None
+        # DB 保存に成功してから done にする。SQLite が正本なので、失敗時は復旧対象として残す。
         try:
             from src.storage.db import db
 
@@ -798,11 +857,36 @@ async def _finalize_session(session_id: str) -> None:
                 "created_at": now,
                 "updated_at": now,
             })
+            if db.get_minutes(new_id) is None:
+                raise RuntimeError("inserted minutes not found")
             minutes_id = new_id
             logger.info("Minutes saved: %s (%d segments)", session_id, len(transcript))
             _delete_session_meta(session_id)
         except Exception as e:
+            msg = f"DB保存に失敗しました: {e}"
             logger.error("Failed to save minutes [%s]: %s", session_id, e)
+            _set_state(
+                session_id,
+                state="error",
+                message=msg,
+                error=msg,
+                transcript=transcript_payload,
+            )
+            _write_session_meta(
+                session_id,
+                state="saving",
+                error=msg,
+                wav_path=wav_path,
+            )
+            await ws_manager.broadcast({
+                "type": "pipeline_error",
+                "data": {"session_id": session_id, "message": msg},
+            })
+            await _broadcast_pipeline(session_id)
+            return
+
+        _set_state(session_id, state="done",
+                   transcript=transcript_payload)
 
         await ws_manager.broadcast({
             "type": "pipeline_done",
@@ -832,18 +916,10 @@ async def _finalize_session(session_id: str) -> None:
             logger.info(
                 "[summary] auto_generate=false, skipping auto-summary for %s", session_id,
             )
-        elif not minutes_id:
-            logger.warning(
-                "[summary] skipping auto-summary: minutes_id is None (DB save failed) for %s",
-                session_id,
-            )
 
     except Exception as e:
         logger.error("Streaming finalize failed [%s]: %s", session_id, e)
-        _set_state(session_id, state="error", message=str(e), error=str(e))
-        await ws_manager.broadcast({"type": "pipeline_error",
-                                    "data": {"session_id": session_id, "message": str(e)}})
-        await _broadcast_pipeline(session_id)
+        await _mark_pipeline_error(session_id, str(e))
         _cleanup_session(session_id)
 
 
@@ -880,7 +956,7 @@ async def start_recording(req: StartRequest) -> dict:
         sid = f"{session_id}_{suffix}"
     session_id = sid
 
-    pipeline = _new_pipeline(session_id, req.project_id)
+    pipeline = _new_pipeline(session_id, req.project_id, bool(req.capture_system))
     _pipelines[session_id] = pipeline
     _evict_completed_pipelines()
 

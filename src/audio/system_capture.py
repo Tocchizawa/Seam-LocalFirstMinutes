@@ -117,11 +117,15 @@ class SystemAudioCapture:
             start_event.set()
 
         self._stream.startCaptureWithCompletionHandler_(on_start)
-        start_event.wait(timeout=10)
+        if not start_event.wait(timeout=10):
+            self._cleanup()
+            self._error = "ScreenCaptureKit のキャプチャ開始がタイムアウトしました"
+            raise RuntimeError(self._error)
 
         if start_error[0]:
             self._cleanup()
-            raise RuntimeError(f"キャプチャ開始に失敗: {start_error[0]}")
+            self._error = f"キャプチャ開始に失敗: {start_error[0]}"
+            raise RuntimeError(self._error)
 
         self._running = True
         logger.info(
@@ -149,15 +153,21 @@ class SystemAudioCapture:
         if hasattr(self, "_raw_path") and self._raw_path and self._raw_path.exists():
             import subprocess
             try:
-                subprocess.run([
+                result = subprocess.run([
                     _find_ffmpeg(), "-y",
                     "-f", "f32le", "-ar", str(self._sample_rate), "-ac", "1",
                     "-i", str(self._raw_path),
                     str(self._wav_path),
                 ], capture_output=True, text=True, timeout=120)
+                if result.returncode != 0:
+                    stderr = (result.stderr or "").strip()
+                    raise RuntimeError(f"ffmpeg exited {result.returncode}: {stderr[-500:]}")
+                if not (self._wav_path.exists() and self._wav_path.stat().st_size > 44):
+                    raise RuntimeError("converted WAV was not created or is empty")
                 self._raw_path.unlink(missing_ok=True)
                 logger.info("System audio: raw → %s", self._wav_path.name)
             except Exception as e:
+                self._error = f"System audio conversion failed: {e}"
                 logger.error("System audio conversion failed: %s", e)
 
         self._stream = None

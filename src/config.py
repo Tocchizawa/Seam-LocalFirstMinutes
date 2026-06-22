@@ -145,6 +145,9 @@ DEFAULTS: dict[str, Any] = {
             "max_read_errors": 50,
             "max_reopen": 8,
             "reopen_on_overflow": False,
+            "reset_backend_on_internal_error": True,
+            "internal_error_retries": 2,
+            "internal_error_retry_delay_sec": 0.4,
         },
         # system track 遅延補正は transcript タイムラインとの整合を崩しやすいため、
         # 既定では無効。必要時のみ明示的に有効化する。
@@ -470,6 +473,10 @@ class Config:
             recording["mic_stream"] = mic_stream
         if "reopen_on_overflow" not in mic_stream:
             mic_stream["reopen_on_overflow"] = False
+        mic_stream.setdefault("reset_backend_on_internal_error", True)
+        mic_stream.setdefault("internal_error_retries", 2)
+        mic_stream.setdefault("internal_error_retry_delay_sec", 0.4)
+
         leveling = recording.setdefault("audio_leveling", {})
         if not isinstance(leveling, dict):
             leveling = {}

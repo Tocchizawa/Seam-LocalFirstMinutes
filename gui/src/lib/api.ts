@@ -272,7 +272,7 @@ export const stopRecording = () =>
   request<{ status: string }>("/api/recording/stop", { method: "POST" });
 
 export const getRecordingStatus = () =>
-  request<{ recording: boolean; elapsed_sec: number; mic_muted?: boolean }>(
+  request<{ recording: boolean; elapsed_sec: number; session_id?: string | null; mic_muted?: boolean }>(
     "/api/recording/status",
   );
 

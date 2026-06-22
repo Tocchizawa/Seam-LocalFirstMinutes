@@ -23,13 +23,14 @@ interface Props {
 export function RecordingBanner({ isOnLive, onBackToList }: Props) {
   const {
     recording, paused, togglePaused, elapsedSec, level,
-    setRecording, liveSegments,
+    setRecording, setActiveSessionId, liveSegments,
   } = useRecording();
 
   const handleStop = useCallback(async () => {
     try { await stopRecording(); } catch {}
     setRecording(false);
-  }, [setRecording]);
+    setActiveSessionId(null);
+  }, [setRecording, setActiveSessionId]);
 
   if (!recording) return null;
 
