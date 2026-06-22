@@ -27,9 +27,17 @@ interface Props {
   /** 進行中の要約ジョブ: minutes_id → state ("queued" / "running") */
   activeSummarizes: Map<string, string>;
   processing: PipelineStatus[];
+  loading?: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  error?: string;
+  moreError?: string;
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onOpenPipeline: (sessionId: string) => void;
   onDismissPipeline: (sessionId: string) => void;
+  onLoadMore?: () => void;
+  onRetry?: () => void;
+  onRetryMore?: () => void;
   onMutated: () => void;
 }
 
@@ -121,7 +129,8 @@ function HighlightedText({
 
 export function MinutesList({
   minutes, projectId, allProjects, activeSummarizes, processing,
-  onOpenMin, onOpenPipeline, onDismissPipeline, onMutated,
+  loading = false, loadingMore = false, hasMore = false, error = "", moreError = "",
+  onOpenMin, onOpenPipeline, onDismissPipeline, onLoadMore, onRetry, onRetryMore, onMutated,
 }: Props) {
   const [q, setQ] = useState("");
   const [searched, setSearched] = useState<MinutesSearchResult[] | null>(null);
@@ -166,7 +175,10 @@ export function MinutesList({
       for (const p of processing) {
         if (p.session_id && minSids.has(p.session_id)) {
           map.set(p.session_id, p);
-        } else if (p.session_id) {
+        } else if (
+          p.session_id
+          && (p.state === "stopping" || p.state === "transcribing")
+        ) {
           orphans.push(p);
         }
       }
@@ -301,7 +313,7 @@ export function MinutesList({
   };
 
   const showSearchResults = searched !== null;
-  const empty = !showSearchResults && items.length === 0;
+  const empty = !showSearchResults && !loading && !error && items.length === 0;
 
   return (
     <div className="flex flex-col">
@@ -379,6 +391,13 @@ export function MinutesList({
         </p>
       )}
 
+      {!showSearchResults && loading && items.length === 0 && (
+        <div className="flex items-center justify-center gap-2 py-12 text-[12px] text-(--t3)">
+          <Spinner size={13} />
+          <span>読み込み中...</span>
+        </div>
+      )}
+
       {showSearchResults && (
         <SearchResults
           query={q.trim()}
@@ -417,6 +436,48 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
+        </div>
+      )}
+
+      {!showSearchResults && error && (
+        <div className="px-5 py-5 text-center">
+          <p className="text-[12px] text-(--danger) mb-3">{error}</p>
+          {onRetry && (
+            <button type="button" className="btn h-8 px-4 text-[12px]" onClick={onRetry}>
+              再試行
+            </button>
+          )}
+        </div>
+      )}
+
+      {!showSearchResults && !error && moreError && (
+        <div className="px-5 py-5 text-center">
+          <p className="text-[12px] text-(--danger) mb-3">{moreError}</p>
+          {onRetryMore && (
+            <button type="button" className="btn h-8 px-4 text-[12px]" onClick={onRetryMore}>
+              続きを再試行
+            </button>
+          )}
+        </div>
+      )}
+
+      {!showSearchResults && !error && !moreError && (hasMore || loadingMore) && (
+        <div className="px-5 py-5 flex justify-center">
+          <button
+            type="button"
+            className="btn h-8 px-4 text-[12px]"
+            disabled={loadingMore}
+            onClick={onLoadMore}
+          >
+            {loadingMore ? (
+              <span className="inline-flex items-center gap-2">
+                <PhSpinner size={12} className="anim-spin" />
+                読み込み中
+              </span>
+            ) : (
+              "さらに読み込む"
+            )}
+          </button>
         </div>
       )}
 
