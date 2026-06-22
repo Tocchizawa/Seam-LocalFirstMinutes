@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
+from src.audio.leveling import build_ffmpeg_loudness_filter
 from src.config import APP_DIR, config
 
 logger = logging.getLogger(__name__)
@@ -717,10 +718,14 @@ class Recorder:
         if mic is None and sys is None:
             return None
         combined = self._session_dir / "combined.flac"
-        cmd: list[str] = [FFMPEG, "-y"]
         rec_cfg = config.get("recording", default={}) or {}
+        loudness_filter = build_ffmpeg_loudness_filter(rec_cfg.get("audio_leveling"))
         delay_enabled = bool(rec_cfg.get("system_delay_compensation_enabled", False))
         delay_ms = 0
+        try:
+            timeout_sec = max(60, min(900, int(rec_cfg.get("finalize_timeout_sec", 300))))
+        except Exception:
+            timeout_sec = 300
         if delay_enabled:
             delay_ms = int(round(max(0.0, float(system_delay_sec or 0.0)) * 1000.0))
             # 200ms未満は実測誤差として扱い、補正を入れない。
@@ -737,29 +742,30 @@ class Recorder:
                 "System delay measured (%.3fs) but compensation is disabled",
                 float(system_delay_sec),
             )
-        if mic and sys:
-            if delay_ms > 0:
-                cmd += [
-                    "-i", str(mic), "-i", str(sys),
-                    "-filter_complex",
-                    f"[1:a]adelay={delay_ms}[sysd];[0:a][sysd]amix=inputs=2:duration=longest",
-                ]
-            else:
-                cmd += [
-                    "-i", str(mic), "-i", str(sys),
-                    "-filter_complex", "amix=inputs=2:duration=longest",
-                ]
-        else:
-            cmd += ["-i", str(mic or sys)]
-            if sys and delay_ms > 0:
-                cmd += ["-af", f"adelay={delay_ms}"]
-        cmd += [
-            "-ar", "24000", "-ac", "1",
-            "-c:a", "flac", "-compression_level", "8",
-            str(combined),
-        ]
+        cmd = self._build_finalize_cmd(mic, sys, delay_ms, loudness_filter)
+        fallback_cmd = (
+            self._build_finalize_cmd(mic, sys, delay_ms, None)
+            if loudness_filter else None
+        )
+        if loudness_filter:
+            logger.info("Applying dynamic audio normalization to final mix")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+            if (
+                result.returncode != 0
+                and fallback_cmd is not None
+                and "No such filter" in (result.stderr or "")
+            ):
+                logger.warning(
+                    "ffmpeg dynamic normalization unsupported, retrying without it: %s",
+                    result.stderr[-300:],
+                )
+                result = subprocess.run(
+                    fallback_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
             if result.returncode != 0:
                 logger.error("ffmpeg finalize failed (code %d): %s",
                              result.returncode, result.stderr[-500:])
@@ -782,6 +788,46 @@ class Recorder:
         except Exception as e:
             logger.error("Finalize failed: %s", e)
         return None
+
+    def _build_finalize_cmd(
+        self,
+        mic: Path | None,
+        sys: Path | None,
+        delay_ms: int = 0,
+        loudness_filter: str | None = None,
+    ) -> list[str]:
+        combined = self._session_dir / "combined.flac"
+        cmd: list[str] = [FFMPEG, "-y"]
+        if mic and sys:
+            mix_filter = "amix=inputs=2:duration=longest:normalize=0"
+            if loudness_filter:
+                mix_filter = f"{mix_filter},{loudness_filter}"
+            if delay_ms > 0:
+                cmd += [
+                    "-i", str(mic), "-i", str(sys),
+                    "-filter_complex",
+                    f"[1:a]adelay={delay_ms}[sysd];[0:a][sysd]{mix_filter}",
+                ]
+            else:
+                cmd += [
+                    "-i", str(mic), "-i", str(sys),
+                    "-filter_complex", mix_filter,
+                ]
+        else:
+            cmd += ["-i", str(mic or sys)]
+            filters: list[str] = []
+            if sys and delay_ms > 0:
+                filters.append(f"adelay={delay_ms}")
+            if loudness_filter:
+                filters.append(loudness_filter)
+            if filters:
+                cmd += ["-af", ",".join(filters)]
+        cmd += [
+            "-ar", "24000", "-ac", "1",
+            "-c:a", "flac", "-compression_level", "8",
+            str(combined),
+        ]
+        return cmd
 
     def get_status(self) -> dict:
         return {
