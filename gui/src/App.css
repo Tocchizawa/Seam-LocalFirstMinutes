@@ -2282,6 +2282,11 @@ button { font-family: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.splash-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
 .splash-note {
   font-size: 11px;
   color: var(--t3);

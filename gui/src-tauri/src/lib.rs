@@ -506,6 +506,20 @@ fn start_backend(runtime_root: &Path) -> Option<Child> {
     child
 }
 
+fn start_backend_with_retries(runtime_root: &Path, attempts: usize) -> Option<Child> {
+    let attempts = attempts.max(1);
+    for attempt in 1..=attempts {
+        if let Some(child) = start_backend(runtime_root) {
+            return Some(child);
+        }
+        eprintln!("[backend] start attempt {}/{} failed", attempt, attempts);
+        if attempt < attempts {
+            std::thread::sleep(Duration::from_millis(700));
+        }
+    }
+    None
+}
+
 fn which_uv() -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let candidates = [
@@ -672,6 +686,46 @@ fn emit_status<R: tauri::Runtime>(app: &AppHandle<R>, status: BackendStatus) {
     let _ = app.emit("backend-status", status);
 }
 
+fn spawn_backend_exit_monitor<R: tauri::Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(1000));
+
+        let exited = match app.try_state::<ManagedProcesses>() {
+            Some(state) => {
+                let mut guard = state.0.lock().unwrap();
+                let wait_result = match guard.backend.as_mut() {
+                    Some(child) => child.try_wait(),
+                    None => return,
+                };
+                match wait_result {
+                    Ok(Some(status)) => {
+                        guard.backend.take();
+                        Some(format!("backend exited: {}", status))
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(format!("backend monitor failed: {}", e)),
+                }
+            }
+            None => return,
+        };
+
+        if let Some(detail) = exited {
+            eprintln!("[backend] {}", detail);
+            emit_status(
+                &app,
+                BackendStatus {
+                    phase: "error".into(),
+                    message: "バックエンドが停止しました".into(),
+                    progress: None,
+                    detail: Some(detail.clone()),
+                },
+            );
+            let _ = app.emit("backend-log", detail);
+            break;
+        }
+    });
+}
+
 /// stderr を line-by-line で読みつつ、進捗イベントを emit する。
 /// 読み取った行はそのまま parent stderr にも出力 (デバッグ用)。
 /// stderr を byte 単位で読み、\n / \r どちらでも 1 行として分割する。
@@ -741,6 +795,104 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+#[tauri::command]
+fn restart_backend(app: AppHandle) -> Result<(), String> {
+    emit_status(
+        &app,
+        BackendStatus {
+            phase: "starting".into(),
+            message: "バックエンドを再起動中...".into(),
+            progress: Some(0.02),
+            detail: None,
+        },
+    );
+
+    if let Some(state) = app.try_state::<ManagedProcesses>() {
+        let mut guard = state.0.lock().unwrap();
+        kill_child(&mut guard.backend, "backend");
+    }
+    kill_stale_backend_listener(18900);
+
+    let runtime_root = ensure_runtime_dirs();
+    let mut backend_child = start_backend_with_retries(&runtime_root, 3);
+    let backend_stderr = backend_child.as_mut().and_then(|c| c.stderr.take());
+    if backend_child.is_none() {
+        let detail = "backend process could not be started".to_string();
+        emit_status(
+            &app,
+            BackendStatus {
+                phase: "error".into(),
+                message: "バックエンドの再起動に失敗しました".into(),
+                progress: None,
+                detail: Some(detail.clone()),
+            },
+        );
+        return Err(detail);
+    }
+
+    let Some(state) = app.try_state::<ManagedProcesses>() else {
+        return Err("managed process state is unavailable".into());
+    };
+    {
+        let mut guard = state.0.lock().unwrap();
+        guard.backend = backend_child;
+    }
+    if let Some(stderr) = backend_stderr {
+        spawn_stderr_reader(app.clone(), stderr);
+    }
+    spawn_backend_exit_monitor(app);
+    Ok(())
+}
+
+#[tauri::command]
+fn backend_process_status(app: AppHandle) -> BackendStatus {
+    let Some(state) = app.try_state::<ManagedProcesses>() else {
+        return BackendStatus {
+            phase: "error".into(),
+            message: "バックエンド状態を取得できません".into(),
+            progress: None,
+            detail: Some("managed process state is unavailable".into()),
+        };
+    };
+
+    let mut guard = state.0.lock().unwrap();
+    let wait_result = match guard.backend.as_mut() {
+        Some(child) => child.try_wait(),
+        None => {
+            return BackendStatus {
+                phase: "error".into(),
+                message: "バックエンドが起動していません".into(),
+                progress: None,
+                detail: Some("backend process is not running".into()),
+            };
+        }
+    };
+
+    match wait_result {
+        Ok(Some(status)) => {
+            guard.backend.take();
+            BackendStatus {
+                phase: "error".into(),
+                message: "バックエンドが停止しました".into(),
+                progress: None,
+                detail: Some(format!("backend exited: {}", status)),
+            }
+        }
+        Ok(None) => BackendStatus {
+            phase: "starting".into(),
+            message: "バックエンドを起動中...".into(),
+            progress: Some(0.02),
+            detail: None,
+        },
+        Err(e) => BackendStatus {
+            phase: "error".into(),
+            message: "バックエンド状態を取得できません".into(),
+            progress: None,
+            detail: Some(e.to_string()),
+        },
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_root = ensure_runtime_dirs();
@@ -748,7 +900,8 @@ pub fn run() {
     // 吸われてモデル状態が壊れたままになる。起動前に stale backend を掃除する。
     kill_stale_backend_listener(18900);
     let ollama_child = None;
-    let mut backend_child = start_backend(&runtime_root);
+    let mut backend_child = start_backend_with_retries(&runtime_root, 3);
+    let backend_started = backend_child.is_some();
     // 同梱バックエンドの stderr を取り出して後で reader thread に渡す。
     // (start_backend の Cmd::stderr(piped) のおかげで Some になっているはず)
     let backend_stderr = backend_child.as_mut().and_then(|c| c.stderr.take());
@@ -763,18 +916,34 @@ pub fn run() {
                 ollama: ollama_child,
             })));
 
-            // 起動状況の初期イベントを送る (Splash が listen 開始する前でも到達するように
-            // window が「ready-to-show」した段階で再送はしないが、frontend は遅延 listen でも
-            // 後続イベントで status を更新できる)。
             let app_handle = app.handle().clone();
-            emit_status(&app_handle, BackendStatus {
-                phase: "starting".into(),
-                message: "バックエンドを起動中...".into(),
-                progress: Some(0.02),
-                detail: None,
-            });
-            if let Some(stderr) = backend_stderr {
-                spawn_stderr_reader(app_handle, stderr);
+            if backend_started {
+                // 起動状況の初期イベントを送る (Splash が listen 開始する前でも到達するように
+                // window が「ready-to-show」した段階で再送はしないが、frontend は遅延 listen でも
+                // 後続イベントで status を更新できる)。
+                emit_status(
+                    &app_handle,
+                    BackendStatus {
+                        phase: "starting".into(),
+                        message: "バックエンドを起動中...".into(),
+                        progress: Some(0.02),
+                        detail: None,
+                    },
+                );
+                if let Some(stderr) = backend_stderr {
+                    spawn_stderr_reader(app_handle.clone(), stderr);
+                }
+                spawn_backend_exit_monitor(app_handle);
+            } else {
+                emit_status(
+                    &app_handle,
+                    BackendStatus {
+                        phase: "error".into(),
+                        message: "バックエンドの起動に失敗しました".into(),
+                        progress: None,
+                        detail: Some("backend process could not be started after 3 attempts".into()),
+                    },
+                );
             }
 
             // ─── Tray icon (macOS menu bar) ─────────────────────
@@ -835,6 +1004,7 @@ pub fn run() {
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![restart_backend, backend_process_status])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
