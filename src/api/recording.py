@@ -1017,7 +1017,11 @@ async def start_recording(req: StartRequest) -> dict:
         vad_provider=vad_provider,
     )
     streamer.start(loop)
-    mixer = RealtimeMixer(on_chunk=streamer.feed)
+    rec_cfg = config.get("recording", default={}) or {}
+    mixer = RealtimeMixer(
+        on_chunk=streamer.feed,
+        audio_leveling=rec_cfg.get("audio_leveling"),
+    )
     mixer.start(has_system=req.capture_system)
     _streamers[session_id] = streamer
     _mixers[session_id] = mixer

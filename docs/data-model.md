@@ -37,6 +37,16 @@ recording:
   system_capture: "auto"        # auto / screencapturekit / blackhole
   sample_rate: 16000
   channels: 1
+  audio_leveling:
+    enabled: true               # 録音中/停止後の自動ゲイン補正
+    realtime_enabled: true      # Whisper投入前のリアルタイム補正
+    final_normalize: true       # combined.flac 生成時の動的正規化
+    target_rms: 0.08
+    noise_floor: 0.003
+    max_gain: 12.0
+    peak_limit: 0.95
+    frame_ms: 100
+    gauss_size: 3
 
 # エージェント設定
 agent:
@@ -126,7 +136,7 @@ projects:
 ├── state.json
 ├── mic.raw / mic.wav
 ├── system.raw / system.wav
-├── combined.wav
+├── combined.flac
 ├── streaming_transcript.json
 ├── context.json
 └── minutes.md
@@ -301,7 +311,7 @@ def build_transcript_text(transcript: list[dict]) -> str:
   │
   ├── Whisper バッファ flush                     [一時]
   ├── RAW → WAV 変換                            [一時]
-  ├── ミックス → combined.wav                    [一時]
+  ├── ミックス → combined.flac                   [一時]
   │
 コンテキスト調査
   │
