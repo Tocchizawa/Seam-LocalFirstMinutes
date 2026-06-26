@@ -25,6 +25,8 @@ interface Props {
   onOpenLive: () => void;
 }
 
+const MINUTES_PAGE_SIZE = 20;
+
 export function MainView({
   project, allProjects, activeSummarizes,
   onOpenMinutes, onOpenPipelineSession, onOpenLive,
@@ -36,6 +38,11 @@ export function MainView({
   } = useRecording();
 
   const [minutes, setMinutes] = useState<Minutes[]>([]);
+  const [minutesLoading, setMinutesLoading] = useState(false);
+  const [minutesLoadingMore, setMinutesLoadingMore] = useState(false);
+  const [minutesHasMore, setMinutesHasMore] = useState(false);
+  const [minutesError, setMinutesError] = useState("");
+  const [minutesMoreError, setMinutesMoreError] = useState("");
   const [pipelines, setPipelines] = useState<PipelineStatus[]>([]);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [recoveryDismissed, setRecoveryDismissed] = useState(false);
@@ -115,9 +122,39 @@ export function MainView({
   }, [debugMode, recording]);
 
   const refreshMinutes = useCallback(async () => {
-    try { setMinutes(await listMinutes(project.id)); }
-    catch { setMinutes([]); }
+    setMinutesLoading(true);
+    setMinutesError("");
+    setMinutesMoreError("");
+    try {
+      const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, 0);
+      setMinutes(page);
+      setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
+    } catch (e) {
+      setMinutes([]);
+      setMinutesHasMore(false);
+      setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
+    } finally {
+      setMinutesLoading(false);
+    }
   }, [project.id]);
+
+  const loadMoreMinutes = useCallback(async () => {
+    if (minutesLoading || minutesLoadingMore || !minutesHasMore) return;
+    setMinutesLoadingMore(true);
+    setMinutesMoreError("");
+    try {
+      const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, minutes.length);
+      setMinutes((prev) => {
+        const seen = new Set(prev.map((m) => m.id));
+        return [...prev, ...page.filter((m) => !seen.has(m.id))];
+      });
+      setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
+    } catch (e) {
+      setMinutesMoreError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
+    } finally {
+      setMinutesLoadingMore(false);
+    }
+  }, [minutes.length, minutesHasMore, minutesLoading, minutesLoadingMore, project.id]);
 
   const refreshPipelines = useCallback(async () => {
     try { setPipelines(await getPipelines()); }
@@ -285,9 +322,17 @@ export function MainView({
             allProjects={allProjects}
             activeSummarizes={activeSummarizes}
             processing={activePipelines}
+            loading={minutesLoading}
+            loadingMore={minutesLoadingMore}
+            hasMore={minutesHasMore}
+            error={minutesError}
+            moreError={minutesMoreError}
             onOpenMin={handleOpenMin}
             onOpenPipeline={onOpenPipelineSession}
             onDismissPipeline={handleDismiss}
+            onLoadMore={loadMoreMinutes}
+            onRetry={refreshMinutes}
+            onRetryMore={loadMoreMinutes}
             onMutated={() => { refreshMinutes(); refreshPipelines(); }}
           />
         </div>
