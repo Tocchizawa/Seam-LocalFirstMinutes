@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type {
   Project, Minutes, PipelineStatus, RecoveryStatus, RecoveryItem,
 } from "../lib/api";
 import type { OpenMinutesOpts } from "../components/MinutesList";
 import {
-  listMinutes, getMinutes, getPipelines, dismissPipeline, listDevices,
+  listMinutes, getMinutes, getPipelines, dismissPipeline,
   getSettings, getDebugStatus, getRecoveryStatus,
 } from "../lib/api";
 import { RecordToolbar } from "../components/RecordToolbar";
@@ -43,6 +43,7 @@ export function MainView({
   const [minutesHasMore, setMinutesHasMore] = useState(false);
   const [minutesError, setMinutesError] = useState("");
   const [minutesMoreError, setMinutesMoreError] = useState("");
+  const loadingMoreRef = useRef(false);
   const [pipelines, setPipelines] = useState<PipelineStatus[]>([]);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [recoveryDismissed, setRecoveryDismissed] = useState(false);
@@ -50,28 +51,6 @@ export function MainView({
   const [debugMode, setDebugMode] = useState(false);
   const [debugStatus, setDebugStatus] = useState<Record<string, any> | null>(null);
   const [debugError, setDebugError] = useState("");
-
-  // 起動時に device 設定を復元
-  useEffect(() => {
-    Promise.all([listDevices(), getSettings().catch(() => null)]).then(([r, s]) => {
-      const rec = (s?.recording as any) || {};
-      const savedCapture = typeof rec.last_capture_system === "boolean"
-        ? rec.last_capture_system : null;
-      if (savedCapture !== null) {
-        setCaptureSystem(savedCapture && r.screen_capture_available);
-      } else if (r.screen_capture_available) {
-        setCaptureSystem(true);
-      }
-      const savedMic = typeof rec.last_mic_device === "number" ? rec.last_mic_device : null;
-      if (savedMic !== null && r.devices.some((d) => d.id === savedMic)) {
-        setMicDevice(savedMic);
-        return;
-      }
-      const mic = r.devices.find((d) => d.is_default && !d.is_blackhole);
-      if (mic && micDevice === null) setMicDevice(mic.id);
-    }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     getSettings()
@@ -121,10 +100,12 @@ export function MainView({
     };
   }, [debugMode, recording]);
 
-  const refreshMinutes = useCallback(async () => {
+  const loadInitialMinutes = useCallback(async () => {
     setMinutesLoading(true);
     setMinutesError("");
     setMinutesMoreError("");
+    setMinutesHasMore(false);
+    setMinutes([]);
     try {
       const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, 0);
       setMinutes(page);
@@ -138,30 +119,62 @@ export function MainView({
     }
   }, [project.id]);
 
+  const refreshMinutes = useCallback(async () => {
+    const limit = Math.max(MINUTES_PAGE_SIZE, minutes.length || MINUTES_PAGE_SIZE);
+    setMinutesMoreError("");
+    try {
+      const page = await listMinutes(project.id, limit, 0);
+      setMinutes(page);
+      setMinutesHasMore(page.length === limit);
+      setMinutesError("");
+    } catch (e) {
+      if (minutes.length === 0) {
+        setMinutes([]);
+        setMinutesHasMore(false);
+        setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
+      } else {
+        setMinutesMoreError(e instanceof Error ? e.message : "議事録一覧を更新できませんでした");
+      }
+    }
+  }, [project.id, minutes.length]);
+
   const loadMoreMinutes = useCallback(async () => {
-    if (minutesLoading || minutesLoadingMore || !minutesHasMore) return;
+    if (loadingMoreRef.current || minutesLoading || minutesLoadingMore || !minutesHasMore) return;
+    loadingMoreRef.current = true;
     setMinutesLoadingMore(true);
     setMinutesMoreError("");
     try {
       const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, minutes.length);
       setMinutes((prev) => {
         const seen = new Set(prev.map((m) => m.id));
-        return [...prev, ...page.filter((m) => !seen.has(m.id))];
+        const unique = page.filter((m) => !seen.has(m.id));
+        return unique.length > 0 ? [...prev, ...unique] : prev;
       });
       setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
     } catch (e) {
-      setMinutesMoreError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
+      setMinutesMoreError(e instanceof Error ? e.message : "過去の議事録を読み込めませんでした");
     } finally {
+      loadingMoreRef.current = false;
       setMinutesLoadingMore(false);
     }
-  }, [minutes.length, minutesHasMore, minutesLoading, minutesLoadingMore, project.id]);
+  }, [project.id, minutes.length, minutesHasMore, minutesLoading, minutesLoadingMore]);
+
+  useEffect(() => {
+    loadingMoreRef.current = false;
+    setMinutesLoadingMore(false);
+    loadInitialMinutes();
+  }, [loadInitialMinutes]);
 
   const refreshPipelines = useCallback(async () => {
     try { setPipelines(await getPipelines()); }
     catch { setPipelines([]); }
   }, []);
 
-  useEffect(() => { refreshMinutes(); }, [refreshMinutes]);
+  const refreshMinutesAndPipelines = useCallback(() => {
+    refreshMinutes();
+    refreshPipelines();
+  }, [refreshMinutes, refreshPipelines]);
+
   useEffect(() => { refreshPipelines(); }, [refreshPipelines]);
 
   useEffect(() => {
@@ -286,7 +299,7 @@ export function MainView({
     <div className="flex flex-col h-full overflow-hidden">
       <RecordToolbar
         project={project}
-        onStopped={() => { refreshMinutes(); refreshPipelines(); }}
+        onStopped={refreshMinutesAndPipelines}
         onOpenDeviceSettings={() => setShowDevices(true)}
       />
 
@@ -331,9 +344,9 @@ export function MainView({
             onOpenPipeline={onOpenPipelineSession}
             onDismissPipeline={handleDismiss}
             onLoadMore={loadMoreMinutes}
-            onRetry={refreshMinutes}
+            onRetry={loadInitialMinutes}
+            onMutated={refreshMinutesAndPipelines}
             onRetryMore={loadMoreMinutes}
-            onMutated={() => { refreshMinutes(); refreshPipelines(); }}
           />
         </div>
       </div>

@@ -83,6 +83,23 @@ def _flac_duration_sec(path: Path) -> float:
         return 0.0
 
 
+def _wav_duration_sec(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as wf:
+            rate = wf.getframerate()
+            if rate <= 0:
+                return 0.0
+            return wf.getnframes() / rate
+    except Exception:
+        return 0.0
+
+
+def _audio_duration_sec(path: Path) -> float:
+    if path.suffix.lower() == ".flac":
+        return _flac_duration_sec(path)
+    return _wav_duration_sec(path)
+
+
 class Recorder:
     def __init__(self) -> None:
         self._recording = False
@@ -104,6 +121,9 @@ class Recorder:
         # ScreenCaptureKit の初回PCM到着遅延(録音開始からの秒)。
         # システム音声ファイルには先頭無音が入らない場合があるため、最終ミックス時に補正する。
         self._system_first_pcm_delay_sec: float | None = None
+        self._capture_system_requested: bool = False
+        self._system_capture_started: bool = False
+        self._system_capture_start_error: str | None = None
         # マイクのみソフトミュート (system audio は変わらず). ミュート中も
         # wav には無音が書き込まれて時系列のオフセットを維持。
         self._mic_muted: bool = False
@@ -377,6 +397,9 @@ class Recorder:
         self._mic_reopen_total = 0
         self._last_overflow_log_at = 0.0
         self._system_first_pcm_delay_sec = None
+        self._capture_system_requested = bool(capture_system)
+        self._system_capture_started = False
+        self._system_capture_start_error = None
 
         # Session
         # API 層で採番済み ID があればそれを使い、録音音声と transcript の保存先を揃える。
@@ -414,12 +437,14 @@ class Recorder:
                         external_callback=self._on_system_pcm,
                     )
                     has_system = True
+                    self._system_capture_started = True
                 else:
-                    sys_error = "ScreenCaptureKit が利用できません"
+                    sys_error = "内部音声キャプチャが利用できません"
             except Exception as e:
                 sys_error = str(e)
                 logger.warning("System capture failed: %s", e)
                 self._sys_capture = None
+            self._system_capture_start_error = sys_error
 
         logger.info("Recording started (mic=%s, system=%s, session=%s)",
                      self._mic_device, has_system, self._session_id)
@@ -429,6 +454,7 @@ class Recorder:
             "mic_device": self._mic_device,
             "has_system_audio": has_system,
             "system_error": sys_error,
+            "system_backend": self._sys_capture.backend if self._sys_capture else None,
         }
 
     def _on_system_pcm(self, samples, sample_rate: int = 48000) -> None:
@@ -720,6 +746,7 @@ class Recorder:
             raise RuntimeError("Not recording")
 
         elapsed = self.elapsed_sec
+        system_backend = self._sys_capture.backend if self._sys_capture else None
         self._recording = False
 
         # Wait for mic thread
@@ -742,6 +769,24 @@ class Recorder:
         # Check files
         mic_ok = self._mic_wav and self._mic_wav.exists() and self._mic_wav.stat().st_size > 44
         sys_ok = self._sys_wav and self._sys_wav.exists() and self._sys_wav.stat().st_size > 44
+        mic_duration = _audio_duration_sec(self._mic_wav) if mic_ok and self._mic_wav else 0.0
+        system_duration = _audio_duration_sec(self._sys_wav) if sys_ok and self._sys_wav else 0.0
+        expected_system_duration = mic_duration or elapsed
+        system_coverage_ratio = (
+            system_duration / expected_system_duration
+            if expected_system_duration > 0 and system_duration > 0 else None
+        )
+        system_coverage_error = self._validate_system_audio_coverage(
+            mic_duration=mic_duration,
+            system_duration=system_duration,
+            elapsed=elapsed,
+            sys_ok=bool(sys_ok),
+        )
+        if system_coverage_error:
+            self._error = (
+                f"{self._error}; {system_coverage_error}"
+                if self._error else system_coverage_error
+            )
 
         # FLAC 24kHz mono に統合(中間 mic/system WAV は削除)
         combined_wav = None
@@ -781,6 +826,11 @@ class Recorder:
             "combined_wav": str(combined_wav) if combined_wav else None,
             "duration_sec": round(duration, 1),
             "elapsed_sec": round(elapsed, 1),
+            "mic_duration_sec": round(mic_duration, 1) if mic_duration > 0 else None,
+            "system_duration_sec": round(system_duration, 1) if system_duration > 0 else None,
+            "system_coverage_ratio": round(system_coverage_ratio, 3)
+            if system_coverage_ratio is not None else None,
+            "system_backend": system_backend,
             "error": self._error,
             "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)
             if self._system_first_pcm_delay_sec is not None else None,
@@ -788,6 +838,63 @@ class Recorder:
 
         logger.info("Recording stopped. Duration: %.1fs, File: %s", duration, wav_path)
         return result
+
+    def _system_coverage_settings(self) -> tuple[bool, float, float, float]:
+        cfg = config.get("recording", "system_capture_watchdog", default={}) or {}
+        enabled = bool(cfg.get("enabled", True))
+        try:
+            min_duration_sec = float(cfg.get("min_duration_sec", 60))
+        except Exception:
+            min_duration_sec = 60.0
+        try:
+            min_coverage_ratio = float(cfg.get("min_coverage_ratio", 0.85))
+        except Exception:
+            min_coverage_ratio = 0.85
+        try:
+            max_missing_sec = float(cfg.get("max_missing_sec", 20))
+        except Exception:
+            max_missing_sec = 20.0
+        min_duration_sec = max(10.0, min(600.0, min_duration_sec))
+        min_coverage_ratio = max(0.10, min(1.0, min_coverage_ratio))
+        max_missing_sec = max(5.0, min(600.0, max_missing_sec))
+        return enabled, min_duration_sec, min_coverage_ratio, max_missing_sec
+
+    def _validate_system_audio_coverage(
+        self,
+        *,
+        mic_duration: float,
+        system_duration: float,
+        elapsed: float,
+        sys_ok: bool,
+    ) -> str | None:
+        if not self._capture_system_requested:
+            return None
+
+        if not self._system_capture_started:
+            detail = self._system_capture_start_error or "unknown"
+            return f"System audio capture did not start (内部音声の録音開始に失敗): {detail}"
+
+        enabled, min_duration_sec, min_coverage_ratio, max_missing_sec = (
+            self._system_coverage_settings()
+        )
+        if not enabled:
+            return None
+        if not sys_ok:
+            return "System audio capture produced no usable audio (内部音声ファイルが空です)"
+
+        expected = max(float(mic_duration or 0.0), float(elapsed or 0.0))
+        if expected < min_duration_sec:
+            return None
+
+        missing = max(0.0, expected - float(system_duration or 0.0))
+        coverage = float(system_duration or 0.0) / expected if expected > 0 else 0.0
+        if missing > max_missing_sec and coverage < min_coverage_ratio:
+            return (
+                "System audio ended early (内部音声が途中で途切れた可能性があります): "
+                f"system={system_duration:.1f}s expected={expected:.1f}s "
+                f"coverage={coverage:.1%}"
+            )
+        return None
 
     def _finalize_audio(
         self,

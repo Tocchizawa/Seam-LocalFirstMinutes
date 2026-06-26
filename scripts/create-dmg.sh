@@ -93,6 +93,7 @@ add_plist_string() {
 }
 
 add_plist_string "NSMicrophoneUsageDescription" "会議音声を録音して文字起こしするためマイクを使用します"
+add_plist_string "NSAudioCaptureUsageDescription" "会議参加者の音声を取り込むためシステム音声を取得します"
 add_plist_string "NSScreenCaptureUsageDescription" "会議参加者の音声を取り込むため画面録画権限を使用します"
 add_plist_string "NSAppleEventsUsageDescription" "音声デバイスの操作のため使用します"
 
@@ -117,6 +118,7 @@ else
   #    hardened runtime + secure timestamp を要求する。
   NESTED_BINARIES=(
     "$APP_PATH/Contents/Resources/uv"
+    "$APP_PATH/Contents/Resources/audio-capture"
   )
   for bin in "${NESTED_BINARIES[@]}"; do
     if [ -f "$bin" ]; then

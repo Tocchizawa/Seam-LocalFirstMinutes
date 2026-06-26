@@ -214,6 +214,11 @@ fn runtime_dir() -> PathBuf {
     app_dir().join("runtime")
 }
 
+fn bundled_resources_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.parent()?.join("Resources"))
+}
+
 /// Finder/Dock から起動した .app は launchd の最小 PATH
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`) しか持たず、Homebrew や cargo 等で
 /// 入れた `codex` / `claude` 等の CLI を解決できない。
@@ -413,8 +418,7 @@ fn replace_bundled_backend(work_dir: &Path, bundle_tar: &Path) -> bool {
 
 fn detect_bundled_layout() -> Option<BackendLayout> {
     // exe: .app/Contents/MacOS/Seam → resources: .app/Contents/Resources/
-    let exe = std::env::current_exe().ok()?;
-    let resources = exe.parent()?.parent()?.join("Resources");
+    let resources = bundled_resources_dir()?;
     let bundled_uv = resources.join("uv");
     let bundle_tar = resources.join("seam-backend.tar.gz");
     if !bundled_uv.exists() || !bundle_tar.exists() {
@@ -504,6 +508,14 @@ fn start_backend(runtime_root: &Path) -> Result<Child, StartupFailure> {
 
     let mut cmd = Command::new(&layout.uv_path);
     cmd.args(["run", "python", "-m", "src.main"]);
+
+    if let Some(resources) = bundled_resources_dir() {
+        cmd.env("SEAM_RESOURCES_DIR", &resources);
+        let audio_capture = resources.join("audio-capture");
+        if audio_capture.exists() {
+            cmd.env("SEAM_AUDIO_CAPTURE_BIN", audio_capture);
+        }
+    }
 
     // uv の venv キャッシュも user data dir 配下へ (bundled モード)。
     // dev モードでは標準の .venv をリポジトリ直下に置く既存挙動を維持。

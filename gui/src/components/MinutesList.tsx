@@ -140,6 +140,7 @@ export function MinutesList({
   const [importing, setImporting] = useState(false);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
 
@@ -313,7 +314,22 @@ export function MinutesList({
   };
 
   const showSearchResults = searched !== null;
-  const empty = !showSearchResults && !loading && !error && items.length === 0;
+  const empty = !loading && !error && !showSearchResults && items.length === 0;
+
+  useEffect(() => {
+    if (showSearchResults || !hasMore || loadingMore || moreError || !onLoadMore) return;
+    const el = loadMoreRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        onLoadMore();
+      }
+    }, { root: null, rootMargin: "240px 0px", threshold: 0 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showSearchResults, hasMore, loadingMore, moreError, onLoadMore]);
+
+  const retryMore = onRetryMore ?? onLoadMore;
 
   return (
     <div className="flex flex-col">
@@ -385,17 +401,28 @@ export function MinutesList({
         </div>
       </div>
 
+      {loading && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state">
+          <Spinner size={14} />
+          <span>読み込み中</span>
+        </div>
+      )}
+
+      {error && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state is-error">
+          <span>{error}</span>
+          {onRetry && (
+            <button type="button" className="btn btn-ghost" onClick={onRetry}>
+              再試行
+            </button>
+          )}
+        </div>
+      )}
+
       {empty && (
         <p className="text-[12px] text-(--t3) text-center py-12">
           録音または音声取り込みでここに議事録が表示されます
         </p>
-      )}
-
-      {!showSearchResults && loading && items.length === 0 && (
-        <div className="flex items-center justify-center gap-2 py-12 text-[12px] text-(--t3)">
-          <Spinner size={13} />
-          <span>読み込み中...</span>
-        </div>
       )}
 
       {showSearchResults && (
@@ -436,48 +463,33 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
-        </div>
-      )}
-
-      {!showSearchResults && error && (
-        <div className="px-5 py-5 text-center">
-          <p className="text-[12px] text-(--danger) mb-3">{error}</p>
-          {onRetry && (
-            <button type="button" className="btn h-8 px-4 text-[12px]" onClick={onRetry}>
-              再試行
-            </button>
+          {(items.length > 0 || hasMore || loadingMore || moreError) && (
+            <div
+              ref={loadMoreRef}
+              className={`minutes-list-load-more ${moreError ? "is-error" : ""}`}
+              aria-live="polite"
+            >
+              {loadingMore ? (
+                <>
+                  <Spinner size={12} />
+                  <span>読み込み中</span>
+                </>
+              ) : moreError ? (
+                <>
+                  <span>{moreError}</span>
+                  {retryMore && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={retryMore}
+                    >
+                      再試行
+                    </button>
+                  )}
+                </>
+              ) : null}
+            </div>
           )}
-        </div>
-      )}
-
-      {!showSearchResults && !error && moreError && (
-        <div className="px-5 py-5 text-center">
-          <p className="text-[12px] text-(--danger) mb-3">{moreError}</p>
-          {onRetryMore && (
-            <button type="button" className="btn h-8 px-4 text-[12px]" onClick={onRetryMore}>
-              続きを再試行
-            </button>
-          )}
-        </div>
-      )}
-
-      {!showSearchResults && !error && !moreError && (hasMore || loadingMore) && (
-        <div className="px-5 py-5 flex justify-center">
-          <button
-            type="button"
-            className="btn h-8 px-4 text-[12px]"
-            disabled={loadingMore}
-            onClick={onLoadMore}
-          >
-            {loadingMore ? (
-              <span className="inline-flex items-center gap-2">
-                <PhSpinner size={12} className="anim-spin" />
-                読み込み中
-              </span>
-            ) : (
-              "さらに読み込む"
-            )}
-          </button>
         </div>
       )}
 

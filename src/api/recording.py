@@ -45,7 +45,7 @@ router = APIRouter(prefix="/api/recording", tags=["recording"])
 class StartRequest(BaseModel):
     project_id: str
     mic_device: int | None = None
-    capture_system: bool = False
+    capture_system: bool = True
 
 
 # ─── State ──────────────────────────────────────────────────────────────
@@ -1040,6 +1040,16 @@ async def start_recording(req: StartRequest) -> dict:
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
         raise conflict("RECORDER_START_FAILED", f"録音開始失敗: {e}")
+    if req.capture_system and not result.get("has_system_audio"):
+        system_error = str(result.get("system_error") or "内部音声を開始できませんでした")
+        try:
+            await loop.run_in_executor(None, recorder.stop)
+        except Exception as e:
+            logger.warning("Failed to stop recorder after system audio start failure: %s", e)
+        _cleanup_session(session_id)
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        raise conflict("SYSTEM_AUDIO_START_FAILED", f"内部音声の録音開始失敗: {system_error}")
 
     _active_session_id = session_id
     _latest_level = 0.0
