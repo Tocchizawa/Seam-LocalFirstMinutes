@@ -14,7 +14,8 @@
 | **音声認識** | faster-whisper | 1.0+ | ストリーミング文字起こし |
 | **LLM** | Ollama + Qwen3 8B | latest | コンテキスト調査・議事録生成 |
 | **マイク録音** | sounddevice | 0.5+ | マイク入力 |
-| **内部音声** | ScreenCaptureKit | macOS 13+ | システム音声キャプチャ (Swift sidecar) |
+| **内部音声** | Core Audio Process Tap | macOS 14.2+ | システム音声キャプチャの第一候補 (Objective-C sidecar) |
+| **内部音声 (FB)** | ScreenCaptureKit | macOS 13+ | Core Audio Tap が使えない環境のフォールバック |
 | **内部音声 (FB)** | BlackHole | 0.6+ | フォールバック (Python完結) |
 | **音声処理** | ffmpeg | 7+ | RAW→WAV変換・レベル正規化・2トラックミキシング (.app同梱) |
 | **ファイル読取** | pymupdf | 1.24+ | PDF (Context Agent) |
@@ -34,7 +35,7 @@
 3つの役割を1つで担える:
 1. **GUI**: 軽量 (~10MB)、メモリを AI に回せる
 2. **Sidecar管理**: Python Backend の起動・監視・停止（Ollama は Python が Phase 2 で起動）
-3. **ScreenCaptureKit**: Rust から macOS ネイティブ API に直接アクセス
+3. **Sidecar管理**: Core Audio Tap sidecar と Python Backend の起動に必要なリソース/環境変数を管理
 
 ### 2.2 FastAPI
 
@@ -42,22 +43,15 @@
 - async でパイプラインの非同期実行
 - Whisper の `transcribe()` は同期関数だが `run_in_executor` で共存
 
-### 2.3 ScreenCaptureKit (Swift sidecar)
+### 2.3 内部音声キャプチャ (Core Audio Tap + ScreenCaptureKit)
 
-- ドライバ不要（BlackHole 不要）
-- アプリ単位で音声キャプチャ可能
-- **Swift sidecar バイナリ**として実装（Tauri の sidecar 機能で起動）
-  - Rust の SCK バインディング (`screencapturekit-rs` 等) は未成熟。特に audio-only streaming が不安定
-  - Swift は SCK のネイティブ API に直接アクセスでき、デリゲートパターンも自然に扱える
-  - Tauri `tauri.conf.json` の sidecar 設定でバンドル・起動管理
-- Unix domain socket (`/tmp/seam-audio-{pid}.sock`) で Python に RAW PCM を転送
-  - SCK デフォルト出力は **48kHz** → Swift 側で **16kHz にリサンプリング**してから送出
-  - 固定フォーマット: 16kHz, mono, int16LE
-  - ヘッダなし、フロー制御はカーネルバッファに依存
-  - 切断時は Swift 側がバッファリング + RAW ファイルに常に書いているのでロスなし
-- **audio-only でも画面収録権限が必要**（macOS の制約）。初回ウィザードでガイド
+- 第一候補は **Core Audio Process Tap**。音声専用 API のため、ScreenCaptureKit / ReplayKit 経路で長時間録音中に音声 callback が止まるリスクを避けやすい。
+- **Objective-C sidecar バイナリ**として実装し、Tauri の resources に同梱する。
+- sidecar は RAW PCM (`float32`, mono, native sample rate) とメタデータ JSON を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。
+- macOS 14.2 未満、sidecar 起動失敗、Core Audio Tap 権限/初期化失敗時は既存の ScreenCaptureKit (PyObjC) 経路へフォールバックする。
+- ScreenCaptureKit は **audio-only でも画面収録権限が必要**。Core Audio Tap は `NSAudioCaptureUsageDescription` を Info.plist に含める。
 
-BlackHole フォールバック時は Python (sounddevice) 完結で Swift sidecar 不要。
+BlackHole フォールバック時は Python (sounddevice) 完結で native sidecar 不要。
 
 ### 2.4 faster-whisper
 
@@ -98,8 +92,7 @@ GijirokuN.app/Contents/
 │   ├── backend/                 # PyInstaller --onedir 出力
 │   │   ├── seam-backend     # エントリーポイント
 │   │   └── _internal/           # Python + 依存 (~3GB)
-│   ├── sidecar/
-│   │   └── audio-capture        # Swift sidecar (ScreenCaptureKit)
+│   ├── audio-capture            # Objective-C sidecar (Core Audio Tap)
 │   ├── ollama/ollama            # Ollama バイナリ (~200MB)
 │   └── ffmpeg/ffmpeg            # ffmpeg バイナリ (~80MB)
 └── Info.plist
@@ -120,7 +113,8 @@ GijirokuN.app/Contents/
 3. Whisper medium ダウンロード → プログレスバー
 4. macOS 権限リクエスト:
    → マイクアクセス
-   → 画面収録 (ScreenCaptureKit 用)
+   → システム音声取得 (Core Audio Tap 用)
+   → 画面収録 (ScreenCaptureKit フォールバック用)
 5. 完了 → メイン画面
 ```
 
@@ -161,11 +155,10 @@ Seam/
 │   ├── src-tauri/           # Rust
 │   │   └── src/
 │   │       ├── main.rs
-│   │       └── sidecar.rs   # Python Backend + Swift sidecar 起動管理
+│   │       └── sidecar.rs   # Python Backend + native sidecar 起動管理
 │   ├── sidecar/
-│   │   └── audio-capture/   # Swift sidecar (ScreenCaptureKit)
-│   │       ├── Package.swift
-│   │       └── Sources/main.swift
+│   │   └── audio-capture/   # Objective-C sidecar (Core Audio Tap)
+│   │       └── Sources/main.m
 │   ├── src/                 # React
 │   │   ├── pages/
 │   │   ├── components/
@@ -195,9 +188,9 @@ Seam/
 | リスク | 影響 | 対策 |
 |--------|------|------|
 | PyInstaller バンドル ~3GB | 初回DLが大きい | UPX圧縮 + 不要依存除外 |
-| ScreenCaptureKit macOS 13+ 限定 | 古い macOS 非対応 | BlackHole フォールバック (Python完結) |
-| SCK の Swift sidecar 実装 | PoC が必要。リサンプリング (48kHz→16kHz) のレイテンシ | Swift sidecar をメインパスに採用。PoC を最優先で実施。BlackHole フォールバック |
-| Swift↔Python IPC 切断 | 音声データロス | RAW PCM を常にファイル書き込み。ロスなし |
+| Core Audio Tap macOS 14.2+ 限定 | 古い macOS 非対応 | ScreenCaptureKit / BlackHole フォールバック |
+| ScreenCaptureKit の長時間停止 | 相手音声が途中から消える | Core Audio Tap をメインパスに採用し、停止検知 watchdog も併用 |
+| native sidecar 停止 | 音声データロス | RAW PCM を常にファイル書き込みし、Python 側で coverage を検証 |
 | ストリーミング Whisper 遅延蓄積 | 文字起こしが遅れる | チャンク長動的調整 + 1秒オーバーラップ + run_in_executor |
 | 3時間会議で Qwen3 コンテキスト超え | 議事録品質低下 | 話題ベースチャンク分割 + 段階的要約 |
 | Context Agent が 32K tokens 超え | 調査が中途半端 | スライディングウィンドウで古い結果をトランケート（先頭500文字） |

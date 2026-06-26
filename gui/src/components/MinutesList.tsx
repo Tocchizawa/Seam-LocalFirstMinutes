@@ -27,9 +27,17 @@ interface Props {
   /** 進行中の要約ジョブ: minutes_id → state ("queued" / "running") */
   activeSummarizes: Map<string, string>;
   processing: PipelineStatus[];
+  loading?: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  error?: string;
+  moreError?: string;
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onOpenPipeline: (sessionId: string) => void;
   onDismissPipeline: (sessionId: string) => void;
+  onLoadMore?: () => void;
+  onRetry?: () => void;
+  onRetryMore?: () => void;
   onMutated: () => void;
 }
 
@@ -121,7 +129,8 @@ function HighlightedText({
 
 export function MinutesList({
   minutes, projectId, allProjects, activeSummarizes, processing,
-  onOpenMin, onOpenPipeline, onDismissPipeline, onMutated,
+  loading = false, loadingMore = false, hasMore = false, error = "", moreError = "",
+  onOpenMin, onOpenPipeline, onDismissPipeline, onLoadMore, onRetry, onRetryMore, onMutated,
 }: Props) {
   const [q, setQ] = useState("");
   const [searched, setSearched] = useState<MinutesSearchResult[] | null>(null);
@@ -131,6 +140,7 @@ export function MinutesList({
   const [importing, setImporting] = useState(false);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
 
@@ -166,7 +176,10 @@ export function MinutesList({
       for (const p of processing) {
         if (p.session_id && minSids.has(p.session_id)) {
           map.set(p.session_id, p);
-        } else if (p.session_id) {
+        } else if (
+          p.session_id
+          && (p.state === "stopping" || p.state === "transcribing")
+        ) {
           orphans.push(p);
         }
       }
@@ -301,7 +314,22 @@ export function MinutesList({
   };
 
   const showSearchResults = searched !== null;
-  const empty = !showSearchResults && items.length === 0;
+  const empty = !loading && !error && !showSearchResults && items.length === 0;
+
+  useEffect(() => {
+    if (showSearchResults || !hasMore || loadingMore || moreError || !onLoadMore) return;
+    const el = loadMoreRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        onLoadMore();
+      }
+    }, { root: null, rootMargin: "240px 0px", threshold: 0 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showSearchResults, hasMore, loadingMore, moreError, onLoadMore]);
+
+  const retryMore = onRetryMore ?? onLoadMore;
 
   return (
     <div className="flex flex-col">
@@ -373,6 +401,24 @@ export function MinutesList({
         </div>
       </div>
 
+      {loading && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state">
+          <Spinner size={14} />
+          <span>読み込み中</span>
+        </div>
+      )}
+
+      {error && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state is-error">
+          <span>{error}</span>
+          {onRetry && (
+            <button type="button" className="btn btn-ghost" onClick={onRetry}>
+              再試行
+            </button>
+          )}
+        </div>
+      )}
+
       {empty && (
         <p className="text-[12px] text-(--t3) text-center py-12">
           録音または音声取り込みでここに議事録が表示されます
@@ -417,6 +463,33 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
+          {(items.length > 0 || hasMore || loadingMore || moreError) && (
+            <div
+              ref={loadMoreRef}
+              className={`minutes-list-load-more ${moreError ? "is-error" : ""}`}
+              aria-live="polite"
+            >
+              {loadingMore ? (
+                <>
+                  <Spinner size={12} />
+                  <span>読み込み中</span>
+                </>
+              ) : moreError ? (
+                <>
+                  <span>{moreError}</span>
+                  {retryMore && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={retryMore}
+                    >
+                      再試行
+                    </button>
+                  )}
+                </>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
 

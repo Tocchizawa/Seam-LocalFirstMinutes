@@ -26,6 +26,11 @@ interface LogLine {
   text: string;
 }
 
+interface StartupSnapshot {
+  status?: BackendStatus | null;
+  logs?: string[];
+}
+
 const MAX_LOG_LINES = 80;
 
 export function Splash({ initialStatus }: { initialStatus?: BackendStatus | null }) {
@@ -53,6 +58,32 @@ export function Splash({ initialStatus }: { initialStatus?: BackendStatus | null
     });
     return () => {
       stop.then((un) => un()).catch(() => { /* noop */ });
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<StartupSnapshot>("get_startup_snapshot")
+      .then((snapshot) => {
+        if (cancelled) return;
+        if (snapshot.status) setStatus(snapshot.status);
+        const restored = snapshot.logs || [];
+        if (restored.length > 0) {
+          setLogs((prev) => {
+            const seen = new Set(prev.map((line) => line.text));
+            const missing = restored.filter((text) => text && !seen.has(text));
+            if (missing.length === 0) return prev;
+            const next = [
+              ...missing.map((text) => ({ id: nextIdRef.current++, text })),
+              ...prev,
+            ];
+            return next.slice(Math.max(0, next.length - MAX_LOG_LINES));
+          });
+        }
+      })
+      .catch(() => { /* older dev shells may not expose the command yet */ });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -137,24 +168,28 @@ export function Splash({ initialStatus }: { initialStatus?: BackendStatus | null
         <div className="splash-progress-wrap">
           <div className="splash-progress-track">
             <div
-              className={`splash-progress-fill ${pct === null ? "is-indeterminate" : ""}`}
+              className={[
+                "splash-progress-fill",
+                pct === null && !isError ? "is-indeterminate" : "",
+                isError ? "is-error" : "",
+              ].filter(Boolean).join(" ")}
               style={pct !== null ? { width: `${pct}%` } : undefined}
             />
             {/* 完了前は常時走るシマー(画面に動きを残す) */}
-            {!isReady && <div className="splash-progress-shimmer" />}
+            {!isReady && !isError && <div className="splash-progress-shimmer" />}
           </div>
-          {!isReady && <Spinner size={11} color="var(--accent)" />}
+          {!isReady && !isError && <Spinner size={11} color="var(--accent)" />}
           <span className="splash-progress-label num tabular-nums">
             {pct !== null ? `${pct}%` : "—"}
           </span>
         </div>
 
-        <p className="splash-message anim-fade-in" key={status.message}>
+        <p
+          className={`splash-message anim-fade-in ${isError ? "is-error" : ""}`}
+          key={status.message}
+        >
           {status.message}
         </p>
-        {status.detail && (
-          <p className="splash-detail selectable">{status.detail}</p>
-        )}
 
         {isError && (
           <div className="splash-actions">
@@ -166,6 +201,19 @@ export function Splash({ initialStatus }: { initialStatus?: BackendStatus | null
             >
               {restarting ? "再起動中..." : "バックエンドを再起動"}
             </button>
+          </div>
+        )}
+
+        {status.detail && (
+          <p className={`splash-detail ${isError ? "is-error" : ""}`}>
+            {status.detail}
+          </p>
+        )}
+
+        {isError && (
+          <div className="splash-note is-error">
+            再起動しても復帰しない場合は Seam を終了してから再起動してください。port 競合の場合は表示されたプロセスを終了し、
+            依存関係の初期化に失敗した場合はネットワークと空き容量を確認してください。
           </div>
         )}
 

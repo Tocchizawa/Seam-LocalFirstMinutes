@@ -5,6 +5,9 @@ import threading
 import time
 import types
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.transcribe import streaming
 
@@ -13,7 +16,11 @@ class ModelLoaderCoordinationTest(unittest.TestCase):
     def setUp(self) -> None:
         streaming._loaded_repo = None
         streaming._loading_repo = None
+        streaming._loading_started_at = None
+        streaming._loading_token = 0
         streaming._load_error = None
+        streaming._loading_progress_bytes = 0
+        streaming._loading_progress_at = None
         streaming._load_event.clear()
         sys.modules.pop("mlx_whisper", None)
         sys.modules.pop("mlx_whisper.load_models", None)
@@ -59,7 +66,10 @@ class ModelLoaderCoordinationTest(unittest.TestCase):
         self.assertFalse(t2.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 2)
-        self.assertEqual(calls, ["mlx-community/whisper-medium-mlx"])
+        self.assertEqual(len(calls), 1)
+        expected_repo = "mlx-community/whisper-medium-mlx"
+        expected_snapshot = streaming._resolve_cached_snapshot(expected_repo)
+        self.assertIn(calls[0], {expected_repo, expected_snapshot})
 
     def test_wait_timeout_if_another_thread_is_stuck_loading(self) -> None:
         gate = threading.Event()
@@ -80,11 +90,17 @@ class ModelLoaderCoordinationTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertIsNotNone(streaming._loading_repo)
 
+        started = time.monotonic()
         with self.assertRaises(TimeoutError):
             streaming.get_or_load_model("medium", timeout_sec=0.2)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+        self.assertIsNotNone(streaming._loading_repo)
 
         gate.set()
         loader_thread.join(timeout=2.0)
+        self.assertFalse(loader_thread.is_alive())
+        self.assertEqual(streaming._loaded_repo, "mlx-community/whisper-medium-mlx")
 
 
 if __name__ == "__main__":

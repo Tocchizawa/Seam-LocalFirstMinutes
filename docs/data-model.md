@@ -34,9 +34,14 @@ whisper:
 # 録音設定
 recording:
   mic_device: null              # null = システム既定
-  system_capture: "auto"        # auto / screencapturekit / blackhole
+  system_capture: "auto"        # auto / coreaudio_tap / screencapturekit / blackhole
   sample_rate: 16000
   channels: 1
+  system_capture_watchdog:
+    enabled: true               # 内部音声が途中で途切れた録音を正常完了扱いしない
+    min_duration_sec: 60
+    min_coverage_ratio: 0.85
+    max_missing_sec: 20
   audio_leveling:
     enabled: true               # 録音中/停止後の自動ゲイン補正
     realtime_enabled: true      # Whisper投入前のリアルタイム補正

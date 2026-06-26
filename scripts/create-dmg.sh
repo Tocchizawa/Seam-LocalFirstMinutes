@@ -12,6 +12,7 @@ TAURI_VERSION=$(node -e 'console.log(require("./gui/src-tauri/tauri.conf.json").
 SHORT_VERSION="${TAURI_VERSION%%-*}"
 DMG_PATH="${DMG_DIR}/Seam_${SHORT_VERSION}_aarch64.dmg"
 SIGN_ID="${APPLE_SIGNING_IDENTITY:-}"
+REQUIRE_NOTARIZATION="${RELEASE_DMG_REQUIRE_NOTARIZATION:-0}"
 
 cleanup() {
   rm -rf "${STAGE_DIR:-}" "${NOTARY_TMP_DIR:-}"
@@ -22,6 +23,20 @@ has_notary_credentials() {
   [ -n "${APPLE_ID:-}" ] \
     && [ -n "${APPLE_APP_PASSWORD:-}" ] \
     && [ -n "${APPLE_TEAM_ID:-}" ]
+}
+
+require_release_notarization() {
+  if [ "$REQUIRE_NOTARIZATION" != "1" ]; then
+    return 0
+  fi
+  if [ -z "$SIGN_ID" ]; then
+    echo "Error: RELEASE_DMG_REQUIRE_NOTARIZATION=1 requires APPLE_SIGNING_IDENTITY"
+    exit 1
+  fi
+  if ! has_notary_credentials; then
+    echo "Error: RELEASE_DMG_REQUIRE_NOTARIZATION=1 requires APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID"
+    exit 1
+  fi
 }
 
 notarize_artifact() {
@@ -47,6 +62,8 @@ if [ ! -d "$APP_PATH" ]; then
   echo "Error: $APP_PATH not found"
   exit 1
 fi
+
+require_release_notarization
 
 # ─── 既存 DMG が最新かつ公証・staple 済みなら全スキップ ─
 # Apple ID をリトライで不要に notarytool に投げないための安全弁。
@@ -76,6 +93,7 @@ add_plist_string() {
 }
 
 add_plist_string "NSMicrophoneUsageDescription" "会議音声を録音して文字起こしするためマイクを使用します"
+add_plist_string "NSAudioCaptureUsageDescription" "会議参加者の音声を取り込むためシステム音声を取得します"
 add_plist_string "NSScreenCaptureUsageDescription" "会議参加者の音声を取り込むため画面録画権限を使用します"
 add_plist_string "NSAppleEventsUsageDescription" "音声デバイスの操作のため使用します"
 
@@ -100,6 +118,7 @@ else
   #    hardened runtime + secure timestamp を要求する。
   NESTED_BINARIES=(
     "$APP_PATH/Contents/Resources/uv"
+    "$APP_PATH/Contents/Resources/audio-capture"
   )
   for bin in "${NESTED_BINARIES[@]}"; do
     if [ -f "$bin" ]; then

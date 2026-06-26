@@ -3,6 +3,29 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.2] - 2026-06-23
+
+録音の安定性と配布版アップデート時の復旧性を改善する beta リリース。
+
+### Fixed
+
+- 長時間録音でマイク音声とシステム音声が途中から小さくなるケースに対し、録音中の文字起こし入力へRMSベースの自動ゲイン補正を追加
+- 録音停止後に生成する `combined.flac` へ `amix normalize=0` と `dynaudnorm + alimiter` を適用し、保存音声の音量低下を補正
+- macOSでアプリをしばらく放置した後などにPortAudioの一時的な内部エラーでマイク録音開始に失敗するケースを、音声バックエンドのreset/retryで回復
+- DB保存に失敗した録音を成功扱いにせず、復旧可能なセッション情報を残したまま `pipeline_error` として通知
+- 録音中にマイクキャプチャが落ちた場合に、バックエンドとフロントエンドの録音中表示が残り続けないように状態同期を修正
+- システム音声の開始/変換失敗を明示的に失敗扱いにし、要求されたシステム音声が取れなかった録音を成功したマイク単独議事録として保存しないように修正
+- 配布版アップデート時に同梱バックエンドの古いPythonファイルが `python-env` に残らないよう、temp展開とrollback可能な差し替えに変更
+
+### Changed
+
+- 音声レベリング仕様に合わせて要件定義・アーキテクチャ・データモデルを更新
+
+### Tests
+
+- 音量低下補正、録音前preflight、録音パイプライン失敗、システム音声失敗の回帰テストを追加
+- 対象PR: [#38](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/38), [#46](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/46)
+
 ## [0.2.0-beta.1] - 2026-05-21
 
 初の公開 beta リリース。

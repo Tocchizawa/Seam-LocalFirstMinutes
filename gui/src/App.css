@@ -484,6 +484,24 @@ button { font-family: inherit; }
   background: var(--surface-2);
   color: var(--t1);
 }
+.minutes-list-state,
+.minutes-list-load-more {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 20px;
+  color: var(--t3);
+  font-size: 12px;
+}
+.minutes-list-state {
+  min-height: 120px;
+}
+.minutes-list-state.is-error,
+.minutes-list-load-more.is-error {
+  color: var(--danger);
+}
 
 /* ─── Minutes card (3-line layout) ────────────────────── */
 .minutes-card {
@@ -2212,6 +2230,10 @@ button { font-family: inherit; }
   line-height: 1.5;
   min-height: 1.5em;
 }
+.splash-message.is-error {
+  color: var(--danger);
+  font-weight: 600;
+}
 .splash-phase-hint {
   color: var(--t3);
 }
@@ -2235,6 +2257,10 @@ button { font-family: inherit; }
   background: var(--accent);
   border-radius: 2px;
   transition: width 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.splash-progress-fill.is-error {
+  width: 100%;
+  background: var(--danger);
 }
 .splash-progress-fill.is-indeterminate {
   position: absolute;
@@ -2282,6 +2308,17 @@ button { font-family: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.splash-detail.is-error {
+  width: 100%;
+  color: var(--danger);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--danger) 36%, transparent);
+  border-radius: 8px;
+}
 .splash-actions {
   display: flex;
   justify-content: center;
@@ -2296,6 +2333,11 @@ button { font-family: inherit; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+.splash-note.is-error {
+  color: var(--t2);
+  text-align: left;
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border));
 }
 
 /* バックエンドの生 stderr ログを表示するターミナル風エリア。 */
