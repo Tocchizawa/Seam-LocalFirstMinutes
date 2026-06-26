@@ -162,11 +162,19 @@ _loading_progress_bytes: int = 0
 _loading_progress_at: float | None = None
 
 
-def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
+def get_or_load_model(
+    model_name: str,
+    timeout_sec: float = 120.0,
+    *,
+    allow_stale_takeover: bool = False,
+) -> str:
     """指定モデルを mlx-whisper にロードさせる(repo path を返す)。
 
     mlx-whisper は load_model() に LRU キャッシュを持つので、同じ repo で
     再度呼んでも実ロードは初回のみ。
+
+    allow_stale_takeover=True は復旧用の明示モード。通常 caller は timeout_sec を
+    待機上限として扱い、他 thread の loader が固着していても自動引き継ぎしない。
     """
     global _loaded_repo, _loading_repo, _loading_started_at, _loading_token, _load_error
     global _loading_progress_bytes, _loading_progress_at
@@ -261,8 +269,8 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
                 now_mono = time.monotonic()
                 load_age = (now_mono - loading_started_at) if loading_started_at else 0.0
 
-            # ダウンロード/キャッシュ書き込みが進行している間は timeout を延長する。
-            # (例: 2~4GB モデルの初回取得中)
+            # 復旧モードでは、ダウンロード/キャッシュ書き込みが進行している間だけ
+            # lease を延長する。通常 caller は timeout_sec を超えて待たない。
             if loading_repo and loading_started_at:
                 current_cache_bytes = _estimate_repo_cache_bytes(loading_repo)
                 cache_delta = current_cache_bytes - loading_progress_bytes
@@ -280,8 +288,9 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
                         cache_delta / (1024 * 1024),
                         current_cache_bytes / (1024 * 1024),
                     )
-                    deadline = time.monotonic() + timeout_sec
-                    continue
+                    if allow_stale_takeover:
+                        deadline = time.monotonic() + timeout_sec
+                        continue
 
             idle_since_progress = (
                 (now_mono - loading_progress_at)
@@ -292,7 +301,8 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
             with _load_lock:
                 # ロード担当が固着した場合は貸与を失効させ、次ループで再ロードを試みる。
                 if (
-                    loading_repo
+                    allow_stale_takeover
+                    and loading_repo
                     and loading_started_at
                     and load_age >= timeout_sec
                     and idle_since_progress >= timeout_sec
