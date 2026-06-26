@@ -3,6 +3,7 @@
    初回は uv sync で torch / mlx-whisper など ~3GB をダウンロードするため
    5-10 分かかる。何が起きているかをユーザーに見せる。 */
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Spinner } from "./Spinner";
 
@@ -25,6 +26,11 @@ interface LogLine {
   text: string;
 }
 
+interface StartupSnapshot {
+  status?: BackendStatus | null;
+  logs?: string[];
+}
+
 const MAX_LOG_LINES = 80;
 
 export function Splash() {
@@ -39,6 +45,32 @@ export function Splash() {
     });
     return () => {
       stop.then((un) => un()).catch(() => { /* noop */ });
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<StartupSnapshot>("get_startup_snapshot")
+      .then((snapshot) => {
+        if (cancelled) return;
+        if (snapshot.status) setStatus(snapshot.status);
+        const restored = snapshot.logs || [];
+        if (restored.length > 0) {
+          setLogs((prev) => {
+            const seen = new Set(prev.map((line) => line.text));
+            const missing = restored.filter((text) => text && !seen.has(text));
+            if (missing.length === 0) return prev;
+            const next = [
+              ...missing.map((text) => ({ id: nextIdRef.current++, text })),
+              ...prev,
+            ];
+            return next.slice(Math.max(0, next.length - MAX_LOG_LINES));
+          });
+        }
+      })
+      .catch(() => { /* older dev shells may not expose the command yet */ });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -78,6 +110,7 @@ export function Splash() {
     ? Math.round(Math.max(0, Math.min(1, status.progress)) * 100)
     : null;
   const isReady = status.phase === "ready" && (pct ?? 0) >= 100;
+  const isError = status.phase === "error";
 
   return (
     <div className="splash-shell">
@@ -99,21 +132,41 @@ export function Splash() {
         <div className="splash-progress-wrap">
           <div className="splash-progress-track">
             <div
-              className={`splash-progress-fill ${pct === null ? "is-indeterminate" : ""}`}
+              className={[
+                "splash-progress-fill",
+                pct === null && !isError ? "is-indeterminate" : "",
+                isError ? "is-error" : "",
+              ].filter(Boolean).join(" ")}
               style={pct !== null ? { width: `${pct}%` } : undefined}
             />
             {/* 完了前は常時走るシマー(画面に動きを残す) */}
-            {!isReady && <div className="splash-progress-shimmer" />}
+            {!isReady && !isError && <div className="splash-progress-shimmer" />}
           </div>
-          {!isReady && <Spinner size={11} color="var(--accent)" />}
+          {!isReady && !isError && <Spinner size={11} color="var(--accent)" />}
           <span className="splash-progress-label num tabular-nums">
             {pct !== null ? `${pct}%` : "—"}
           </span>
         </div>
 
-        <p className="splash-message anim-fade-in" key={status.message}>
+        <p
+          className={`splash-message anim-fade-in ${isError ? "is-error" : ""}`}
+          key={status.message}
+        >
           {status.message}
         </p>
+
+        {status.detail && (
+          <p className={`splash-detail ${isError ? "is-error" : ""}`}>
+            {status.detail}
+          </p>
+        )}
+
+        {isError && (
+          <div className="splash-note is-error">
+            Seam を終了してから再起動してください。port 競合の場合は表示されたプロセスを終了し、
+            依存関係の初期化に失敗した場合はネットワークと空き容量を確認してください。
+          </div>
+        )}
 
         <div ref={logScrollRef} className="splash-log">
           {logs.length === 0 ? (

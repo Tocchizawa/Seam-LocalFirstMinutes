@@ -162,11 +162,19 @@ _loading_progress_bytes: int = 0
 _loading_progress_at: float | None = None
 
 
-def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
+def get_or_load_model(
+    model_name: str,
+    timeout_sec: float = 120.0,
+    *,
+    allow_stale_takeover: bool = False,
+) -> str:
     """指定モデルを mlx-whisper にロードさせる(repo path を返す)。
 
     mlx-whisper は load_model() に LRU キャッシュを持つので、同じ repo で
     再度呼んでも実ロードは初回のみ。
+
+    allow_stale_takeover=True は復旧用の明示モード。通常 caller は timeout_sec を
+    待機上限として扱い、他 thread の loader が固着していても自動引き継ぎしない。
     """
     global _loaded_repo, _loading_repo, _loading_started_at, _loading_token, _load_error
     global _loading_progress_bytes, _loading_progress_at
@@ -261,8 +269,8 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
                 now_mono = time.monotonic()
                 load_age = (now_mono - loading_started_at) if loading_started_at else 0.0
 
-            # ダウンロード/キャッシュ書き込みが進行している間は timeout を延長する。
-            # (例: 2~4GB モデルの初回取得中)
+            # 復旧モードでは、ダウンロード/キャッシュ書き込みが進行している間だけ
+            # lease を延長する。通常 caller は timeout_sec を超えて待たない。
             if loading_repo and loading_started_at:
                 current_cache_bytes = _estimate_repo_cache_bytes(loading_repo)
                 cache_delta = current_cache_bytes - loading_progress_bytes
@@ -280,8 +288,9 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
                         cache_delta / (1024 * 1024),
                         current_cache_bytes / (1024 * 1024),
                     )
-                    deadline = time.monotonic() + timeout_sec
-                    continue
+                    if allow_stale_takeover:
+                        deadline = time.monotonic() + timeout_sec
+                        continue
 
             idle_since_progress = (
                 (now_mono - loading_progress_at)
@@ -292,7 +301,8 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
             with _load_lock:
                 # ロード担当が固着した場合は貸与を失効させ、次ループで再ロードを試みる。
                 if (
-                    loading_repo
+                    allow_stale_takeover
+                    and loading_repo
                     and loading_started_at
                     and load_age >= timeout_sec
                     and idle_since_progress >= timeout_sec
@@ -1247,6 +1257,15 @@ class StreamingTranscriber:
                 audio.astype(np.float32),
                 **kwargs,
             )
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after decode "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
+                )
+                return
             try:
                 speaker_meta = speaker_memory.identify(
                     audio,
@@ -1257,13 +1276,23 @@ class StreamingTranscriber:
                 )
             except Exception as e:
                 logger.warning("speaker identify failed: %s", e)
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after speaker identify "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
+                )
+                return
             new_segments: list[dict] = []
+            filtered_segments = 0
             for seg in result.get("segments", []):
                 text = (seg.get("text") or "").strip()
                 if not text:
                     continue
                 if self._hallucination_filter.is_hallucination(text):
-                    self._filtered_segments += 1
+                    filtered_segments += 1
                     logger.info("Filtered hallucination segment: %s", text[:80])
                     continue
                 # corrections (wrong→correct) をリアルタイムに適用。要約後の post-process
@@ -1298,24 +1327,36 @@ class StreamingTranscriber:
                     "speaker_label": (speaker_meta or {}).get("speaker_label"),
                     "speaker_confidence": (speaker_meta or {}).get("speaker_confidence"),
                 })
-            elapsed = time.time() - t0
-            ratio = chunk_dur / max(elapsed, 1e-3)
-            self._recent_ratios.append(ratio)
-            if len(self._recent_ratios) > 6:
-                self._recent_ratios.pop(0)
-            logger.info("Streaming transcribe: %.1fs audio → %d seg in %.1fs (%.1fx)",
-                        chunk_dur, len(new_segments), elapsed, ratio)
-            with self._segments_lock:
-                self._segments.extend(new_segments)
-            if new_segments:
-                tail = " ".join(s.get("text", "") for s in new_segments[-3:]).strip()
-                if tail:
-                    with self._recent_text_lock:
-                        # 直近 N チャンクぶんを保持。max ~ PROMPT_RECENT_CHARS で十分
-                        merged = (self._recent_text_tail + " " + tail).strip()
-                        self._recent_text_tail = merged[-PROMPT_RECENT_CHARS:]
-            for seg in new_segments:
-                self._emit(seg)
+            with self._worker_lock:
+                if generation != self._active_generation:
+                    logger.info(
+                        "Discarding stale transcribe result before apply "
+                        "(gen=%d, active=%d, audio=%.1fs, segments=%d)",
+                        generation,
+                        self._active_generation,
+                        chunk_dur,
+                        len(new_segments),
+                    )
+                    return
+                self._filtered_segments += filtered_segments
+                elapsed = time.time() - t0
+                ratio = chunk_dur / max(elapsed, 1e-3)
+                self._recent_ratios.append(ratio)
+                if len(self._recent_ratios) > 6:
+                    self._recent_ratios.pop(0)
+                logger.info("Streaming transcribe: %.1fs audio → %d seg in %.1fs (%.1fx)",
+                            chunk_dur, len(new_segments), elapsed, ratio)
+                with self._segments_lock:
+                    self._segments.extend(new_segments)
+                if new_segments:
+                    tail = " ".join(s.get("text", "") for s in new_segments[-3:]).strip()
+                    if tail:
+                        with self._recent_text_lock:
+                            # 直近 N チャンクぶんを保持。max ~ PROMPT_RECENT_CHARS で十分
+                            merged = (self._recent_text_tail + " " + tail).strip()
+                            self._recent_text_tail = merged[-PROMPT_RECENT_CHARS:]
+                for seg in new_segments:
+                    self._emit(seg)
         except Exception as e:
             self._transcribe_errors += 1
             logger.error("Streaming transcribe failed: %s", e)

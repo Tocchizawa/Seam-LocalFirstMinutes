@@ -5,6 +5,9 @@ import threading
 import time
 import types
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.transcribe import streaming
 
@@ -63,7 +66,11 @@ class StreamingModelLoaderTest(unittest.TestCase):
         t.start()
         time.sleep(0.03)
 
-        repo = streaming.get_or_load_model("large-v3", timeout_sec=0.1)
+        repo = streaming.get_or_load_model(
+            "large-v3",
+            timeout_sec=0.1,
+            allow_stale_takeover=True,
+        )
         self.assertEqual("mlx-community/whisper-large-v3-mlx", repo)
 
         t.join(timeout=1.0)

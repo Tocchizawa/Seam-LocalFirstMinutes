@@ -38,6 +38,12 @@ export function MainView({
   } = useRecording();
 
   const [minutes, setMinutes] = useState<Minutes[]>([]);
+  const [minutesLoading, setMinutesLoading] = useState(false);
+  const [minutesLoadingMore, setMinutesLoadingMore] = useState(false);
+  const [minutesHasMore, setMinutesHasMore] = useState(false);
+  const [minutesError, setMinutesError] = useState("");
+  const [minutesMoreError, setMinutesMoreError] = useState("");
+  const loadingMoreRef = useRef(false);
   const [pipelines, setPipelines] = useState<PipelineStatus[]>([]);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [recoveryDismissed, setRecoveryDismissed] = useState(false);
@@ -45,12 +51,6 @@ export function MainView({
   const [debugMode, setDebugMode] = useState(false);
   const [debugStatus, setDebugStatus] = useState<Record<string, any> | null>(null);
   const [debugError, setDebugError] = useState("");
-  const [minutesLoading, setMinutesLoading] = useState(false);
-  const [minutesLoadingMore, setMinutesLoadingMore] = useState(false);
-  const [minutesHasMore, setMinutesHasMore] = useState(false);
-  const [minutesError, setMinutesError] = useState("");
-  const [minutesLoadMoreError, setMinutesLoadMoreError] = useState("");
-  const loadingMoreRef = useRef(false);
 
   useEffect(() => {
     getSettings()
@@ -103,17 +103,17 @@ export function MainView({
   const loadInitialMinutes = useCallback(async () => {
     setMinutesLoading(true);
     setMinutesError("");
-    setMinutesLoadMoreError("");
+    setMinutesMoreError("");
     setMinutesHasMore(false);
     setMinutes([]);
     try {
       const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, 0);
       setMinutes(page);
       setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
-    } catch {
+    } catch (e) {
       setMinutes([]);
       setMinutesHasMore(false);
-      setMinutesError("議事録一覧の取得に失敗しました");
+      setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
     } finally {
       setMinutesLoading(false);
     }
@@ -121,28 +121,28 @@ export function MainView({
 
   const refreshMinutes = useCallback(async () => {
     const limit = Math.max(MINUTES_PAGE_SIZE, minutes.length || MINUTES_PAGE_SIZE);
-    setMinutesLoadMoreError("");
+    setMinutesMoreError("");
     try {
       const page = await listMinutes(project.id, limit, 0);
       setMinutes(page);
       setMinutesHasMore(page.length === limit);
       setMinutesError("");
-    } catch {
+    } catch (e) {
       if (minutes.length === 0) {
         setMinutes([]);
         setMinutesHasMore(false);
-        setMinutesError("議事録一覧の取得に失敗しました");
+        setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
       } else {
-        setMinutesLoadMoreError("議事録一覧を更新できませんでした");
+        setMinutesMoreError(e instanceof Error ? e.message : "議事録一覧を更新できませんでした");
       }
     }
   }, [project.id, minutes.length]);
 
   const loadMoreMinutes = useCallback(async () => {
-    if (loadingMoreRef.current || minutesLoading || !minutesHasMore) return;
+    if (loadingMoreRef.current || minutesLoading || minutesLoadingMore || !minutesHasMore) return;
     loadingMoreRef.current = true;
     setMinutesLoadingMore(true);
-    setMinutesLoadMoreError("");
+    setMinutesMoreError("");
     try {
       const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, minutes.length);
       setMinutes((prev) => {
@@ -151,13 +151,13 @@ export function MainView({
         return unique.length > 0 ? [...prev, ...unique] : prev;
       });
       setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
-    } catch {
-      setMinutesLoadMoreError("過去の議事録を読み込めませんでした");
+    } catch (e) {
+      setMinutesMoreError(e instanceof Error ? e.message : "過去の議事録を読み込めませんでした");
     } finally {
       loadingMoreRef.current = false;
       setMinutesLoadingMore(false);
     }
-  }, [project.id, minutes.length, minutesHasMore, minutesLoading]);
+  }, [project.id, minutes.length, minutesHasMore, minutesLoading, minutesLoadingMore]);
 
   useEffect(() => {
     loadingMoreRef.current = false;
@@ -335,17 +335,18 @@ export function MainView({
             allProjects={allProjects}
             activeSummarizes={activeSummarizes}
             processing={activePipelines}
+            loading={minutesLoading}
+            loadingMore={minutesLoadingMore}
+            hasMore={minutesHasMore}
+            error={minutesError}
+            moreError={minutesMoreError}
             onOpenMin={handleOpenMin}
             onOpenPipeline={onOpenPipelineSession}
             onDismissPipeline={handleDismiss}
-            loading={minutesLoading}
-            error={minutesError}
-            hasMore={minutesHasMore}
-            loadingMore={minutesLoadingMore}
-            loadMoreError={minutesLoadMoreError}
             onLoadMore={loadMoreMinutes}
             onRetry={loadInitialMinutes}
             onMutated={refreshMinutesAndPipelines}
+            onRetryMore={loadMoreMinutes}
           />
         </div>
       </div>

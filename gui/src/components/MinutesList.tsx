@@ -27,16 +27,17 @@ interface Props {
   /** 進行中の要約ジョブ: minutes_id → state ("queued" / "running") */
   activeSummarizes: Map<string, string>;
   processing: PipelineStatus[];
+  loading?: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  error?: string;
+  moreError?: string;
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onOpenPipeline: (sessionId: string) => void;
   onDismissPipeline: (sessionId: string) => void;
-  loading: boolean;
-  error: string;
-  hasMore: boolean;
-  loadingMore: boolean;
-  loadMoreError: string;
-  onLoadMore: () => void;
-  onRetry: () => void;
+  onLoadMore?: () => void;
+  onRetry?: () => void;
+  onRetryMore?: () => void;
   onMutated: () => void;
 }
 
@@ -128,9 +129,8 @@ function HighlightedText({
 
 export function MinutesList({
   minutes, projectId, allProjects, activeSummarizes, processing,
-  onOpenMin, onOpenPipeline, onDismissPipeline,
-  loading, error, hasMore, loadingMore, loadMoreError, onLoadMore, onRetry,
-  onMutated,
+  loading = false, loadingMore = false, hasMore = false, error = "", moreError = "",
+  onOpenMin, onOpenPipeline, onDismissPipeline, onLoadMore, onRetry, onRetryMore, onMutated,
 }: Props) {
   const [q, setQ] = useState("");
   const [searched, setSearched] = useState<MinutesSearchResult[] | null>(null);
@@ -176,7 +176,10 @@ export function MinutesList({
       for (const p of processing) {
         if (p.session_id && minSids.has(p.session_id)) {
           map.set(p.session_id, p);
-        } else if (p.session_id) {
+        } else if (
+          p.session_id
+          && (p.state === "stopping" || p.state === "transcribing")
+        ) {
           orphans.push(p);
         }
       }
@@ -314,7 +317,7 @@ export function MinutesList({
   const empty = !loading && !error && !showSearchResults && items.length === 0;
 
   useEffect(() => {
-    if (showSearchResults || !hasMore || loadingMore || loadMoreError) return;
+    if (showSearchResults || !hasMore || loadingMore || moreError || !onLoadMore) return;
     const el = loadMoreRef.current;
     if (!el) return;
     const observer = new IntersectionObserver((entries) => {
@@ -324,7 +327,9 @@ export function MinutesList({
     }, { root: null, rootMargin: "240px 0px", threshold: 0 });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [showSearchResults, hasMore, loadingMore, loadMoreError, onLoadMore]);
+  }, [showSearchResults, hasMore, loadingMore, moreError, onLoadMore]);
+
+  const retryMore = onRetryMore ?? onLoadMore;
 
   return (
     <div className="flex flex-col">
@@ -406,9 +411,11 @@ export function MinutesList({
       {error && !showSearchResults && items.length === 0 && (
         <div className="minutes-list-state is-error">
           <span>{error}</span>
-          <button type="button" className="btn btn-ghost" onClick={onRetry}>
-            再試行
-          </button>
+          {onRetry && (
+            <button type="button" className="btn btn-ghost" onClick={onRetry}>
+              再試行
+            </button>
+          )}
         </div>
       )}
 
@@ -456,10 +463,10 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
-          {(items.length > 0 || hasMore || loadingMore || loadMoreError) && (
+          {(items.length > 0 || hasMore || loadingMore || moreError) && (
             <div
               ref={loadMoreRef}
-              className={`minutes-list-load-more ${loadMoreError ? "is-error" : ""}`}
+              className={`minutes-list-load-more ${moreError ? "is-error" : ""}`}
               aria-live="polite"
             >
               {loadingMore ? (
@@ -467,12 +474,18 @@ export function MinutesList({
                   <Spinner size={12} />
                   <span>読み込み中</span>
                 </>
-              ) : loadMoreError ? (
+              ) : moreError ? (
                 <>
-                  <span>{loadMoreError}</span>
-                  <button type="button" className="btn btn-ghost" onClick={onLoadMore}>
-                    再試行
-                  </button>
+                  <span>{moreError}</span>
+                  {retryMore && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={retryMore}
+                    >
+                      再試行
+                    </button>
+                  )}
                 </>
               ) : null}
             </div>
