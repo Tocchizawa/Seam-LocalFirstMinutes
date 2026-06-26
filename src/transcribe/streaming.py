@@ -1257,6 +1257,15 @@ class StreamingTranscriber:
                 audio.astype(np.float32),
                 **kwargs,
             )
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after decode "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
+                )
+                return
             try:
                 speaker_meta = speaker_memory.identify(
                     audio,
@@ -1267,13 +1276,23 @@ class StreamingTranscriber:
                 )
             except Exception as e:
                 logger.warning("speaker identify failed: %s", e)
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after speaker identify "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
+                )
+                return
             new_segments: list[dict] = []
+            filtered_segments = 0
             for seg in result.get("segments", []):
                 text = (seg.get("text") or "").strip()
                 if not text:
                     continue
                 if self._hallucination_filter.is_hallucination(text):
-                    self._filtered_segments += 1
+                    filtered_segments += 1
                     logger.info("Filtered hallucination segment: %s", text[:80])
                     continue
                 # corrections (wrong→correct) をリアルタイムに適用。要約後の post-process
@@ -1308,24 +1327,36 @@ class StreamingTranscriber:
                     "speaker_label": (speaker_meta or {}).get("speaker_label"),
                     "speaker_confidence": (speaker_meta or {}).get("speaker_confidence"),
                 })
-            elapsed = time.time() - t0
-            ratio = chunk_dur / max(elapsed, 1e-3)
-            self._recent_ratios.append(ratio)
-            if len(self._recent_ratios) > 6:
-                self._recent_ratios.pop(0)
-            logger.info("Streaming transcribe: %.1fs audio → %d seg in %.1fs (%.1fx)",
-                        chunk_dur, len(new_segments), elapsed, ratio)
-            with self._segments_lock:
-                self._segments.extend(new_segments)
-            if new_segments:
-                tail = " ".join(s.get("text", "") for s in new_segments[-3:]).strip()
-                if tail:
-                    with self._recent_text_lock:
-                        # 直近 N チャンクぶんを保持。max ~ PROMPT_RECENT_CHARS で十分
-                        merged = (self._recent_text_tail + " " + tail).strip()
-                        self._recent_text_tail = merged[-PROMPT_RECENT_CHARS:]
-            for seg in new_segments:
-                self._emit(seg)
+            with self._worker_lock:
+                if generation != self._active_generation:
+                    logger.info(
+                        "Discarding stale transcribe result before apply "
+                        "(gen=%d, active=%d, audio=%.1fs, segments=%d)",
+                        generation,
+                        self._active_generation,
+                        chunk_dur,
+                        len(new_segments),
+                    )
+                    return
+                self._filtered_segments += filtered_segments
+                elapsed = time.time() - t0
+                ratio = chunk_dur / max(elapsed, 1e-3)
+                self._recent_ratios.append(ratio)
+                if len(self._recent_ratios) > 6:
+                    self._recent_ratios.pop(0)
+                logger.info("Streaming transcribe: %.1fs audio → %d seg in %.1fs (%.1fx)",
+                            chunk_dur, len(new_segments), elapsed, ratio)
+                with self._segments_lock:
+                    self._segments.extend(new_segments)
+                if new_segments:
+                    tail = " ".join(s.get("text", "") for s in new_segments[-3:]).strip()
+                    if tail:
+                        with self._recent_text_lock:
+                            # 直近 N チャンクぶんを保持。max ~ PROMPT_RECENT_CHARS で十分
+                            merged = (self._recent_text_tail + " " + tail).strip()
+                            self._recent_text_tail = merged[-PROMPT_RECENT_CHARS:]
+                for seg in new_segments:
+                    self._emit(seg)
         except Exception as e:
             self._transcribe_errors += 1
             logger.error("Streaming transcribe failed: %s", e)
