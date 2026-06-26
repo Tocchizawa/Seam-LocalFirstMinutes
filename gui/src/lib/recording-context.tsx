@@ -89,7 +89,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([]);
   const [streamStatus, setStreamStatus] = useState<StreamStatus | null>(null);
   const [micDevice, setMicDevice] = useState<number | null>(null);
-  const [captureSystem, setCaptureSystem] = useState(false);
+  const [captureSystem, setCaptureSystem] = useState(true);
   const [modelLoadLog, setModelLoadLog] = useState<string | null>(null);
   const [micMuted, setMicMutedLocal] = useState(false);
   /** filename → { current, total } (バイト) */

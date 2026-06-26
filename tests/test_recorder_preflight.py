@@ -72,6 +72,40 @@ def test_error_message_separates_permission_from_portaudio_recovery() -> None:
     assert "PortAudio" in msg
 
 
+def test_system_audio_short_track_is_reported() -> None:
+    rec = Recorder()
+    rec._capture_system_requested = True
+    rec._system_capture_started = True
+    rec._system_coverage_settings = lambda: (True, 60.0, 0.85, 20.0)  # type: ignore[method-assign]
+
+    msg = rec._validate_system_audio_coverage(
+        mic_duration=1049.2,
+        system_duration=240.0,
+        elapsed=1049.2,
+        sys_ok=True,
+    )
+
+    assert msg is not None
+    assert "System audio ended early" in msg
+    assert "途中" in msg
+
+
+def test_system_audio_near_full_length_is_ok() -> None:
+    rec = Recorder()
+    rec._capture_system_requested = True
+    rec._system_capture_started = True
+    rec._system_coverage_settings = lambda: (True, 60.0, 0.85, 20.0)  # type: ignore[method-assign]
+
+    msg = rec._validate_system_audio_coverage(
+        mic_duration=1049.2,
+        system_duration=1035.0,
+        elapsed=1049.2,
+        sys_ok=True,
+    )
+
+    assert msg is None
+
+
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
     failed = 0
     for test in tests:
@@ -93,4 +127,6 @@ if __name__ == "__main__":
         test_preflight_retries_after_portaudio_reset,
         test_preflight_falls_back_after_non_internal_error,
         test_error_message_separates_permission_from_portaudio_recovery,
+        test_system_audio_short_track_is_reported,
+        test_system_audio_near_full_length_is_ok,
     ]))

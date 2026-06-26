@@ -74,10 +74,11 @@ class FakeRunningStream:
         handler(None)
 
 
-def install_fake_sck() -> tuple[object | None, object, object]:
+def install_fake_sck() -> tuple[object | None, object, object, object]:
     old_module = sys.modules.get("ScreenCaptureKit")
     old_content = system_capture._get_shareable_content_sync
     old_create_handler = system_capture._create_handler
+    old_normalize_method = system_capture._normalize_capture_method
     fake = types.ModuleType("ScreenCaptureKit")
     fake.SCStreamConfiguration = FakeConfig
     fake.SCContentFilter = FakeFilter
@@ -85,20 +86,22 @@ def install_fake_sck() -> tuple[object | None, object, object]:
     sys.modules["ScreenCaptureKit"] = fake
     system_capture._get_shareable_content_sync = lambda: FakeContent()
     system_capture._create_handler = lambda *_args, **_kwargs: object()
-    return old_module, old_content, old_create_handler
+    system_capture._normalize_capture_method = lambda *_args, **_kwargs: "screencapturekit"
+    return old_module, old_content, old_create_handler, old_normalize_method
 
 
-def restore_fake_sck(old_module: object | None, old_content, old_create_handler) -> None:
+def restore_fake_sck(old_module: object | None, old_content, old_create_handler, old_normalize_method) -> None:
     if old_module is None:
         sys.modules.pop("ScreenCaptureKit", None)
     else:
         sys.modules["ScreenCaptureKit"] = old_module
     system_capture._get_shareable_content_sync = old_content
     system_capture._create_handler = old_create_handler
+    system_capture._normalize_capture_method = old_normalize_method
 
 
 def test_start_capture_timeout_is_reported_as_failure() -> None:
-    old_module, old_content, old_create_handler = install_fake_sck()
+    old_module, old_content, old_create_handler, old_normalize_method = install_fake_sck()
     try:
         with tempfile.TemporaryDirectory() as td:
             cap = system_capture.SystemAudioCapture()
@@ -111,7 +114,7 @@ def test_start_capture_timeout_is_reported_as_failure() -> None:
             assert not cap._running
             assert "タイムアウト" in (cap.error or "")
     finally:
-        restore_fake_sck(old_module, old_content, old_create_handler)
+        restore_fake_sck(old_module, old_content, old_create_handler, old_normalize_method)
 
 
 def test_ffmpeg_conversion_failure_keeps_raw_audio() -> None:
@@ -144,6 +147,15 @@ def test_ffmpeg_conversion_failure_keeps_raw_audio() -> None:
             subprocess.run = old_run  # type: ignore[assignment]
 
 
+def test_placeholder_sidecar_is_not_available() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "audio-capture"
+        path.write_text("#!/usr/bin/env sh\nsidecar has not been built\n")
+        path.chmod(0o755)
+
+        assert system_capture._is_placeholder_sidecar(path)
+
+
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
     failed = 0
     for test in tests:
@@ -163,4 +175,5 @@ if __name__ == "__main__":
     sys.exit(_run_as_script([
         test_start_capture_timeout_is_reported_as_failure,
         test_ffmpeg_conversion_failure_keeps_raw_audio,
+        test_placeholder_sidecar_is_not_available,
     ]))

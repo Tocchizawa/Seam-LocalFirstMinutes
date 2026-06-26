@@ -152,6 +152,13 @@ DEFAULTS: dict[str, Any] = {
         # system track 遅延補正は transcript タイムラインとの整合を崩しやすいため、
         # 既定では無効。必要時のみ明示的に有効化する。
         "system_delay_compensation_enabled": False,
+        # 内部音声が途中で途切れて mic のみの combined.flac が正常扱いされるのを防ぐ。
+        "system_capture_watchdog": {
+            "enabled": True,
+            "min_duration_sec": 60,
+            "min_coverage_ratio": 0.85,
+            "max_missing_sec": 20,
+        },
         # macOS 側の入力ゲイン変化や ScreenCaptureKit 側の音量低下を吸収する。
         "audio_leveling": {
             "enabled": True,
@@ -467,6 +474,21 @@ class Config:
         if not isinstance(recording, dict):
             recording = {}
             self._data["recording"] = recording
+        method = str(recording.get("system_capture", "auto") or "auto").strip().lower().replace("-", "_")
+        method_aliases = {
+            "coreaudio": "coreaudio_tap",
+            "core_audio": "coreaudio_tap",
+            "core_audio_tap": "coreaudio_tap",
+            "process_tap": "coreaudio_tap",
+            "tap": "coreaudio_tap",
+            "sck": "screencapturekit",
+            "screen_capture_kit": "screencapturekit",
+            "screen_capturekit": "screencapturekit",
+        }
+        method = method_aliases.get(method, method)
+        if method not in {"auto", "coreaudio_tap", "screencapturekit", "blackhole"}:
+            method = "auto"
+        recording["system_capture"] = method
         mic_stream = recording.setdefault("mic_stream", {})
         if not isinstance(mic_stream, dict):
             mic_stream = {}
@@ -525,6 +547,29 @@ class Config:
             )
         except Exception:
             recording["finalize_timeout_sec"] = 300
+        watchdog = recording.setdefault("system_capture_watchdog", {})
+        if not isinstance(watchdog, dict):
+            watchdog = {}
+            recording["system_capture_watchdog"] = watchdog
+        watchdog["enabled"] = bool(watchdog.get("enabled", True))
+        try:
+            watchdog["min_duration_sec"] = max(
+                10, min(600, float(watchdog.get("min_duration_sec", 60)))
+            )
+        except Exception:
+            watchdog["min_duration_sec"] = 60.0
+        try:
+            watchdog["min_coverage_ratio"] = max(
+                0.10, min(1.0, float(watchdog.get("min_coverage_ratio", 0.85)))
+            )
+        except Exception:
+            watchdog["min_coverage_ratio"] = 0.85
+        try:
+            watchdog["max_missing_sec"] = max(
+                5, min(600, float(watchdog.get("max_missing_sec", 20)))
+            )
+        except Exception:
+            watchdog["max_missing_sec"] = 20.0
 
         whisper = self._data.setdefault("whisper", {})
         if not isinstance(whisper, dict):

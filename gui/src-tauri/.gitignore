@@ -9,3 +9,4 @@
 # scripts/bundle-backend.sh が生成する配布用リソース
 /resources/uv
 /resources/seam-backend.tar.gz
+/resources/audio-capture

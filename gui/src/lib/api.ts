@@ -255,7 +255,7 @@ export const listDevices = () =>
   request<{ devices: AudioDevice[]; screen_capture_available: boolean }>("/api/devices");
 
 // Recording
-export const startRecording = (projectId: string, micDevice?: number | null, captureSystem = false) =>
+export const startRecording = (projectId: string, micDevice?: number | null, captureSystem = true) =>
   request<{ session_id: string; has_system_audio: boolean }>("/api/recording/start", {
     method: "POST",
     body: JSON.stringify({ project_id: projectId, mic_device: micDevice ?? null, capture_system: captureSystem }),

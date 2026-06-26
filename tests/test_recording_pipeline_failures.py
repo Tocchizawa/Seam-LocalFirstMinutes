@@ -54,6 +54,54 @@ class FakeMixer:
         self.stopped = True
 
 
+class FakeRealtimeMixer(FakeMixer):
+    def __init__(self, *_args, **_kwargs) -> None:
+        super().__init__()
+        self.started = False
+
+    def start(self, *_args, **_kwargs) -> None:
+        self.started = True
+
+    def feed_mic(self, *_args, **_kwargs) -> None:
+        pass
+
+    def feed_system(self, *_args, **_kwargs) -> None:
+        pass
+
+
+class FakeStartStreamer:
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.cleaned = False
+
+    def start(self, *_args, **_kwargs) -> None:
+        pass
+
+    def feed(self, *_args, **_kwargs) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
+class FakeStartRecorder:
+    def __init__(self) -> None:
+        self.is_recording = False
+        self.stopped = False
+
+    def start(self, **_kwargs) -> dict:
+        self.is_recording = True
+        return {
+            "session_id": _kwargs.get("session_id"),
+            "has_system_audio": False,
+            "system_error": "ScreenCaptureKit permission denied",
+        }
+
+    def stop(self) -> dict:
+        self.stopped = True
+        self.is_recording = False
+        return {"session_id": "stopped"}
+
+
 class FailingDb:
     def insert_minutes(self, _data: dict) -> None:
         raise RuntimeError("database is locked")
@@ -218,6 +266,43 @@ async def _run_system_audio_failure_is_not_done() -> None:
             restore_state(saved)
 
 
+async def _run_system_audio_start_failure_does_not_record() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        old_streamer = recording.StreamingTranscriber
+        old_mixer = recording.RealtimeMixer
+        old_project_manager = recording.project_manager
+        try:
+            fake_recorder = FakeStartRecorder()
+            recording.recorder = fake_recorder  # type: ignore[assignment]
+            recording.StreamingTranscriber = FakeStartStreamer  # type: ignore[assignment]
+            recording.RealtimeMixer = FakeRealtimeMixer  # type: ignore[assignment]
+            recording.project_manager = types.SimpleNamespace(get=lambda _project_id: None)
+
+            try:
+                await recording.start_recording(
+                    recording.StartRequest(project_id="project-a", capture_system=True),
+                )
+                raised = False
+            except Exception as e:
+                raised = getattr(e, "status_code", None) == 409
+                detail = getattr(e, "detail", {})
+                assert detail.get("code") == "SYSTEM_AUDIO_START_FAILED"
+
+            assert raised
+            assert fake_recorder.stopped
+            assert recording._active_session_id is None
+            assert not recording._pipelines
+            assert not recording._streamers
+            assert not recording._mixers
+        finally:
+            recording.StreamingTranscriber = old_streamer
+            recording.RealtimeMixer = old_mixer
+            recording.project_manager = old_project_manager
+            restore_state(saved)
+
+
 def test_db_save_failure_is_not_done() -> None:
     asyncio.run(_run_db_save_failure_is_not_done())
 
@@ -228,6 +313,10 @@ def test_mic_failure_releases_active_recording() -> None:
 
 def test_system_audio_failure_is_not_done() -> None:
     asyncio.run(_run_system_audio_failure_is_not_done())
+
+
+def test_system_audio_start_failure_does_not_record() -> None:
+    asyncio.run(_run_system_audio_start_failure_does_not_record())
 
 
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
@@ -250,4 +339,5 @@ if __name__ == "__main__":
         test_db_save_failure_is_not_done,
         test_mic_failure_releases_active_recording,
         test_system_audio_failure_is_not_done,
+        test_system_audio_start_failure_does_not_record,
     ]))

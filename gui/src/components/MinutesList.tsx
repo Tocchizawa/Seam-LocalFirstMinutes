@@ -30,6 +30,13 @@ interface Props {
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onOpenPipeline: (sessionId: string) => void;
   onDismissPipeline: (sessionId: string) => void;
+  loading: boolean;
+  error: string;
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMoreError: string;
+  onLoadMore: () => void;
+  onRetry: () => void;
   onMutated: () => void;
 }
 
@@ -121,7 +128,9 @@ function HighlightedText({
 
 export function MinutesList({
   minutes, projectId, allProjects, activeSummarizes, processing,
-  onOpenMin, onOpenPipeline, onDismissPipeline, onMutated,
+  onOpenMin, onOpenPipeline, onDismissPipeline,
+  loading, error, hasMore, loadingMore, loadMoreError, onLoadMore, onRetry,
+  onMutated,
 }: Props) {
   const [q, setQ] = useState("");
   const [searched, setSearched] = useState<MinutesSearchResult[] | null>(null);
@@ -131,6 +140,7 @@ export function MinutesList({
   const [importing, setImporting] = useState(false);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
 
@@ -301,7 +311,20 @@ export function MinutesList({
   };
 
   const showSearchResults = searched !== null;
-  const empty = !showSearchResults && items.length === 0;
+  const empty = !loading && !error && !showSearchResults && items.length === 0;
+
+  useEffect(() => {
+    if (showSearchResults || !hasMore || loadingMore || loadMoreError) return;
+    const el = loadMoreRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        onLoadMore();
+      }
+    }, { root: null, rootMargin: "240px 0px", threshold: 0 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showSearchResults, hasMore, loadingMore, loadMoreError, onLoadMore]);
 
   return (
     <div className="flex flex-col">
@@ -373,6 +396,22 @@ export function MinutesList({
         </div>
       </div>
 
+      {loading && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state">
+          <Spinner size={14} />
+          <span>読み込み中</span>
+        </div>
+      )}
+
+      {error && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state is-error">
+          <span>{error}</span>
+          <button type="button" className="btn btn-ghost" onClick={onRetry}>
+            再試行
+          </button>
+        </div>
+      )}
+
       {empty && (
         <p className="text-[12px] text-(--t3) text-center py-12">
           録音または音声取り込みでここに議事録が表示されます
@@ -417,6 +456,27 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
+          {(items.length > 0 || hasMore || loadingMore || loadMoreError) && (
+            <div
+              ref={loadMoreRef}
+              className={`minutes-list-load-more ${loadMoreError ? "is-error" : ""}`}
+              aria-live="polite"
+            >
+              {loadingMore ? (
+                <>
+                  <Spinner size={12} />
+                  <span>読み込み中</span>
+                </>
+              ) : loadMoreError ? (
+                <>
+                  <span>{loadMoreError}</span>
+                  <button type="button" className="btn btn-ghost" onClick={onLoadMore}>
+                    再試行
+                  </button>
+                </>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
 

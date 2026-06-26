@@ -46,9 +46,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
+    },
     "resources": {
       "resources/uv": "uv",
-      "resources/seam-backend.tar.gz": "seam-backend.tar.gz"
+      "resources/seam-backend.tar.gz": "seam-backend.tar.gz",
+      "resources/audio-capture": "audio-capture"
     }
   }
 }

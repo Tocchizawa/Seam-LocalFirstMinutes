@@ -7,7 +7,7 @@
 │                     GUI (Tauri + React)                       │
 │  プロジェクト管理 / 録音操作 / リアルタイム表示 / 議事録ビューア │
 │                                                              │
-│  Rust側: Swift sidecar (SCK) / Python Backend プロセス管理    │
+│  Rust側: native sidecar (Core Audio Tap) / Python Backend 管理│
 └────────────────────────┬─────────────────────────────────────┘
                          │ HTTP / WebSocket
 ┌────────────────────────▼─────────────────────────────────────┐
@@ -71,12 +71,11 @@ gui/
 ├── src-tauri/
 │   └── src/
 │       ├── main.rs               # ウィンドウ管理
-│       └── sidecar.rs            # Python Backend + Swift sidecar 起動・管理
+│       └── sidecar.rs            # Python Backend + native sidecar 起動・管理
 ├── sidecar/
-│   └── audio-capture/            # Swift sidecar (ScreenCaptureKit)
-│       ├── Package.swift
+│   └── audio-capture/            # Objective-C sidecar (Core Audio Tap)
 │       └── Sources/
-│           └── main.swift        # SCK 音声キャプチャ → Unix socket で PCM 転送
+│           └── main.m            # Core Audio Tap 音声キャプチャ → raw PCM 書き出し
 │
 └── src/
     ├── App.tsx
@@ -127,7 +126,7 @@ src/
 ├── audio/
 │   ├── recorder.py          # 2トラック同時録音オーケストレーション
 │   ├── mic_capture.py       # sounddevice でマイク録音
-│   ├── system_capture.py    # Rust IPC からシステム音声受信
+│   ├── system_capture.py    # Core Audio Tap sidecar / SCK からシステム音声受信
 │   ├── mixer.py             # リアルタイムミキシング + 自動ゲイン補正
 │   ├── devices.py           # デバイス一覧
 │   ├── raw_writer.py        # RAW PCM 書き込み
@@ -173,8 +172,7 @@ GijirokuN.app/Contents/
 │   ├── backend/                 # PyInstaller --onedir 出力
 │   │   ├── seam-backend     # エントリーポイント
 │   │   └── _internal/           # Python + 依存 (~3GB)
-│   ├── sidecar/
-│   │   └── audio-capture        # Swift sidecar (ScreenCaptureKit 音声キャプチャ)
+│   ├── audio-capture            # native sidecar (Core Audio Tap 音声キャプチャ)
 │   ├── ollama/ollama            # Ollama バイナリ (~200MB)
 │   └── ffmpeg/ffmpeg            # ffmpeg バイナリ (~80MB)
 └── Info.plist
@@ -196,17 +194,15 @@ GijirokuN.app/Contents/
 ### 3.2 音声録音 + リアルタイムミックス
 
 ```
-[Swift sidecar]                    [Python Backend]
-ScreenCaptureKit                      sounddevice
+[native sidecar]                   [Python Backend]
+Core Audio Tap                         sounddevice
   │                                      │
-  │ audio buffer (48kHz)                 │ audio buffer
-  │ → 16kHz リサンプリング               │
+  │ raw PCM (float32, mono)              │ audio buffer
+  │ + metadata JSON                      │
   ▼                                      ▼
-Unix socket ─────(raw PCM)─────→ system_capture.py
-(/tmp/seam-audio-{pid}.sock)        │
-(固定フォーマット:                        │
- 16kHz, mono, int16LE,                   │
- ヘッダなし)                              ▼
+raw file tail ───(raw PCM)────→ system_capture.py
+(.meta.json で sample rate 共有)       │
+                                         ▼
                                   ┌──────────────┐
                          mic ────→│ Realtime     │
                          sys ────→│ Mixer        │──→ Streaming Whisper
@@ -219,15 +215,13 @@ Unix socket ─────(raw PCM)─────→ system_capture.py
                           (個別保存)  (個別保存)    (文字起こし結果)
 ```
 
-#### IPC プロトコル (Swift sidecar → Python)
+#### IPC プロトコル (native sidecar → Python)
 
-- **トランスポート**: Unix domain socket (`/tmp/seam-audio-{pid}.sock`, chmod 600)
-  - macOS の `sockaddr_un.sun_path` は **104バイト制限**。`/tmp/` 配下なら安全（`~/.seam/` はユーザー名次第で超過リスクあり）
-- **フォーマット**: Raw PCM ストリーム（16kHz, mono, int16LE）
-  - SCK デフォルト出力は 48kHz → **Swift 側で 16kHz にリサンプリング**してから送出
-- **ヘッダなし**: 固定フォーマットのため不要。接続時のハンドシェイクで確認
-- **フロー制御**: Swift 側は non-blocking write。Python 側が詰まったらバッファがカーネルで溜まる（socket バッファ 256KB ≈ 8秒分）
-- **切断対応**: Swift 側はバッファリングして再接続待ち。RAW PCM はファイルに常に書き込まれるのでデータロスなし
+- **トランスポート**: sidecar が `system.raw` に追記し、Python が同ファイルを tail してリアルタイムミックスへ渡す
+- **メタデータ**: `system.meta.json` に backend / format / sample_rate / channels を記録
+- **フォーマット**: Raw PCM (`float32`, mono, little-endian, native sample rate)
+- **停止後変換**: Python 側が ffmpeg で `system.raw` → `system.wav` へ変換する
+- **フォールバック**: Core Audio Tap が使えない場合は PyObjC ScreenCaptureKit 経路を使う
 
 #### トラック同期
 
@@ -662,9 +656,10 @@ ws://localhost:18900/ws
 | Ollama 未起動 | Python Backend (startup.py) が Phase 2 開始時に自動起動。失敗時はエラー表示 |
 | モデル未DL | セットアップウィザードへ誘導 |
 | Python Backend 起動失敗 | 3回リトライ → エラー表示 |
-| ScreenCaptureKit 権限なし | macOS 権限ダイアログ → BlackHole ガイド |
+| Core Audio Tap 権限/初期化失敗 | ScreenCaptureKit へフォールバック。明示指定時は権限確認を案内 |
+| ScreenCaptureKit 権限なし | macOS 画面収録の権限確認 → BlackHole ガイド |
 | マイクデバイス未検出 | デバイス一覧を表示して選択を促す |
-| IPC 切断 (Swift↔Python) | 自動再接続。RAW PCM はファイルに保持されるのでデータロスなし |
+| sidecar 停止 (native↔Python) | RAW PCM はファイルに保持。停止後に coverage を検証し、内部音声欠落を正常完了扱いしない |
 | 録音中クラッシュ | RAW PCM 保持 → 再起動後に検出 → stopped_at を RAW ファイル末尾時刻で自動設定 → Phase 2 から再開提案 |
 | Tauri 終了 (録音後処理中) | Python Backend に SIGTERM → state.json を保存して graceful shutdown → 再起動後に current_stage から再開 |
 | Whisper OOM | 小さいモデルへのフォールバック提案 |

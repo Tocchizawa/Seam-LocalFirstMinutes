@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import {
   checkHealth, type Project, type Minutes, getSettings, listProjects,
-  getPipelines, getActiveSummarizes,
+  getPipelines, getActiveSummarizes, listDevices,
 } from "./lib/api";
 import { initTheme } from "./lib/theme";
 import { Sidebar } from "./components/Sidebar";
@@ -104,6 +104,32 @@ function AppInner() {
   useEffect(() => {
     if (healthy) refreshProjects();
   }, [healthy, refreshProjects]);
+
+  // 録音デバイス設定は MainView 以外のツールバーからも使うため、アプリ全体で復元する。
+  useEffect(() => {
+    if (!healthy) return;
+    let cancelled = false;
+    Promise.all([listDevices(), getSettings().catch(() => null)]).then(([r, s]) => {
+      if (cancelled) return;
+      const rec = (s?.recording as any) || {};
+      const savedCapture = typeof rec.last_capture_system === "boolean"
+        ? rec.last_capture_system : null;
+      if (savedCapture !== null) {
+        setCaptureSystem(savedCapture && r.screen_capture_available);
+      } else {
+        setCaptureSystem(Boolean(r.screen_capture_available));
+      }
+
+      const savedMic = typeof rec.last_mic_device === "number" ? rec.last_mic_device : null;
+      if (savedMic !== null && r.devices.some((d) => d.id === savedMic)) {
+        setMicDevice(savedMic);
+        return;
+      }
+      const mic = r.devices.find((d) => d.is_default && !d.is_blackhole);
+      if (mic) setMicDevice(mic.id);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [healthy, setCaptureSystem, setMicDevice]);
 
   // 「いずれかのタスクが進行中」な project_id の集合を維持。
   // pipelines (録音/文字起こし) + active summarize (要約) をマージする。

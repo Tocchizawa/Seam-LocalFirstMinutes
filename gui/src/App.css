@@ -484,6 +484,24 @@ button { font-family: inherit; }
   background: var(--surface-2);
   color: var(--t1);
 }
+.minutes-list-state,
+.minutes-list-load-more {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 20px;
+  color: var(--t3);
+  font-size: 12px;
+}
+.minutes-list-state {
+  min-height: 120px;
+}
+.minutes-list-state.is-error,
+.minutes-list-load-more.is-error {
+  color: var(--danger);
+}
 
 /* ─── Minutes card (3-line layout) ────────────────────── */
 .minutes-card {
