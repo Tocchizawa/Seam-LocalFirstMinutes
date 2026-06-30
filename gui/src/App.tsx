@@ -109,7 +109,7 @@ function AppInner() {
   useEffect(() => {
     if (!healthy) return;
     let cancelled = false;
-    Promise.all([listDevices(), getSettings().catch(() => null)]).then(([r, s]) => {
+    Promise.all([listDevices({ refresh: true }), getSettings().catch(() => null)]).then(([r, s]) => {
       if (cancelled) return;
       const rec = (s?.recording as any) || {};
       const savedCapture = typeof rec.last_capture_system === "boolean"
@@ -329,6 +329,7 @@ function AppInner() {
         <DeviceSettingsModal
           micDevice={micDevice}
           captureSystem={captureSystem}
+          refreshOnOpen={!recording}
           onChangeMicDevice={setMicDevice}
           onChangeCaptureSystem={setCaptureSystem}
           onClose={() => setShowDevicesGlobal(false)}
