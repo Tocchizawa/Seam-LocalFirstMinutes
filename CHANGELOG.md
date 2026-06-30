@@ -3,6 +3,36 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.3] - 2026-06-30
+
+Core Audio Tap ベースの内部音声キャプチャ、起動時の復旧表示、録音デバイス更新まわりを改善する beta リリース。
+
+### Added
+
+- macOS 14.2+ 向けに Core Audio Process Tap sidecar を追加し、内部音声キャプチャの第一候補として利用
+- Splash 画面でバックエンド起動失敗や復旧状況を確認できる表示を追加
+- 議事録一覧の初期表示後に追加読み込みできるページング導線を追加
+- デバイス設定でマイクデバイス一覧を再読み込みできる導線を追加
+
+### Fixed
+
+- Whisper モデルロードが詰まった場合に stale loader lease を timeout で復旧できるように修正
+- 古い世代の streaming transcribe 結果が現在の録音状態へ反映されるケースを抑止
+- アプリ起動後に追加されたマイクがデバイス一覧へ反映されないケースを、PortAudio の再初期化で更新
+- `sounddevice` の既定入力デバイス判定を `_InputOutputPair` に対応
+
+### Changed
+
+- Core Audio Tap を前提に、要件定義・アーキテクチャ・技術スタック・データモデルを更新
+- 配布ビルド時に audio-capture sidecar を Tauri resources へ同梱するように更新
+
+### Tests
+
+- Core Audio Tap / system capture 失敗時の回帰テストを追加
+- streaming transcribe の世代管理とモデル loader timeout の回帰テストを追加
+- マイクデバイス一覧 refresh の回帰テストを追加
+- 対象PR: [#47](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/47), [#49](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/49), [#50](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/50), [#51](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/51), [#53](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/53), [#54](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/54)
+
 ## [0.2.0-beta.2] - 2026-06-23
 
 録音の安定性と配布版アップデート時の復旧性を改善する beta リリース。
