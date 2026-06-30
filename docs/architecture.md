@@ -126,7 +126,7 @@ src/
 ├── audio/
 │   ├── recorder.py          # 2トラック同時録音オーケストレーション
 │   ├── mic_capture.py       # sounddevice でマイク録音
-│   ├── system_capture.py    # Core Audio Tap sidecar / SCK からシステム音声受信
+│   ├── system_capture.py    # Core Audio Tap sidecar からシステム音声受信
 │   ├── mixer.py             # リアルタイムミキシング + 自動ゲイン補正
 │   ├── devices.py           # デバイス一覧
 │   ├── raw_writer.py        # RAW PCM 書き込み
@@ -221,7 +221,7 @@ raw file tail ───(raw PCM)────→ system_capture.py
 - **メタデータ**: `system.meta.json` に backend / format / sample_rate / channels を記録
 - **フォーマット**: Raw PCM (`float32`, mono, little-endian, native sample rate)
 - **停止後変換**: Python 側が ffmpeg で `system.raw` → `system.wav` へ変換する
-- **フォールバック**: Core Audio Tap が使えない場合は PyObjC ScreenCaptureKit 経路を使う
+- **フォールバックなし**: Core Audio Tap が使えない場合、内部音声録音は開始失敗として扱う
 
 #### トラック同期
 
@@ -656,8 +656,7 @@ ws://localhost:18900/ws
 | Ollama 未起動 | Python Backend (startup.py) が Phase 2 開始時に自動起動。失敗時はエラー表示 |
 | モデル未DL | セットアップウィザードへ誘導 |
 | Python Backend 起動失敗 | 3回リトライ → エラー表示 |
-| Core Audio Tap 権限/初期化失敗 | ScreenCaptureKit へフォールバック。明示指定時は権限確認を案内 |
-| ScreenCaptureKit 権限なし | macOS 画面収録の権限確認 → BlackHole ガイド |
+| Core Audio Tap 権限/初期化失敗 | 内部音声録音を開始失敗扱いにし、システム音声取得権限と sidecar 配置を確認する |
 | マイクデバイス未検出 | デバイス一覧を表示して選択を促す |
 | sidecar 停止 (native↔Python) | RAW PCM はファイルに保持。停止後に coverage を検証し、内部音声欠落を正常完了扱いしない |
 | 録音中クラッシュ | RAW PCM 保持 → 再起動後に検出 → stopped_at を RAW ファイル末尾時刻で自動設定 → Phase 2 から再開提案 |

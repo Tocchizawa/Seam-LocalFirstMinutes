@@ -34,7 +34,7 @@ whisper:
 # 録音設定
 recording:
   mic_device: null              # null = システム既定
-  system_capture: "auto"        # auto / coreaudio_tap / screencapturekit / blackhole
+  system_capture: "auto"        # auto / coreaudio_tap
   sample_rate: 16000
   channels: 1
   system_capture_watchdog:
@@ -119,7 +119,7 @@ projects:
   "duration_sec": 2700,
   "devices": {
     "mic": { "name": "MacBook Pro Microphone", "device_id": 1 },
-    "system": { "method": "screencapturekit" }
+    "system": { "method": "coreaudio_tap" }
   },
   "stages": {
     "recording":              { "status": "completed", "completed_at": "2026-04-03T15:15:00" },

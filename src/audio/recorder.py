@@ -1,7 +1,7 @@
-"""2トラック録音: マイク + ScreenCaptureKit (内部音声)
+"""2トラック録音: マイク + Core Audio Tap (内部音声)
 
 - mic: sounddevice → WAV 直接書き込み
-- system: ScreenCaptureKit → WAV 直接書き込み
+- system: Core Audio Tap sidecar → WAV 直接書き込み
 - 停止後に ffmpeg で combined.flac (24kHz mono) を生成し、中間 WAV は削除
 """
 from __future__ import annotations
@@ -118,7 +118,7 @@ class Recorder:
         self._mic_overflow_total: int = 0
         self._mic_reopen_total: int = 0
         self._last_overflow_log_at: float = 0.0
-        # ScreenCaptureKit の初回PCM到着遅延(録音開始からの秒)。
+        # システム音声の初回PCM到着遅延(録音開始からの秒)。
         # システム音声ファイルには先頭無音が入らない場合があるため、最終ミックス時に補正する。
         self._system_first_pcm_delay_sec: float | None = None
         self._capture_system_requested: bool = False

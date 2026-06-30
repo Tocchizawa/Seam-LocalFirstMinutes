@@ -24,7 +24,7 @@ export function DeviceSettingsModal({
 }: Props) {
   const [closing, setClosing] = useState(false);
   const [devices, setDevices] = useState<AudioDevice[] | null>(null);
-  const [sckAvailable, setSckAvailable] = useState(false);
+  const [systemAudioAvailable, setSystemAudioAvailable] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -34,7 +34,7 @@ export function DeviceSettingsModal({
     try {
       const r = await listDevices({ refresh });
       setDevices(r.devices);
-      setSckAvailable(r.screen_capture_available);
+      setSystemAudioAvailable(r.system_audio_available ?? r.screen_capture_available);
     } catch {
       setDevices([]);
       setError("デバイス一覧を読み込めませんでした");
@@ -121,7 +121,7 @@ export function DeviceSettingsModal({
                 />
               </div>
 
-              {sckAvailable && (
+              {systemAudioAvailable && (
                 <div>
                   <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-(--t3) mb-2">
                     <SpeakerHigh size={11} weight="regular" />

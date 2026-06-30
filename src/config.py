@@ -159,7 +159,7 @@ DEFAULTS: dict[str, Any] = {
             "min_coverage_ratio": 0.85,
             "max_missing_sec": 20,
         },
-        # macOS 側の入力ゲイン変化や ScreenCaptureKit 側の音量低下を吸収する。
+        # macOS 側の入力ゲイン変化やシステム音声側の音量低下を吸収する。
         "audio_leveling": {
             "enabled": True,
             "realtime_enabled": True,
@@ -481,12 +481,15 @@ class Config:
             "core_audio_tap": "coreaudio_tap",
             "process_tap": "coreaudio_tap",
             "tap": "coreaudio_tap",
-            "sck": "screencapturekit",
-            "screen_capture_kit": "screencapturekit",
-            "screen_capturekit": "screencapturekit",
+            # 旧設定値。ScreenCaptureKit / BlackHole フォールバックは廃止したため auto に戻す。
+            "sck": "auto",
+            "screen_capture_kit": "auto",
+            "screen_capturekit": "auto",
+            "screencapturekit": "auto",
+            "blackhole": "auto",
         }
         method = method_aliases.get(method, method)
-        if method not in {"auto", "coreaudio_tap", "screencapturekit", "blackhole"}:
+        if method not in {"auto", "coreaudio_tap"}:
             method = "auto"
         recording["system_capture"] = method
         mic_stream = recording.setdefault("mic_stream", {})

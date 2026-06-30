@@ -102,9 +102,7 @@ Zoom等のオンライン会議中にバックグラウンドで PC 内部音声
 
 | 方式 | 説明 | 備考 |
 |------|------|------|
-| Core Audio Process Tap | macOS 14.2+ システムAPI | 音声専用の第一候補。native sidecar で実装し、ScreenCaptureKit / ReplayKit 経路の長時間停止リスクを避ける |
-| macOS ScreenCaptureKit | macOS 13+ システムAPI | Core Audio Tap が使えない環境のフォールバック。ドライバ不要 |
-| BlackHole | 仮想オーディオドライバ (OSS) | フォールバック。Python (sounddevice) 完結 |
+| Core Audio Process Tap | macOS 14.2+ システムAPI | 音声専用。native sidecar で実装し、ScreenCaptureKit / ReplayKit 経路は使わない |
 
 ### 2.5 リアルタイム文字起こし
 
@@ -226,7 +224,7 @@ Phase 2: LLM使用時
 │  1. [✅] Ollama 確認済み                          │
 │  2. [🔄] Qwen3 8B ダウンロード中... (3.2/5.0 GB) │
 │  3. [⬜] Whisper medium ダウンロード              │
-│  4. [⬜] マイク・画面収録の権限                    │
+│  4. [⬜] マイク・システム音声取得の権限              │
 │                                                  │
 │  [████████████░░░░░░░░] 60%                      │
 └─────────────────────────────────────────────────┘
@@ -331,7 +329,7 @@ Phase 2: LLM使用時
 - 同時に複数の会議を録音する機能は対象外
 - 前セッションのパイプライン実行中は新規録音を開始できない（メモリ競合回避）
 - 既存音声ファイルの取り込みは対象外（録音のみ）
-- macOS のシステム音声キャプチャには Core Audio Tap (macOS 14.2+) を優先し、未対応環境では ScreenCaptureKit (macOS 13+) または BlackHole を使う
+- macOS のシステム音声キャプチャには Core Audio Tap (macOS 14.2+) を使う。未対応環境では内部音声録音は利用不可
 - 全ての会議はプロジェクトに紐づく（プロジェクトなしの録音は不可）
 - ヘッドホン使用推奨（スピーカーだと内部音声とマイクで二重に拾う）
 - プロジェクト削除時に output_dir を残した場合、Markdown ファイルは読めるが GUI からの検索・表示はできない（DBが削除されるため）

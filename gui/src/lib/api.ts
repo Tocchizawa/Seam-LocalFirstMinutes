@@ -258,6 +258,7 @@ export const listDevices = (options: { refresh?: boolean } = {}) => {
   return request<{
     devices: AudioDevice[];
     screen_capture_available: boolean;
+    system_audio_available?: boolean;
     devices_refreshed?: boolean;
   }>(`/api/devices${query ? `?${query}` : ""}`);
 };

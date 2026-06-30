@@ -93,7 +93,7 @@ class FakeStartRecorder:
         return {
             "session_id": _kwargs.get("session_id"),
             "has_system_audio": False,
-            "system_error": "ScreenCaptureKit permission denied",
+            "system_error": "Core Audio Tap sidecar failed",
         }
 
     def stop(self) -> dict:
