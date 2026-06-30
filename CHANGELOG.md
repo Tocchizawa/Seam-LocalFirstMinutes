@@ -3,6 +3,24 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.4] - 2026-06-30
+
+Core Audio Tap を唯一の内部音声キャプチャ経路にし、ScreenCaptureKit / BlackHole フォールバックを廃止する beta リリース。
+
+### Changed
+
+- システム音声キャプチャを Core Audio Process Tap sidecar のみに統一
+- Core Audio Tap が使えない場合は内部音声録音を開始失敗として扱うように変更
+- 内部音声の利用可否 API に `system_audio_available` を追加し、既存 UI 互換用の `screen_capture_available` は維持
+- ScreenCaptureKit / BlackHole フォールバック前提の要件定義・アーキテクチャ・技術スタック・データモデルを更新
+- 配布ビルドの Info.plist から `NSScreenCaptureUsageDescription` を削除し、システム音声取得権限の説明へ整理
+
+### Tests
+
+- Core Audio Tap sidecar 起動失敗・変換失敗時の回帰テストを更新
+- 録音パイプライン失敗テストの内部音声エラー文言を Core Audio Tap 前提に更新
+- 対象PR: [#56](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/56)
+
 ## [0.2.0-beta.3] - 2026-06-30
 
 Core Audio Tap ベースの内部音声キャプチャ、起動時の復旧表示、録音デバイス更新まわりを改善する beta リリース。
