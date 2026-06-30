@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { X, Microphone, SpeakerHigh } from "@phosphor-icons/react";
+import { useState, useEffect, useCallback } from "react";
+import { X, Microphone, SpeakerHigh, ArrowClockwise } from "@phosphor-icons/react";
 import type { AudioDevice } from "../lib/api";
 import { listDevices } from "../lib/api";
 import { Spinner } from "./Spinner";
@@ -11,20 +11,41 @@ interface Props {
   onChangeMicDevice: (id: number | null) => void;
   onChangeCaptureSystem: (v: boolean) => void;
   onClose: () => void;
+  refreshOnOpen?: boolean;
 }
 
 export function DeviceSettingsModal({
-  micDevice, captureSystem, onChangeMicDevice, onChangeCaptureSystem, onClose,
+  micDevice,
+  captureSystem,
+  onChangeMicDevice,
+  onChangeCaptureSystem,
+  onClose,
+  refreshOnOpen = true,
 }: Props) {
   const [closing, setClosing] = useState(false);
   const [devices, setDevices] = useState<AudioDevice[] | null>(null);
   const [sckAvailable, setSckAvailable] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadDevices = useCallback(async (refresh = refreshOnOpen) => {
+    setLoading(true);
+    setError("");
+    try {
+      const r = await listDevices({ refresh });
+      setDevices(r.devices);
+      setSckAvailable(r.screen_capture_available);
+    } catch {
+      setDevices([]);
+      setError("デバイス一覧を読み込めませんでした");
+    } finally {
+      setLoading(false);
+    }
+  }, [refreshOnOpen]);
 
   useEffect(() => {
-    listDevices()
-      .then((r) => { setDevices(r.devices); setSckAvailable(r.screen_capture_available); })
-      .catch(() => setDevices([]));
-  }, []);
+    void loadDevices(refreshOnOpen);
+  }, [loadDevices, refreshOnOpen]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") handleClose(); };
@@ -39,6 +60,13 @@ export function DeviceSettingsModal({
 
   const mics = (devices ?? []).filter((d) => !d.is_blackhole);
 
+  useEffect(() => {
+    if (!devices || micDevice === null) return;
+    if (mics.some((d) => d.id === micDevice)) return;
+    const fallback = mics.find((d) => d.is_default) ?? mics[0];
+    onChangeMicDevice(fallback?.id ?? null);
+  }, [devices, micDevice, mics, onChangeMicDevice]);
+
   return (
     <div className={`fixed inset-0 flex items-center justify-center z-50 ${
       closing ? "anim-modal-overlay-out" : "anim-modal-overlay-in"
@@ -52,9 +80,19 @@ export function DeviceSettingsModal({
       }`}>
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border)">
           <h2 className="text-[14px] font-semibold text-(--t1)">デバイス設定</h2>
-          <button onClick={handleClose} className="icon-btn" title="閉じる">
-            <X size={14} weight="bold" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => void loadDevices(refreshOnOpen)}
+              className="icon-btn"
+              title="デバイス一覧を再読み込み"
+              disabled={loading}
+            >
+              <ArrowClockwise size={14} weight="regular" className={loading ? "animate-spin" : ""} />
+            </button>
+            <button onClick={handleClose} className="icon-btn" title="閉じる">
+              <X size={14} weight="bold" />
+            </button>
+          </div>
         </header>
 
         <div className="p-5 flex flex-col gap-5">
@@ -62,6 +100,9 @@ export function DeviceSettingsModal({
             <div className="flex justify-center py-8"><Spinner size={20} /></div>
           ) : (
             <>
+              {error && (
+                <p className="text-[11px] text-(--danger)">{error}</p>
+              )}
               <div>
                 <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-(--t3) mb-2">
                   <Microphone size={11} weight="regular" />
@@ -74,7 +115,9 @@ export function DeviceSettingsModal({
                     value: String(d.id),
                     label: `${d.name}${d.is_default ? "  (既定)" : ""}`,
                   }))}
+                  placeholder={loading ? "読み込み中..." : "マイクが見つかりません"}
                   className="w-full"
+                  disabled={loading}
                 />
               </div>
 

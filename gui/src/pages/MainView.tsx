@@ -355,6 +355,7 @@ export function MainView({
         <DeviceSettingsModal
           micDevice={micDevice}
           captureSystem={captureSystem}
+          refreshOnOpen={!recording}
           onChangeMicDevice={setMicDevice}
           onChangeCaptureSystem={setCaptureSystem}
           onClose={() => setShowDevices(false)}

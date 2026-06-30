@@ -251,8 +251,16 @@ export interface AudioDevice {
   is_blackhole: boolean;
 }
 
-export const listDevices = () =>
-  request<{ devices: AudioDevice[]; screen_capture_available: boolean }>("/api/devices");
+export const listDevices = (options: { refresh?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (options.refresh) params.set("refresh", "true");
+  const query = params.toString();
+  return request<{
+    devices: AudioDevice[];
+    screen_capture_available: boolean;
+    devices_refreshed?: boolean;
+  }>(`/api/devices${query ? `?${query}` : ""}`);
+};
 
 // Recording
 export const startRecording = (projectId: string, micDevice?: number | null, captureSystem = true) =>
