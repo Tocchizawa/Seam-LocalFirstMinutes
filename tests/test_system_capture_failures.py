@@ -12,98 +12,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.audio import system_capture
 
 
-class FakeConfig:
-    @classmethod
-    def alloc(cls):
-        return cls()
+class FakeSidecarProcess:
+    def __init__(self) -> None:
+        self.stderr: list[str] = []
+        self.terminated = False
 
-    def init(self):
-        return self
-
-    def setCapturesAudio_(self, _value):
-        pass
-
-    def setExcludesCurrentProcessAudio_(self, _value):
-        pass
-
-    def setWidth_(self, _value):
-        pass
-
-    def setHeight_(self, _value):
-        pass
-
-    def setSampleRate_(self, _value):
-        pass
-
-    def setChannelCount_(self, _value):
-        pass
-
-
-class FakeFilter:
-    @classmethod
-    def alloc(cls):
-        return cls()
-
-    def initWithDisplay_excludingWindows_(self, _display, _windows):
-        return self
-
-
-class FakeStream:
-    @classmethod
-    def alloc(cls):
-        return cls()
-
-    def initWithFilter_configuration_delegate_(self, _filter, _config, _delegate):
-        return self
-
-    def addStreamOutput_type_sampleHandlerQueue_error_(self, *_args):
-        return True, None
-
-    def startCaptureWithCompletionHandler_(self, _handler):
-        # callback を呼ばず timeout させる。
+    def poll(self):
         return None
 
+    def terminate(self) -> None:
+        self.terminated = True
 
-class FakeContent:
-    def displays(self):
-        return ["display"]
+    def wait(self, timeout=None):
+        return 0
 
-
-class FakeRunningStream:
-    def stopCaptureWithCompletionHandler_(self, handler):
-        handler(None)
-
-
-def install_fake_sck() -> tuple[object | None, object, object, object]:
-    old_module = sys.modules.get("ScreenCaptureKit")
-    old_content = system_capture._get_shareable_content_sync
-    old_create_handler = system_capture._create_handler
-    old_normalize_method = system_capture._normalize_capture_method
-    fake = types.ModuleType("ScreenCaptureKit")
-    fake.SCStreamConfiguration = FakeConfig
-    fake.SCContentFilter = FakeFilter
-    fake.SCStream = FakeStream
-    sys.modules["ScreenCaptureKit"] = fake
-    system_capture._get_shareable_content_sync = lambda: FakeContent()
-    system_capture._create_handler = lambda *_args, **_kwargs: object()
-    system_capture._normalize_capture_method = lambda *_args, **_kwargs: "screencapturekit"
-    return old_module, old_content, old_create_handler, old_normalize_method
-
-
-def restore_fake_sck(old_module: object | None, old_content, old_create_handler, old_normalize_method) -> None:
-    if old_module is None:
-        sys.modules.pop("ScreenCaptureKit", None)
-    else:
-        sys.modules["ScreenCaptureKit"] = old_module
-    system_capture._get_shareable_content_sync = old_content
-    system_capture._create_handler = old_create_handler
-    system_capture._normalize_capture_method = old_normalize_method
+    def kill(self) -> None:
+        self.terminated = True
 
 
 def test_start_capture_timeout_is_reported_as_failure() -> None:
-    old_module, old_content, old_create_handler, old_normalize_method = install_fake_sck()
-    try:
-        with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory() as td:
+        sidecar = Path(td) / "audio-capture"
+        sidecar.write_text("#!/usr/bin/env sh\nsleep 30\n")
+        sidecar.chmod(0o755)
+
+        old_os_supported = system_capture._core_audio_tap_os_supported
+        old_find_sidecar = system_capture._find_audio_capture_sidecar
+        old_popen = system_capture.subprocess.Popen
+        old_monotonic = system_capture.time.monotonic
+        old_sleep = system_capture.time.sleep
+        try:
+            fake_process = FakeSidecarProcess()
+            system_capture._core_audio_tap_os_supported = lambda: True
+            system_capture._find_audio_capture_sidecar = lambda: sidecar
+            system_capture.subprocess.Popen = lambda *_args, **_kwargs: fake_process  # type: ignore[assignment]
+            ticks = iter([0.0, 11.0])
+            system_capture.time.monotonic = lambda: next(ticks, 11.0)  # type: ignore[assignment]
+            system_capture.time.sleep = lambda _seconds: None  # type: ignore[assignment]
+
             cap = system_capture.SystemAudioCapture()
             try:
                 cap.start(Path(td) / "system.wav")
@@ -113,8 +59,13 @@ def test_start_capture_timeout_is_reported_as_failure() -> None:
             assert raised
             assert not cap._running
             assert "タイムアウト" in (cap.error or "")
-    finally:
-        restore_fake_sck(old_module, old_content, old_create_handler, old_normalize_method)
+            assert fake_process.terminated
+        finally:
+            system_capture._core_audio_tap_os_supported = old_os_supported
+            system_capture._find_audio_capture_sidecar = old_find_sidecar
+            system_capture.subprocess.Popen = old_popen  # type: ignore[assignment]
+            system_capture.time.monotonic = old_monotonic  # type: ignore[assignment]
+            system_capture.time.sleep = old_sleep  # type: ignore[assignment]
 
 
 def test_ffmpeg_conversion_failure_keeps_raw_audio() -> None:
@@ -134,10 +85,9 @@ def test_ffmpeg_conversion_failure_keeps_raw_audio() -> None:
 
             cap = system_capture.SystemAudioCapture()
             cap._running = True
-            cap._stream = FakeRunningStream()
+            cap._backend = "coreaudio_tap"
             cap._raw_path = raw
             cap._wav_path = wav
-            cap._raw_file = open(raw, "ab")
             cap.stop()
 
             assert raw.exists()

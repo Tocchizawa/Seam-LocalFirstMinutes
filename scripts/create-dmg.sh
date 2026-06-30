@@ -81,7 +81,7 @@ fi
 
 # ─── macOS 権限キーを Info.plist に注入 ─────────────────
 # Tauri は Info.plist のカスタムキーをサポートしないため、ここで PlistBuddy を使って追加する。
-# これがないと macOS はマイク/画面録音を silent deny するため、録音が無音になる。
+# これがないと macOS はマイク/システム音声取得を silent deny するため、録音が無音になる。
 # 重要: 署名前に必ず実行すること (署名後に Info.plist を変えると署名が無効化する)。
 PLIST="${APP_PATH}/Contents/Info.plist"
 
@@ -94,7 +94,6 @@ add_plist_string() {
 
 add_plist_string "NSMicrophoneUsageDescription" "会議音声を録音して文字起こしするためマイクを使用します"
 add_plist_string "NSAudioCaptureUsageDescription" "会議参加者の音声を取り込むためシステム音声を取得します"
-add_plist_string "NSScreenCaptureUsageDescription" "会議参加者の音声を取り込むため画面録画権限を使用します"
 add_plist_string "NSAppleEventsUsageDescription" "音声デバイスの操作のため使用します"
 
 echo "[plist] injected privacy keys"

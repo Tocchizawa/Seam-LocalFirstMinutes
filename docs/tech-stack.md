@@ -4,7 +4,7 @@
 
 | カテゴリ | 技術 | バージョン | 用途 |
 |----------|------|-----------|------|
-| **GUI** | Tauri | 2.x | デスクトップアプリ + ScreenCaptureKit + プロセス管理 |
+| **GUI** | Tauri | 2.x | デスクトップアプリ + native sidecar + プロセス管理 |
 | **GUI フロント** | React + TypeScript | 19+ | UI |
 | **GUI スタイル** | Tailwind CSS | 4+ | スタイリング |
 | **バックエンド** | Python | 3.12+ | AI処理・API |
@@ -14,9 +14,7 @@
 | **音声認識** | faster-whisper | 1.0+ | ストリーミング文字起こし |
 | **LLM** | Ollama + Qwen3 8B | latest | コンテキスト調査・議事録生成 |
 | **マイク録音** | sounddevice | 0.5+ | マイク入力 |
-| **内部音声** | Core Audio Process Tap | macOS 14.2+ | システム音声キャプチャの第一候補 (Objective-C sidecar) |
-| **内部音声 (FB)** | ScreenCaptureKit | macOS 13+ | Core Audio Tap が使えない環境のフォールバック |
-| **内部音声 (FB)** | BlackHole | 0.6+ | フォールバック (Python完結) |
+| **内部音声** | Core Audio Process Tap | macOS 14.2+ | システム音声キャプチャ (Objective-C sidecar) |
 | **音声処理** | ffmpeg | 7+ | RAW→WAV変換・レベル正規化・2トラックミキシング (.app同梱) |
 | **ファイル読取** | pymupdf | 1.24+ | PDF (Context Agent) |
 | **ファイル読取** | python-docx | 1.1+ | Word (Context Agent) |
@@ -43,15 +41,13 @@
 - async でパイプラインの非同期実行
 - Whisper の `transcribe()` は同期関数だが `run_in_executor` で共存
 
-### 2.3 内部音声キャプチャ (Core Audio Tap + ScreenCaptureKit)
+### 2.3 内部音声キャプチャ (Core Audio Tap)
 
-- 第一候補は **Core Audio Process Tap**。音声専用 API のため、ScreenCaptureKit / ReplayKit 経路で長時間録音中に音声 callback が止まるリスクを避けやすい。
+- **Core Audio Process Tap** を使う。音声専用 API のため、ScreenCaptureKit / ReplayKit 経路で長時間録音中に音声 callback が止まるリスクを避けやすい。
 - **Objective-C sidecar バイナリ**として実装し、Tauri の resources に同梱する。
 - sidecar は RAW PCM (`float32`, mono, native sample rate) とメタデータ JSON を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。
-- macOS 14.2 未満、sidecar 起動失敗、Core Audio Tap 権限/初期化失敗時は既存の ScreenCaptureKit (PyObjC) 経路へフォールバックする。
-- ScreenCaptureKit は **audio-only でも画面収録権限が必要**。Core Audio Tap は `NSAudioCaptureUsageDescription` を Info.plist に含める。
-
-BlackHole フォールバック時は Python (sounddevice) 完結で native sidecar 不要。
+- ScreenCaptureKit / BlackHole へのフォールバックは行わない。macOS 14.2 未満、sidecar 起動失敗、Core Audio Tap 権限/初期化失敗時は内部音声録音を開始失敗として扱う。
+- Core Audio Tap 用に `NSAudioCaptureUsageDescription` を Info.plist に含める。
 
 ### 2.4 faster-whisper
 
@@ -114,7 +110,6 @@ GijirokuN.app/Contents/
 4. macOS 権限リクエスト:
    → マイクアクセス
    → システム音声取得 (Core Audio Tap 用)
-   → 画面収録 (ScreenCaptureKit フォールバック用)
 5. 完了 → メイン画面
 ```
 
@@ -188,8 +183,8 @@ Seam/
 | リスク | 影響 | 対策 |
 |--------|------|------|
 | PyInstaller バンドル ~3GB | 初回DLが大きい | UPX圧縮 + 不要依存除外 |
-| Core Audio Tap macOS 14.2+ 限定 | 古い macOS 非対応 | ScreenCaptureKit / BlackHole フォールバック |
-| ScreenCaptureKit の長時間停止 | 相手音声が途中から消える | Core Audio Tap をメインパスに採用し、停止検知 watchdog も併用 |
+| Core Audio Tap macOS 14.2+ 限定 | 古い macOS 非対応 | 内部音声録音を利用不可にし、マイク録音のみで継続できるようにする |
+| システム音声 sidecar 停止 | 相手音声が途中から消える | 停止検知 watchdog と coverage 検証で正常完了扱いにしない |
 | native sidecar 停止 | 音声データロス | RAW PCM を常にファイル書き込みし、Python 側で coverage を検証 |
 | ストリーミング Whisper 遅延蓄積 | 文字起こしが遅れる | チャンク長動的調整 + 1秒オーバーラップ + run_in_executor |
 | 3時間会議で Qwen3 コンテキスト超え | 議事録品質低下 | 話題ベースチャンク分割 + 段階的要約 |

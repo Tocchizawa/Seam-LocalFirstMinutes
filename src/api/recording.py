@@ -163,8 +163,9 @@ def _is_system_audio_failure(message: str) -> bool:
     text = message.lower()
     return (
         "system audio" in text
-        or "screencapturekit" in text
-        or "画面収録" in message
+        or "core audio" in text
+        or "sidecar" in text
+        or "システム音声" in message
         or "内部音声" in message
         or "キャプチャ" in message
     )
