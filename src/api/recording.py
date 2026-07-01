@@ -171,6 +171,19 @@ def _is_system_audio_failure(message: str) -> bool:
     )
 
 
+def _should_finalize_from_combined(result: dict | None) -> bool:
+    """録音停止後の正本 transcript を combined.flac 基準で作るべきか判定する。"""
+    if not isinstance(result, dict):
+        return False
+    try:
+        combined = result.get("combined_wav")
+        if combined and _is_valid_audio_file(Path(str(combined))):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _ensure_playback_wav(flac_path: Path, wav_path: Path) -> Path | None:
     """FLAC 再生互換のため、必要時に WAV を生成して返す。
 
@@ -770,7 +783,9 @@ async def _finalize_session(session_id: str) -> None:
         _streamers.pop(session_id, None)
         _mixers.pop(session_id, None)
 
-        if streamer_error and not segments:
+        use_combined_final_transcript = _should_finalize_from_combined(result)
+
+        if streamer_error and not segments and not use_combined_final_transcript:
             _set_state(session_id, state="error",
                        message=f"文字起こしに失敗: {streamer_error}",
                        error=streamer_error)
@@ -782,51 +797,63 @@ async def _finalize_session(session_id: str) -> None:
         wav_path = None
         if isinstance(result, dict):
             wav_path = result.get("wav_path")
-        _set_record_stage(Stage.DIARIZE_EXTRACT, "話者特徴を抽出中...")
-        _write_session_meta(session_id, state="rediarizing", wav_path=wav_path)
-        await _broadcast_pipeline(session_id)
+        if use_combined_final_transcript:
+            logger.info(
+                "Using combined audio as final transcript source: %s (live_segments=%d)",
+                session_id,
+                len(segments),
+            )
+            transcript = []
+            transcript_payload = build_pipeline_transcript_payload(transcript)
+            _set_record_stage(Stage.SAVING, "確定音声から文字起こしを開始します...")
+            _write_session_meta(session_id, state="saving", wav_path=wav_path)
+            await _broadcast_pipeline(session_id)
+        else:
+            _set_record_stage(Stage.DIARIZE_EXTRACT, "話者特徴を抽出中...")
+            _write_session_meta(session_id, state="rediarizing", wav_path=wav_path)
+            await _broadcast_pipeline(session_id)
 
-        # 話者分離 (extract / cluster / assign) の進捗を WS に流す。
-        # rediarize は worker thread で動くので run_coroutine_threadsafe 経由で broadcast。
-        _last_diarize_emit = 0.0
+            # 話者分離 (extract / cluster / assign) の進捗を WS に流す。
+            # rediarize は worker thread で動くので run_coroutine_threadsafe 経由で broadcast。
+            _last_diarize_emit = 0.0
 
-        def _on_diarize_progress(stage_key: str, prog: float, message: str | None) -> None:
-            nonlocal _last_diarize_emit
-            import time as _t
-            stage_enum = {
-                "extract": Stage.DIARIZE_EXTRACT,
-                "cluster": Stage.DIARIZE_CLUSTER,
-                "assign": Stage.DIARIZE_CLUSTER,
-            }.get(stage_key, Stage.DIARIZE_EXTRACT)
-            _set_record_stage(stage_enum, message)
-            p_state = _pipelines.get(session_id)
-            if p_state is not None:
-                p_state["progress"] = round(prog, 3)
-            now_t = _t.monotonic()
-            # 200ms throttle (但し進捗 1.0 完了時は必ず通知)
-            if prog < 1.0 and (now_t - _last_diarize_emit) < 0.2:
-                return
-            _last_diarize_emit = now_t
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    _broadcast_pipeline(session_id), loop,
-                )
-            except Exception:
-                pass
+            def _on_diarize_progress(stage_key: str, prog: float, message: str | None) -> None:
+                nonlocal _last_diarize_emit
+                import time as _t
+                stage_enum = {
+                    "extract": Stage.DIARIZE_EXTRACT,
+                    "cluster": Stage.DIARIZE_CLUSTER,
+                    "assign": Stage.DIARIZE_CLUSTER,
+                }.get(stage_key, Stage.DIARIZE_EXTRACT)
+                _set_record_stage(stage_enum, message)
+                p_state = _pipelines.get(session_id)
+                if p_state is not None:
+                    p_state["progress"] = round(prog, 3)
+                now_t = _t.monotonic()
+                # 200ms throttle (但し進捗 1.0 完了時は必ず通知)
+                if prog < 1.0 and (now_t - _last_diarize_emit) < 0.2:
+                    return
+                _last_diarize_emit = now_t
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        _broadcast_pipeline(session_id), loop,
+                    )
+                except Exception:
+                    pass
 
-        transcript = await loop.run_in_executor(
-            None,
-            lambda: speaker_memory.rediarize_segments(
-                segments,
-                wav_path=wav_path,
-                session_id=session_id,
-                on_progress=_on_diarize_progress,
-            ),
-        )
-        # rediarize 完了したので、progress フィールドをクリア (次の SAVING で再計算)
-        if session_id in _pipelines:
-            _pipelines[session_id]["progress"] = 1.0
-        transcript_payload = build_pipeline_transcript_payload(transcript)
+            transcript = await loop.run_in_executor(
+                None,
+                lambda: speaker_memory.rediarize_segments(
+                    segments,
+                    wav_path=wav_path,
+                    session_id=session_id,
+                    on_progress=_on_diarize_progress,
+                ),
+            )
+            # rediarize 完了したので、progress フィールドをクリア (次の SAVING で再計算)
+            if session_id in _pipelines:
+                _pipelines[session_id]["progress"] = 1.0
+            transcript_payload = build_pipeline_transcript_payload(transcript)
 
         _set_record_stage(Stage.SAVING, "DB に保存中...")
         _write_session_meta(session_id, state="saving")
@@ -905,7 +932,34 @@ async def _finalize_session(session_id: str) -> None:
 
         # 自動要約トリガー (auto_generate=true 時のみ)
         auto_gen = bool(config.get("minutes_ai", "auto_generate", default=True))
-        if minutes_id and auto_gen:
+        if minutes_id and use_combined_final_transcript:
+            try:
+                from src.api.minutes import _start_retranscribe_minutes
+
+                await _start_retranscribe_minutes(
+                    minutes_id,
+                    enqueue_summary_on_complete=auto_gen,
+                )
+                logger.info(
+                    "Combined-based final transcribe queued: %s (overflow=%s, padding=%s)",
+                    session_id,
+                    (result or {}).get("mic_overflow_total"),
+                    (result or {}).get("mic_padding_sec"),
+                )
+            except Exception as e:
+                msg = f"確定音声からの文字起こし開始に失敗: {e}"
+                logger.warning(
+                    "Failed to queue combined-based final transcribe for %s: %s",
+                    session_id,
+                    e,
+                )
+                _set_state(session_id, state="error", message=msg, error=msg)
+                await ws_manager.broadcast({
+                    "type": "pipeline_error",
+                    "data": {"session_id": session_id, "message": msg},
+                })
+                await _broadcast_pipeline(session_id)
+        elif minutes_id and auto_gen:
             try:
                 from src.summarize.runner import get_runner
 

@@ -116,6 +116,7 @@ class Recorder:
         self._system_pcm_callback: AudioCallback | None = None
         self._error: str | None = None
         self._mic_overflow_total: int = 0
+        self._mic_padding_samples_total: int = 0
         self._mic_reopen_total: int = 0
         self._last_overflow_log_at: float = 0.0
         # システム音声の初回PCM到着遅延(録音開始からの秒)。
@@ -394,6 +395,7 @@ class Recorder:
         self._error = None
         self._sys_capture = None
         self._mic_overflow_total = 0
+        self._mic_padding_samples_total = 0
         self._mic_reopen_total = 0
         self._last_overflow_log_at = 0.0
         self._system_first_pcm_delay_sec = None
@@ -514,6 +516,32 @@ class Recorder:
         )
         return native_rate
 
+    @staticmethod
+    def _mic_padding_samples_for_read(
+        *,
+        expected_next_read_at: float | None,
+        read_finished_at: float,
+        capture_rate: int,
+        block_duration_sec: float,
+        overflowed: bool,
+    ) -> int:
+        """入力読み取り遅延から、時計合わせに挿入する無音サンプル数を返す。
+
+        PortAudio の overflow は「バッファ内の音声が捨てられた」ことだけを伝えるため、
+        捨てられた正確なサンプル数は得られない。直前までの期待読み取り時刻と実際の
+        read 完了時刻との差分を、欠落した実時間として mic / live mixer の両方に補填する。
+        """
+        if expected_next_read_at is None or capture_rate <= 0:
+            return 0
+        lag_sec = read_finished_at - expected_next_read_at
+        if lag_sec <= 0:
+            return 0
+        # overflow が無い小さなジッターでは実音声は失われていない可能性が高い。
+        # ただし長い read 停滞は時計が詰まるため補填する。
+        if not overflowed and lag_sec < max(0.25, block_duration_sec * 2.0):
+            return 0
+        return max(0, int(round(lag_sec * capture_rate)))
+
     def _record_mic(self) -> None:
         """マイク録音 → 設定レート優先で WAV 書き込み(非対応ならネイティブへフォールバック)。
 
@@ -547,7 +575,7 @@ class Recorder:
             max_read_errors = max(10, int(stream_cfg.get("max_read_errors", 50)))
             max_stream_reopen = min(20, max(5, int(stream_cfg.get("max_reopen", 8))))
             overflow_reopen_streak = max(3, int(stream_cfg.get("overflow_reopen_streak", 6)))
-            reopen_on_overflow = bool(stream_cfg.get("reopen_on_overflow", False))
+            reopen_on_overflow = bool(stream_cfg.get("reopen_on_overflow", True))
             reset_on_internal, internal_reset_retries, internal_retry_delay = (
                 self._mic_internal_error_recovery_settings()
             )
@@ -570,6 +598,44 @@ class Recorder:
 
             block_size = int(capture_rate * block_ms / 1000)
             max_block_size = int(capture_rate * max_block_ms / 1000)
+            expected_next_read_at: float | None = None
+
+            def _emit_mic_samples(mono: np.ndarray, *, padding: bool = False) -> None:
+                try:
+                    wf.writeframes(mono.tobytes())
+                except Exception as e:
+                    logger.error("WAV write error: %s", e)
+
+                if self._pcm_callback:
+                    try:
+                        self._pcm_callback(mono, capture_rate)
+                    except Exception as e:
+                        logger.error("PCM callback error: %s", e)
+
+                if self._level_callback:
+                    try:
+                        if padding or self._mic_muted:
+                            level = 0.0
+                        else:
+                            rms = np.sqrt(np.mean(mono.astype(np.float32) ** 2)) / 32768.0
+                            level = min(1.0, rms * 5)
+                        self._level_callback(level)
+                    except Exception:
+                        pass
+
+            def _emit_mic_padding(sample_count: int) -> None:
+                if sample_count <= 0:
+                    return
+                remaining = int(sample_count)
+                self._mic_padding_samples_total += remaining
+                logger.warning(
+                    "mic: inserted %.3fs silence to preserve recording timeline",
+                    remaining / capture_rate,
+                )
+                while remaining > 0 and self._recording:
+                    n = min(remaining, block_size)
+                    _emit_mic_samples(np.zeros(n, dtype=np.int16), padding=True)
+                    remaining -= n
 
             def _open_input_stream(ch: int) -> sd.InputStream:
                 return sd.InputStream(
@@ -588,6 +654,8 @@ class Recorder:
                 try:
                     stream = _open_input_stream(channels)
                     stream.start()
+                    if expected_next_read_at is None:
+                        expected_next_read_at = time.monotonic() + (block_size / capture_rate)
                 except Exception as e:
                     msg = str(e)
                     # チャンネル数エラーの場合は別の値で再試行
@@ -641,6 +709,7 @@ class Recorder:
                     while self._recording:
                         try:
                             data, overflowed = stream.read(block_size)
+                            read_finished_at = time.monotonic()
                             read_errors = 0
                         except Exception as e:
                             read_errors += 1
@@ -652,6 +721,14 @@ class Recorder:
                             time.sleep(0.05)
                             continue
 
+                        pad_samples = self._mic_padding_samples_for_read(
+                            expected_next_read_at=expected_next_read_at,
+                            read_finished_at=read_finished_at,
+                            capture_rate=capture_rate,
+                            block_duration_sec=block_size / capture_rate,
+                            overflowed=bool(overflowed),
+                        )
+                        reopen_after_block = False
                         if overflowed:
                             overflow_streak += 1
                             self._mic_overflow_total += 1
@@ -664,11 +741,13 @@ class Recorder:
                                     int(block_size / capture_rate * 1000),
                                 )
                                 self._last_overflow_log_at = now
+                            _emit_mic_padding(pad_samples)
                             if reopen_on_overflow and overflow_streak >= overflow_reopen_streak:
                                 logger.warning(
                                     "mic: overflow streak reached (%d), reopening stream",
                                     overflow_streak,
                                 )
+                                reopen_after_block = True
                                 if block_size < max_block_size:
                                     new_block = min(max_block_size, int(block_size * 1.5))
                                     if new_block <= block_size:
@@ -680,9 +759,9 @@ class Recorder:
                                             int(new_block / capture_rate * 1000),
                                         )
                                         block_size = new_block
-                                break
                         else:
                             overflow_streak = 0
+                            _emit_mic_padding(pad_samples)
 
                         # ステレオ等を mono にミックスダウン
                         if channels > 1:
@@ -699,27 +778,10 @@ class Recorder:
                         if self._mic_muted:
                             mono = np.zeros_like(mono)
 
-                        try:
-                            wf.writeframes(mono.tobytes())
-                        except Exception as e:
-                            logger.error("WAV write error: %s", e)
-
-                        if self._pcm_callback:
-                            try:
-                                self._pcm_callback(mono, capture_rate)
-                            except Exception as e:
-                                logger.error("PCM callback error: %s", e)
-
-                        if self._level_callback:
-                            try:
-                                if self._mic_muted:
-                                    level = 0.0
-                                else:
-                                    rms = np.sqrt(np.mean(mono.astype(np.float32) ** 2)) / 32768.0
-                                    level = min(1.0, rms * 5)
-                                self._level_callback(level)
-                            except Exception:
-                                pass
+                        _emit_mic_samples(mono)
+                        expected_next_read_at = read_finished_at + (len(mono) / capture_rate)
+                        if reopen_after_block:
+                            break
                 finally:
                     try:
                         stream.stop()
@@ -832,6 +894,8 @@ class Recorder:
             if system_coverage_ratio is not None else None,
             "system_backend": system_backend,
             "error": self._error,
+            "mic_overflow_total": self._mic_overflow_total,
+            "mic_padding_sec": round(self._mic_padding_samples_total / SAMPLE_RATE, 3),
             "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)
             if self._system_first_pcm_delay_sec is not None else None,
         }
@@ -913,7 +977,7 @@ class Recorder:
         combined = self._session_dir / "combined.flac"
         rec_cfg = config.get("recording", default={}) or {}
         loudness_filter = build_ffmpeg_loudness_filter(rec_cfg.get("audio_leveling"))
-        delay_enabled = bool(rec_cfg.get("system_delay_compensation_enabled", False))
+        delay_enabled = True
         delay_ms = 0
         try:
             timeout_sec = max(60, min(900, int(rec_cfg.get("finalize_timeout_sec", 300))))
@@ -1027,6 +1091,7 @@ class Recorder:
             "recording": self._recording,
             "elapsed_sec": round(self.elapsed_sec, 1) if self._recording else 0,
             "mic_overflow_total": self._mic_overflow_total,
+            "mic_padding_sec": round(self._mic_padding_samples_total / SAMPLE_RATE, 3),
             "mic_reopen_total": self._mic_reopen_total,
             "mic_stream_alive": self.mic_stream_alive,
             "mic_muted": self._mic_muted,

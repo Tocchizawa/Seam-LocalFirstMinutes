@@ -110,6 +110,18 @@ class FailingDb:
         return None
 
 
+class CapturingDb:
+    def __init__(self) -> None:
+        self.records: dict[str, dict] = {}
+
+    def insert_minutes(self, data: dict) -> None:
+        self.records[str(data["id"])] = dict(data)
+
+    def get_minutes(self, minutes_id: str) -> dict | None:
+        record = self.records.get(str(minutes_id))
+        return dict(record) if record is not None else None
+
+
 def reset_state(tmp: Path, ws: FakeWs) -> dict:
     saved = {
         "SESSIONS_DIR": recording.SESSIONS_DIR,
@@ -303,6 +315,68 @@ async def _run_system_audio_start_failure_does_not_record() -> None:
             restore_state(saved)
 
 
+async def _run_combined_audio_is_final_transcript_source() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        old_db_module = sys.modules.get("src.storage.db")
+        old_minutes_module = sys.modules.get("src.api.minutes")
+        fake_db = CapturingDb()
+        retranscribe_calls: list[dict] = []
+
+        async def fake_start_retranscribe(minutes_id: str, *, enqueue_summary_on_complete: bool = False) -> dict:
+            retranscribe_calls.append({
+                "minutes_id": minutes_id,
+                "enqueue_summary_on_complete": enqueue_summary_on_complete,
+            })
+            return {"status": "started", "session_id": sid}
+
+        sys.modules["src.storage.db"] = types.SimpleNamespace(db=fake_db)  # type: ignore[assignment]
+        sys.modules["src.api.minutes"] = types.SimpleNamespace(  # type: ignore[assignment]
+            _start_retranscribe_minutes=fake_start_retranscribe,
+        )
+        try:
+            sid = "20260622_123000"
+            session_dir = Path(td) / sid
+            session_dir.mkdir()
+            combined = session_dir / "combined.flac"
+            combined.write_bytes(b"0" * 128)
+            recording._pipelines[sid] = recording._new_pipeline(sid, "project-a")
+            recording._active_session_id = sid
+            recording.recorder = FakeRecorder({  # type: ignore[assignment]
+                "session_id": sid,
+                "session_dir": str(session_dir),
+                "wav_path": str(combined),
+                "combined_wav": str(combined),
+                "duration_sec": 3,
+                "error": None,
+            })
+            recording._streamers[sid] = FakeStreamer([
+                {"start": 0.0, "end": 1.0, "text": "live transcript"},
+            ])  # type: ignore[assignment]
+            recording._mixers[sid] = FakeMixer()  # type: ignore[assignment]
+
+            await recording._finalize_session(sid)
+
+            assert len(fake_db.records) == 1
+            saved_minutes = next(iter(fake_db.records.values()))
+            assert saved_minutes["transcript"] == []
+            assert len(retranscribe_calls) == 1
+            assert retranscribe_calls[0]["minutes_id"] == saved_minutes["id"]
+            assert retranscribe_calls[0]["enqueue_summary_on_complete"] is True
+            assert recording._pipelines[sid].get("state") == "done"
+        finally:
+            if old_db_module is None:
+                sys.modules.pop("src.storage.db", None)
+            else:
+                sys.modules["src.storage.db"] = old_db_module
+            if old_minutes_module is None:
+                sys.modules.pop("src.api.minutes", None)
+            else:
+                sys.modules["src.api.minutes"] = old_minutes_module
+            restore_state(saved)
+
+
 def test_db_save_failure_is_not_done() -> None:
     asyncio.run(_run_db_save_failure_is_not_done())
 
@@ -317,6 +391,38 @@ def test_system_audio_failure_is_not_done() -> None:
 
 def test_system_audio_start_failure_does_not_record() -> None:
     asyncio.run(_run_system_audio_start_failure_does_not_record())
+
+
+def test_combined_audio_is_final_transcript_source() -> None:
+    asyncio.run(_run_combined_audio_is_final_transcript_source())
+
+
+def test_combined_final_transcript_required_with_combined_audio() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        combined = Path(td) / "combined.flac"
+        combined.write_bytes(b"0" * 128)
+        assert recording._should_finalize_from_combined({
+            "combined_wav": str(combined),
+            "mic_overflow_total": 0,
+            "mic_padding_sec": 0.0,
+        })
+
+
+def test_combined_final_transcript_not_required_without_combined_audio() -> None:
+    assert not recording._should_finalize_from_combined({
+        "mic_wav": "/tmp/session/mic.wav",
+        "mic_overflow_total": 10,
+        "mic_padding_sec": 2.0,
+    })
+
+
+def test_combined_final_transcript_not_required_for_empty_combined_audio() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        combined = Path(td) / "combined.flac"
+        combined.write_bytes(b"")
+        assert not recording._should_finalize_from_combined({
+            "combined_wav": str(combined),
+        })
 
 
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
@@ -340,4 +446,8 @@ if __name__ == "__main__":
         test_mic_failure_releases_active_recording,
         test_system_audio_failure_is_not_done,
         test_system_audio_start_failure_does_not_record,
+        test_combined_audio_is_final_transcript_source,
+        test_combined_final_transcript_required_with_combined_audio,
+        test_combined_final_transcript_not_required_without_combined_audio,
+        test_combined_final_transcript_not_required_for_empty_combined_audio,
     ]))
