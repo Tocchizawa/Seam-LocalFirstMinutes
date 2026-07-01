@@ -54,7 +54,7 @@
 - ストリーミング: 数秒チャンクごとにリアルタイム文字起こし
 - **1秒オーバーラップ**: チャンク間に重複区間を設けて文の途中切れを防止
 - **絶対タイムスタンプ**: チャンクごとに offset を累積加算
-- **最終補正は行わない**: ストリーミング結果 + 残バッファ flush が最終結果
+- **最終結果**: ストリーミング結果は録音中表示用。DB 保存用 transcript は停止後に `combined.flac` から再生成する
 - **CPU のみ対応** (CTranslate2 ベース): CUDA / CPU のみ。**Metal/MPS は非対応**
   - Apple Silicon では ARM NEON 最適化による CPU 推論で動作。medium モデルで実用的な速度
   - GPU 推論が必要な場合の代替: **mlx-whisper** (Apple MLX) または **whisper.cpp** (Metal 対応)

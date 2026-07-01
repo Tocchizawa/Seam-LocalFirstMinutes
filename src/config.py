@@ -144,14 +144,14 @@ DEFAULTS: dict[str, Any] = {
             "overflow_reopen_streak": 6,
             "max_read_errors": 50,
             "max_reopen": 8,
-            "reopen_on_overflow": False,
+            "reopen_on_overflow": True,
             "reset_backend_on_internal_error": True,
             "internal_error_retries": 2,
             "internal_error_retry_delay_sec": 0.4,
         },
-        # system track 遅延補正は transcript タイムラインとの整合を崩しやすいため、
-        # 既定では無効。必要時のみ明示的に有効化する。
-        "system_delay_compensation_enabled": False,
+        # 最終的に再生される combined.flac の時刻を正にするため、
+        # Core Audio Tap の初回 PCM 到着遅延を最終ミックスへ反映する。
+        "system_delay_compensation_enabled": True,
         # 内部音声が途中で途切れて mic のみの combined.flac が正常扱いされるのを防ぐ。
         "system_capture_watchdog": {
             "enabled": True,
@@ -492,12 +492,15 @@ class Config:
         if method not in {"auto", "coreaudio_tap"}:
             method = "auto"
         recording["system_capture"] = method
+        # 旧既定値 false のままだと combined.flac 上で mic / system の時計がずれる。
+        # この値は UI 設定ではなく安全側の内部補正なので、既存 config も true に寄せる。
+        recording["system_delay_compensation_enabled"] = True
         mic_stream = recording.setdefault("mic_stream", {})
         if not isinstance(mic_stream, dict):
             mic_stream = {}
             recording["mic_stream"] = mic_stream
         if "reopen_on_overflow" not in mic_stream:
-            mic_stream["reopen_on_overflow"] = False
+            mic_stream["reopen_on_overflow"] = True
         mic_stream.setdefault("reset_backend_on_internal_error", True)
         mic_stream.setdefault("internal_error_retries", 2)
         mic_stream.setdefault("internal_error_retry_delay_sec", 0.4)
