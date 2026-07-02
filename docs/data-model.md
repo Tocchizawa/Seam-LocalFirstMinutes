@@ -314,10 +314,9 @@ def build_transcript_text(transcript: list[dict]) -> str:
   │
 録音停止
   │
-  ├── Whisper バッファ flush                     [リアルタイム表示の終了処理]
+  ├── Whisper バッファ flush                     [保存用 transcript の確定]
   ├── RAW → WAV 変換                            [一時]
-  ├── ミックス → combined.flac                   [一時]
-  ├── combined.flac → Whisper → transcript       [保存用]
+  ├── ミックス → combined.flac                   [再生・手動再文字起こし用]
   │
 コンテキスト調査
   │
