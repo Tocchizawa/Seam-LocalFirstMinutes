@@ -13,7 +13,7 @@
 | **パッケージ管理 (GUI)** | pnpm | 9+ | フロント依存管理 |
 | **音声認識** | faster-whisper | 1.0+ | ストリーミング文字起こし |
 | **LLM** | Ollama + Qwen3 8B | latest | コンテキスト調査・議事録生成 |
-| **マイク録音** | sounddevice | 0.5+ | マイク入力 |
+| **マイク録音** | Core Audio Audio Queue | macOS | マイク入力 (Objective-C sidecar) |
 | **内部音声** | Core Audio Process Tap | macOS 14.2+ | システム音声キャプチャ (Objective-C sidecar) |
 | **音声処理** | ffmpeg | 7+ | RAW→WAV変換・レベル正規化・2トラックミキシング (.app同梱) |
 | **ファイル読取** | pymupdf | 1.24+ | PDF (Context Agent) |
@@ -41,8 +41,9 @@
 - async でパイプラインの非同期実行
 - Whisper の `transcribe()` は同期関数だが `run_in_executor` で共存
 
-### 2.3 内部音声キャプチャ (Core Audio Tap)
+### 2.3 音声キャプチャ (Core Audio sidecar)
 
+- マイク入力は **Audio Queue** を使い、Objective-C sidecar が RAW PCM (`float32`, mono, 16kHz) を書き出す。Python は raw を追尾して `mic.wav` とリアルタイムミックスへ流す。
 - **Core Audio Process Tap** を使う。音声専用 API のため、ScreenCaptureKit / ReplayKit 経路で長時間録音中に音声 callback が止まるリスクを避けやすい。
 - **Objective-C sidecar バイナリ**として実装し、Tauri の resources に同梱する。
 - sidecar は RAW PCM (`float32`, mono, native sample rate) とメタデータ JSON を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。

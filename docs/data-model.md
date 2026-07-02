@@ -34,6 +34,7 @@ whisper:
 # 録音設定
 recording:
   mic_device: null              # null = システム既定
+  mic_capture: "coreaudio_sidecar" # coreaudio_sidecar / sounddevice
   system_capture: "auto"        # auto / coreaudio_tap
   sample_rate: 16000
   channels: 1
