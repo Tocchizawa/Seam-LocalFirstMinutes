@@ -140,11 +140,8 @@ DEFAULTS: dict[str, Any] = {
         "mic_stream": {
             "latency": "high",
             "block_ms": 160,
-            "max_block_ms": 320,
-            "overflow_reopen_streak": 6,
             "max_read_errors": 50,
             "max_reopen": 8,
-            "reopen_on_overflow": True,
             "reset_backend_on_internal_error": True,
             "internal_error_retries": 2,
             "internal_error_retry_delay_sec": 0.4,
@@ -499,8 +496,6 @@ class Config:
         if not isinstance(mic_stream, dict):
             mic_stream = {}
             recording["mic_stream"] = mic_stream
-        if "reopen_on_overflow" not in mic_stream:
-            mic_stream["reopen_on_overflow"] = True
         mic_stream.setdefault("reset_backend_on_internal_error", True)
         mic_stream.setdefault("internal_error_retries", 2)
         mic_stream.setdefault("internal_error_retry_delay_sec", 0.4)
