@@ -233,8 +233,8 @@ raw file tail ───(raw PCM)────→ system_capture.py
 
 - **RAW → WAV 変換**: `ffmpeg -f s16le -ar 16000 -ac 1 -i mic.raw mic.wav`
 - **リアルタイム補正**: Whisper 投入前に RMS ベースの自動ゲイン補正をかける
-- **レベル正規化**: `dynaudnorm + alimiter` で録音途中の音量低下を補正する
-- **ミキシング**: `ffmpeg -i mic.wav -i system.wav -filter_complex amix=inputs=2:duration=longest:normalize=0,... combined.flac`
+- **レベル補正**: Whisper 投入前のリアルタイムミックスに RMS ベースの自動ゲイン補正をかける
+- **ミキシング**: Whisper に投入するリアルタイムミックス済み PCM を録音中に `combined.wav` へ保存し、停止後に `combined.flac` へ変換する
 - ffmpeg バイナリは .app 内の `Resources/ffmpeg/` に同梱。subprocess で呼び出す
 
 #### クラッシュ耐性

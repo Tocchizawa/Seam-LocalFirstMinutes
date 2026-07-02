@@ -147,9 +147,6 @@ DEFAULTS: dict[str, Any] = {
             "internal_error_retries": 2,
             "internal_error_retry_delay_sec": 0.4,
         },
-        # 最終的に再生される combined.flac の時刻を正にするため、
-        # Core Audio Tap の初回 PCM 到着遅延を最終ミックスへ反映する。
-        "system_delay_compensation_enabled": True,
         # 内部音声が途中で途切れて mic のみの combined.flac が正常扱いされるのを防ぐ。
         "system_capture_watchdog": {
             "enabled": True,
@@ -161,7 +158,6 @@ DEFAULTS: dict[str, Any] = {
         "audio_leveling": {
             "enabled": True,
             "realtime_enabled": True,
-            "final_normalize": True,
             "target_rms": 0.08,
             "noise_floor": 0.003,
             "max_gain": 12.0,
@@ -169,7 +165,6 @@ DEFAULTS: dict[str, Any] = {
             "release": 0.55,
             "peak_limit": 0.95,
             "frame_ms": 100,
-            "gauss_size": 3,
         },
         "finalize_timeout_sec": 300,
         # 完了済みパイプラインの保持上限(メモリガード)。
@@ -505,9 +500,6 @@ class Config:
         if mic_capture not in {"coreaudio_sidecar", "sounddevice"}:
             mic_capture = "coreaudio_sidecar"
         recording["mic_capture"] = mic_capture
-        # 旧既定値 false のままだと combined.flac 上で mic / system の時計がずれる。
-        # この値は UI 設定ではなく安全側の内部補正なので、既存 config も true に寄せる。
-        recording["system_delay_compensation_enabled"] = True
         mic_stream = recording.setdefault("mic_stream", {})
         if not isinstance(mic_stream, dict):
             mic_stream = {}
@@ -522,7 +514,6 @@ class Config:
             recording["audio_leveling"] = leveling
         leveling["enabled"] = bool(leveling.get("enabled", True))
         leveling["realtime_enabled"] = bool(leveling.get("realtime_enabled", True))
-        leveling["final_normalize"] = bool(leveling.get("final_normalize", True))
         try:
             leveling["target_rms"] = max(0.01, min(0.30, float(leveling.get("target_rms", 0.08))))
         except Exception:
@@ -551,13 +542,6 @@ class Config:
             leveling["frame_ms"] = max(50, min(5000, int(leveling.get("frame_ms", 100))))
         except Exception:
             leveling["frame_ms"] = 100
-        try:
-            gauss_size = max(3, min(301, int(leveling.get("gauss_size", 3))))
-            if gauss_size % 2 == 0:
-                gauss_size += 1
-            leveling["gauss_size"] = min(301, gauss_size)
-        except Exception:
-            leveling["gauss_size"] = 3
         try:
             recording["finalize_timeout_sec"] = max(
                 60, min(900, int(recording.get("finalize_timeout_sec", 300)))

@@ -23,8 +23,9 @@ from pydantic import BaseModel
 
 from src.api.errors import bad_request, conflict, not_found
 from src.api.ws import ws_manager
-from src.audio.recorder import FFMPEG, SESSIONS_DIR, recorder
 from src.audio.mixer import RealtimeMixer
+from src.audio.mixed_writer import RealtimeMixedAudioWriter
+from src.audio.recorder import FFMPEG, SESSIONS_DIR, recorder
 from src.config import config
 from src.project.manager import project_manager
 from src.security import is_safe_session_id
@@ -58,6 +59,7 @@ _active_session_id: str | None = None
 # session ごとの streamer / mixer
 _streamers: dict[str, StreamingTranscriber] = {}
 _mixers: dict[str, RealtimeMixer] = {}
+_mix_writers: dict[str, RealtimeMixedAudioWriter] = {}
 
 # audio_level 用(録音中のみ意味あり)
 _level_task: asyncio.Task | None = None
@@ -169,6 +171,55 @@ def _is_system_audio_failure(message: str) -> bool:
         or "内部音声" in message
         or "キャプチャ" in message
     )
+
+
+def _finalize_realtime_mixed_audio(session_id: str, result: dict | None) -> dict:
+    updated = dict(result or {})
+    writer = _mix_writers.pop(session_id, None)
+    if writer is None:
+        return updated
+
+    try:
+        rec_cfg = config.get("recording", default={}) or {}
+        timeout_sec = max(60, min(900, int(rec_cfg.get("finalize_timeout_sec", 300))))
+    except Exception:
+        timeout_sec = 300
+
+    try:
+        mixed_path = writer.finalize(timeout_sec=timeout_sec)
+    except Exception as e:
+        logger.error("realtime mixed audio finalize failed [%s]: %s", session_id, e)
+        try:
+            writer.close()
+        except Exception:
+            pass
+        return updated
+
+    if mixed_path is None or not _is_valid_audio_file(mixed_path):
+        return updated
+
+    duration = round(float(writer.duration_sec), 1)
+    updated["wav_path"] = str(mixed_path)
+    updated["combined_wav"] = str(mixed_path)
+    updated["duration_sec"] = duration
+    _remove_intermediate_track_wavs(updated, keep=mixed_path)
+    return updated
+
+
+def _remove_intermediate_track_wavs(result: dict, *, keep: Path) -> None:
+    keep_resolved = keep.resolve()
+    for key in ("mic_wav", "system_wav"):
+        raw = result.get(key)
+        if not raw:
+            continue
+        try:
+            path = Path(str(raw))
+            if path.resolve() == keep_resolved:
+                continue
+            path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("Failed to remove intermediate %s: %s", raw, e)
+        result[key] = None
 
 
 def _ensure_playback_wav(flac_path: Path, wav_path: Path) -> Path | None:
@@ -731,10 +782,6 @@ async def _finalize_session(session_id: str) -> None:
                 _active_session_id = None
                 return
 
-        await ws_manager.broadcast({
-            "type": "recording_stopped",
-            "data": {**result, "session_id": session_id},
-        })
         # ここで recorder は free → 次の録音開始可能
         _active_session_id = None
 
@@ -757,6 +804,19 @@ async def _finalize_session(session_id: str) -> None:
         mixer = _mixers.get(session_id)
         if mixer is not None:
             await loop.run_in_executor(None, mixer.stop)
+
+        result = await loop.run_in_executor(
+            None,
+            _finalize_realtime_mixed_audio,
+            session_id,
+            result,
+        )
+        _last_result = result
+        _set_state(session_id, result=result)
+        await ws_manager.broadcast({
+            "type": "recording_stopped",
+            "data": {**result, "session_id": session_id},
+        })
 
         segments: list[dict] = []
         streamer_error: str | None = None
@@ -938,6 +998,12 @@ def _cleanup_session(session_id: str) -> None:
             mixer.stop()
         except Exception:
             pass
+    writer = _mix_writers.pop(session_id, None)
+    if writer is not None:
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 
 # ─── Endpoints ──────────────────────────────────────────────────────────
@@ -1019,13 +1085,34 @@ async def start_recording(req: StartRequest) -> dict:
     )
     streamer.start(loop)
     rec_cfg = config.get("recording", default={}) or {}
+    mix_writer = RealtimeMixedAudioWriter(_session_dir(session_id))
+    try:
+        mix_writer.start()
+    except Exception as e:
+        try:
+            streamer.cleanup()
+        except Exception:
+            pass
+        _cleanup_session(session_id)
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        raise conflict("MIXED_AUDIO_WRITER_FAILED", f"録音音声の保存準備に失敗: {e}")
+
+    def _on_mixed_chunk(samples) -> None:
+        try:
+            mix_writer.feed(samples)
+        except Exception as e:
+            logger.error("Realtime mixed audio write failed [%s]: %s", session_id, e)
+        streamer.feed(samples)
+
     mixer = RealtimeMixer(
-        on_chunk=streamer.feed,
+        on_chunk=_on_mixed_chunk,
         audio_leveling=rec_cfg.get("audio_leveling"),
     )
     mixer.start(has_system=req.capture_system)
     _streamers[session_id] = streamer
     _mixers[session_id] = mixer
+    _mix_writers[session_id] = mix_writer
 
     try:
         result = recorder.start(

@@ -44,15 +44,13 @@ recording:
     min_coverage_ratio: 0.85
     max_missing_sec: 20
   audio_leveling:
-    enabled: true               # 録音中/停止後の自動ゲイン補正
+    enabled: true               # 録音中の自動ゲイン補正
     realtime_enabled: true      # Whisper投入前のリアルタイム補正
-    final_normalize: true       # combined.flac 生成時の動的正規化
     target_rms: 0.08
     noise_floor: 0.003
     max_gain: 12.0
     peak_limit: 0.95
     frame_ms: 100
-    gauss_size: 3
 
 # エージェント設定
 agent:
@@ -317,7 +315,7 @@ def build_transcript_text(transcript: list[dict]) -> str:
   │
   ├── Whisper バッファ flush                     [保存用 transcript の確定]
   ├── RAW → WAV 変換                            [一時]
-  ├── ミックス → combined.flac                   [再生・手動再文字起こし用]
+  ├── realtime mixed stream → combined.flac      [再生・手動再文字起こし用]
   │
 コンテキスト調査
   │

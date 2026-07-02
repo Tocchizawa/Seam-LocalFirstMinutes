@@ -2,14 +2,13 @@
 
 - mic: Core Audio sidecar → WAV 直接書き込み
 - system: Core Audio Tap sidecar → WAV 直接書き込み
-- 停止後に ffmpeg で combined.flac (24kHz mono) を生成し、中間 WAV は削除
+- combined.flac は Whisper に渡した realtime mixed stream から API 層で生成
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 import logging
 import shutil
-import subprocess
 import threading
 import time
 import wave
@@ -18,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from src.audio.leveling import build_ffmpeg_loudness_filter
 from src.config import APP_DIR, config
 
 logger = logging.getLogger(__name__)
@@ -119,9 +117,6 @@ class Recorder:
         self._error: str | None = None
         self._mic_reopen_total: int = 0
         self._last_overflow_log_at: float = 0.0
-        # システム音声の初回PCM到着遅延(録音開始からの秒)。
-        # システム音声ファイルには先頭無音が入らない場合があるため、最終ミックス時に補正する。
-        self._system_first_pcm_delay_sec: float | None = None
         self._capture_system_requested: bool = False
         self._system_capture_started: bool = False
         self._system_capture_start_error: str | None = None
@@ -480,7 +475,6 @@ class Recorder:
         self._sys_capture = None
         self._mic_reopen_total = 0
         self._last_overflow_log_at = 0.0
-        self._system_first_pcm_delay_sec = None
         self._capture_system_requested = bool(capture_system)
         self._system_capture_started = False
         self._system_capture_start_error = None
@@ -553,13 +547,6 @@ class Recorder:
         }
 
     def _on_system_pcm(self, samples, sample_rate: int = 48000) -> None:
-        if self._system_first_pcm_delay_sec is None:
-            try:
-                delay = max(0.0, time.monotonic() - self._start_time)
-                self._system_first_pcm_delay_sec = delay
-                logger.info("System PCM first chunk delay: %.3fs", delay)
-            except Exception:
-                self._system_first_pcm_delay_sec = 0.0
         cb = self._system_pcm_callback
         if cb is None:
             return
@@ -874,22 +861,7 @@ class Recorder:
                 if self._error else system_coverage_error
             )
 
-        # FLAC 24kHz mono に統合(中間 mic/system WAV は削除)
-        combined_wav = None
-        if mic_ok or sys_ok:
-            combined_wav = self._finalize_audio(
-                self._mic_wav if mic_ok else None,
-                self._sys_wav if sys_ok else None,
-                system_delay_sec=self._system_first_pcm_delay_sec,
-            )
-
-        # FLAC 化に成功したら中間ファイルは削除済み。失敗時はフォールバックとして残す
-        finalized = combined_wav is not None
-        if finalized:
-            mic_ok = self._mic_wav.exists() if self._mic_wav else False
-            sys_ok = self._sys_wav.exists() if self._sys_wav else False
-
-        wav_path = combined_wav or (self._mic_wav if mic_ok else (self._sys_wav if sys_ok else None))
+        wav_path = self._mic_wav if mic_ok else (self._sys_wav if sys_ok else None)
 
         # Duration: WAV は wave で読める。FLAC は STREAMINFO を直接読む。
         duration = elapsed
@@ -909,7 +881,7 @@ class Recorder:
             "wav_path": str(wav_path) if wav_path else None,
             "mic_wav": str(self._mic_wav) if mic_ok else None,
             "system_wav": str(self._sys_wav) if sys_ok else None,
-            "combined_wav": str(combined_wav) if combined_wav else None,
+            "combined_wav": None,
             "duration_sec": round(duration, 1),
             "elapsed_sec": round(elapsed, 1),
             "mic_duration_sec": round(mic_duration, 1) if mic_duration > 0 else None,
@@ -919,8 +891,6 @@ class Recorder:
             "system_backend": system_backend,
             "mic_backend": self._mic_backend,
             "error": self._error,
-            "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)
-            if self._system_first_pcm_delay_sec is not None else None,
         }
 
         logger.info("Recording stopped. Duration: %.1fs, File: %s", duration, wav_path)
@@ -983,132 +953,6 @@ class Recorder:
             )
         return None
 
-    def _finalize_audio(
-        self,
-        mic: Path | None,
-        sys: Path | None,
-        system_delay_sec: float | None = None,
-    ) -> Path | None:
-        """mic / system トラックを FLAC 24kHz mono の combined.flac に統合する。
-
-        - 両方ある場合は amix で合成
-        - 片方だけなら単一入力をそのままダウンサンプル
-        - 成功したら中間 WAV (mic.wav / system.wav) は削除する
-        """
-        if mic is None and sys is None:
-            return None
-        combined = self._session_dir / "combined.flac"
-        rec_cfg = config.get("recording", default={}) or {}
-        loudness_filter = build_ffmpeg_loudness_filter(rec_cfg.get("audio_leveling"))
-        delay_enabled = True
-        delay_ms = 0
-        try:
-            timeout_sec = max(60, min(900, int(rec_cfg.get("finalize_timeout_sec", 300))))
-        except Exception:
-            timeout_sec = 300
-        if delay_enabled:
-            delay_ms = int(round(max(0.0, float(system_delay_sec or 0.0)) * 1000.0))
-            # 200ms未満は実測誤差として扱い、補正を入れない。
-            if delay_ms < 200:
-                delay_ms = 0
-            # 暴走値のガード: 10秒以上は異常値として無効化。
-            if delay_ms > 10_000:
-                logger.warning("Ignoring suspicious system delay: %dms", delay_ms)
-                delay_ms = 0
-            elif delay_ms > 0:
-                logger.info("Applying system audio delay compensation: %dms", delay_ms)
-        elif system_delay_sec:
-            logger.info(
-                "System delay measured (%.3fs) but compensation is disabled",
-                float(system_delay_sec),
-            )
-        cmd = self._build_finalize_cmd(mic, sys, delay_ms, loudness_filter)
-        fallback_cmd = (
-            self._build_finalize_cmd(mic, sys, delay_ms, None)
-            if loudness_filter else None
-        )
-        if loudness_filter:
-            logger.info("Applying dynamic audio normalization to final mix")
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
-            if (
-                result.returncode != 0
-                and fallback_cmd is not None
-                and "No such filter" in (result.stderr or "")
-            ):
-                logger.warning(
-                    "ffmpeg dynamic normalization unsupported, retrying without it: %s",
-                    result.stderr[-300:],
-                )
-                result = subprocess.run(
-                    fallback_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_sec,
-                )
-            if result.returncode != 0:
-                logger.error("ffmpeg finalize failed (code %d): %s",
-                             result.returncode, result.stderr[-500:])
-                return None
-            if not (combined.exists() and combined.stat().st_size > 44):
-                logger.error("combined.flac not created or empty")
-                return None
-
-            # 中間 WAV を削除してディスク節約
-            for src in (mic, sys):
-                if src and src.exists():
-                    try:
-                        src.unlink()
-                    except Exception as e:
-                        logger.warning("Failed to remove intermediate %s: %s", src.name, e)
-
-            logger.info("Finalized → %s (%.1f MB)",
-                        combined.name, combined.stat().st_size / (1024 * 1024))
-            return combined
-        except Exception as e:
-            logger.error("Finalize failed: %s", e)
-        return None
-
-    def _build_finalize_cmd(
-        self,
-        mic: Path | None,
-        sys: Path | None,
-        delay_ms: int = 0,
-        loudness_filter: str | None = None,
-    ) -> list[str]:
-        combined = self._session_dir / "combined.flac"
-        cmd: list[str] = [FFMPEG, "-y"]
-        if mic and sys:
-            mix_filter = "amix=inputs=2:duration=longest:normalize=0"
-            if loudness_filter:
-                mix_filter = f"{mix_filter},{loudness_filter}"
-            if delay_ms > 0:
-                cmd += [
-                    "-i", str(mic), "-i", str(sys),
-                    "-filter_complex",
-                    f"[1:a]adelay={delay_ms}[sysd];[0:a][sysd]{mix_filter}",
-                ]
-            else:
-                cmd += [
-                    "-i", str(mic), "-i", str(sys),
-                    "-filter_complex", mix_filter,
-                ]
-        else:
-            cmd += ["-i", str(mic or sys)]
-            filters: list[str] = []
-            if sys and delay_ms > 0:
-                filters.append(f"adelay={delay_ms}")
-            if loudness_filter:
-                filters.append(loudness_filter)
-            if filters:
-                cmd += ["-af", ",".join(filters)]
-        cmd += [
-            "-ar", "24000", "-ac", "1",
-            "-c:a", "flac", "-compression_level", "8",
-            str(combined),
-        ]
-        return cmd
-
     def get_status(self) -> dict:
         return {
             "recording": self._recording,
@@ -1118,8 +962,6 @@ class Recorder:
             "mic_backend": self._mic_backend,
             "mic_muted": self._mic_muted,
             "error": self._error,
-            "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)
-            if self._system_first_pcm_delay_sec is not None else None,
         }
 
 

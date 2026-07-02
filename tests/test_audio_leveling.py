@@ -4,14 +4,13 @@ import math
 import subprocess
 import tempfile
 import unittest
-import wave
 from pathlib import Path
 
 import numpy as np
 
-from src.audio.leveling import AdaptiveSpeechGain, build_ffmpeg_loudness_filter
-from src.audio.recorder import FFMPEG, Recorder
-from src.config import config
+from src.audio.leveling import AdaptiveSpeechGain
+from src.audio.mixed_writer import RealtimeMixedAudioWriter
+from src.audio.recorder import FFMPEG
 
 
 def _tone(rms: float, seconds: float, freq: float = 440.0, sample_rate: int = 16000) -> np.ndarray:
@@ -21,15 +20,6 @@ def _tone(rms: float, seconds: float, freq: float = 440.0, sample_rate: int = 16
 
 def _rms(samples: np.ndarray) -> float:
     return float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
-
-
-def _write_wav(path: Path, samples: np.ndarray, sample_rate: int = 16000) -> None:
-    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm.tobytes())
 
 
 def _read_audio(path: Path, sample_rate: int = 16000) -> np.ndarray:
@@ -82,79 +72,25 @@ class AudioLevelingTest(unittest.TestCase):
         self.assertLess(_rms(out), 0.002)
         self.assertLess(gain.last_gain, 1.1)
 
-    def test_final_mix_command_uses_dynamic_normalization_and_unscaled_amix(self) -> None:
-        loudness = build_ffmpeg_loudness_filter({
-            "enabled": True,
-            "final_normalize": True,
-            "target_rms": 0.08,
-            "noise_floor": 0.003,
-            "max_gain": 12.0,
-        })
-        self.assertIsNotNone(loudness)
+    def test_realtime_mixed_writer_finalizes_dispatched_audio(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            r = Recorder()
-            r._session_dir = Path(td)
-            cmd = r._build_finalize_cmd(
-                Path(td) / "mic.wav",
-                Path(td) / "system.wav",
-                delay_ms=250,
-                loudness_filter=loudness,
-            )
+            writer = RealtimeMixedAudioWriter(Path(td))
+            samples = np.concatenate([
+                _tone(0.04, 1.0, freq=440),
+                _tone(0.008, 1.0, freq=660),
+            ])
 
-        joined = " ".join(cmd)
-        self.assertIn("adelay=250", joined)
-        self.assertIn("amix=inputs=2:duration=longest:normalize=0", joined)
-        self.assertIn("dynaudnorm=", joined)
-        self.assertIn("alimiter=", joined)
+            writer.start()
+            writer.feed(samples[:16000])
+            writer.feed(samples[16000:])
+            combined = writer.finalize()
 
-    def test_finalize_recovers_late_recording_level_drop(self) -> None:
-        recording_cfg = config._data.setdefault("recording", {})
-        old_leveling = dict(recording_cfg.get("audio_leveling") or {})
-        old_timeout = recording_cfg.get("finalize_timeout_sec")
-        recording_cfg["audio_leveling"] = {
-            "enabled": True,
-            "realtime_enabled": True,
-            "final_normalize": True,
-            "target_rms": 0.08,
-            "noise_floor": 0.003,
-            "max_gain": 12.0,
-            "peak_limit": 0.95,
-            "frame_ms": 100,
-            "gauss_size": 3,
-        }
-        recording_cfg["finalize_timeout_sec"] = 300
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                session_dir = Path(td)
-                mic = np.concatenate([
-                    _tone(0.04, 3.0, freq=440),
-                    _tone(0.004, 3.0, freq=440),
-                ])
-                system = np.concatenate([
-                    _tone(0.04, 3.0, freq=660),
-                    _tone(0.004, 3.0, freq=660),
-                ])
-                _write_wav(session_dir / "mic.wav", mic)
-                _write_wav(session_dir / "system.wav", system)
-
-                recorder = Recorder()
-                recorder._session_dir = session_dir
-                combined = recorder._finalize_audio(
-                    session_dir / "mic.wav",
-                    session_dir / "system.wav",
-                )
-
-                self.assertIsNotNone(combined)
-                audio = _read_audio(combined)
-                first = _rms(audio[:3 * 16000])
-                second = _rms(audio[3 * 16000:6 * 16000])
-                self.assertGreater(second / first, 0.5)
-        finally:
-            recording_cfg["audio_leveling"] = old_leveling
-            if old_timeout is None:
-                recording_cfg.pop("finalize_timeout_sec", None)
-            else:
-                recording_cfg["finalize_timeout_sec"] = old_timeout
+            self.assertIsNotNone(combined)
+            self.assertEqual(Path(combined).name, "combined.flac")
+            self.assertFalse((Path(td) / "combined.wav").exists())
+            audio = _read_audio(Path(combined))
+            self.assertAlmostEqual(len(audio) / 16000, 2.0, delta=0.05)
+            self.assertGreater(_rms(audio[:16000]), _rms(audio[16000:]) * 3.0)
 
 
 if __name__ == "__main__":

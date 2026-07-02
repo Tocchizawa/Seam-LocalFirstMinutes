@@ -54,6 +54,21 @@ class FakeMixer:
         self.stopped = True
 
 
+class FakeMixedWriter:
+    def __init__(self, output_path: Path, *, duration_sec: float = 4.2) -> None:
+        self.output_path = output_path
+        self.duration_sec = duration_sec
+        self.finalized = False
+        self.closed = False
+
+    def finalize(self, *, timeout_sec: int = 300) -> Path:
+        self.finalized = True
+        return self.output_path
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeRealtimeMixer(FakeMixer):
     def __init__(self, *_args, **_kwargs) -> None:
         super().__init__()
@@ -140,6 +155,7 @@ def reset_state(tmp: Path, ws: FakeWs) -> dict:
     recording._pipelines.clear()
     recording._streamers.clear()
     recording._mixers.clear()
+    recording._mix_writers.clear()
     recording._active_session_id = None
     recording._last_result = None
     return saved
@@ -155,6 +171,7 @@ def restore_state(saved: dict) -> None:
     recording._pipelines.clear()
     recording._streamers.clear()
     recording._mixers.clear()
+    recording._mix_writers.clear()
 
 
 async def _run_db_save_failure_is_not_done() -> None:
@@ -377,6 +394,47 @@ async def _run_combined_audio_does_not_auto_retranscribe() -> None:
             restore_state(saved)
 
 
+def test_realtime_mixed_audio_replaces_raw_tracks() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        try:
+            sid = "20260622_124500"
+            session_dir = Path(td) / sid
+            session_dir.mkdir()
+            mic = session_dir / "mic.wav"
+            system = session_dir / "system.wav"
+            combined = session_dir / "combined.flac"
+            mic.write_bytes(b"m" * 128)
+            system.write_bytes(b"s" * 128)
+            combined.write_bytes(b"c" * 128)
+            writer = FakeMixedWriter(combined, duration_sec=4.2)
+            recording._mix_writers[sid] = writer  # type: ignore[assignment]
+
+            result = recording._finalize_realtime_mixed_audio(
+                sid,
+                {
+                    "wav_path": str(mic),
+                    "mic_wav": str(mic),
+                    "system_wav": str(system),
+                    "combined_wav": None,
+                    "duration_sec": 5.0,
+                },
+            )
+
+            assert writer.finalized
+            assert sid not in recording._mix_writers
+            assert result["wav_path"] == str(combined)
+            assert result["combined_wav"] == str(combined)
+            assert result["duration_sec"] == 4.2
+            assert result["mic_wav"] is None
+            assert result["system_wav"] is None
+            assert not mic.exists()
+            assert not system.exists()
+        finally:
+            restore_state(saved)
+
+
 def test_db_save_failure_is_not_done() -> None:
     asyncio.run(_run_db_save_failure_is_not_done())
 
@@ -414,6 +472,7 @@ def _run_as_script(tests: list[Callable[[], None]]) -> int:
 
 if __name__ == "__main__":
     sys.exit(_run_as_script([
+        test_realtime_mixed_audio_replaces_raw_tracks,
         test_db_save_failure_is_not_done,
         test_mic_failure_releases_active_recording,
         test_system_audio_failure_is_not_done,

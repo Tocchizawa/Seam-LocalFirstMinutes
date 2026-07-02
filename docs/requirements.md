@@ -154,7 +154,7 @@ Zoom等のオンライン会議中にバックグラウンドで PC 内部音声
 ### 3.1 パフォーマンス
 
 - リアルタイム文字起こし: **5秒以内の遅延**で表示
-- 2トラックミキシング（動的レベル正規化含む）: **3分以内** (3時間音声、ffmpeg dynaudnorm + limiter)
+- realtime mixed stream の combined.flac 変換: **3分以内** (3時間音声)
 - コンテキスト調査: **60秒以内**
 - 議事録生成 (1時間会議): **3分以内**
 - 全体パイプライン (3時間会議): 録音停止後 **15〜20分以内** に議事録完成
@@ -309,7 +309,7 @@ Phase 2: LLM使用時
 6. 後処理パイプライン（順次実行・メモリ節約）:
    a. Whisper 残バッファ処理 → Whisper アンロード
    b. RAW PCM → WAV 変換
-   c. 2トラック → 動的レベル正規化 → combined.flac 生成
+   c. Whisper に投入したリアルタイムミックス音声 → combined.flac 生成
    d. Ollama + LLM (Qwen3) 起動 → Context Agent がプロジェクト資料を自律調査
    e. コンテキスト + 全文書き起こし → Minutes Agent → 議事録生成
    f. SQLite 保存 + output_dir に Markdown 出力
