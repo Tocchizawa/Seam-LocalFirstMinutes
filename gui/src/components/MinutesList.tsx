@@ -737,7 +737,7 @@ function MinutesRow({
     if (pipeline) {
       if (isError) return pipeline.message || "エラー";
       if (pipeline.state === "stopping") return pipeline.message || "停止処理中";
-      if (pipeline.state === "transcribing") return pipeline.message || "再文字起こし中";
+      if (pipeline.state === "transcribing") return pipeline.message || "文字起こし中";
     }
     if (isSummarizing) {
       return summarizeState === "queued" ? "要約キュー待ち" : "要約中";

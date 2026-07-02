@@ -183,7 +183,7 @@ export function DetailView(props: Props) {
   // liveSegments に蓄積されているのでそれを優先表示。
   // pipeline 完了後は pipeline.transcript / minutes.transcript が確定する。
   const transcript: TranscriptSegment[] = (() => {
-    if (minutes?.transcript) return minutes.transcript;
+    if (minutes?.transcript && minutes.transcript.length > 0) return minutes.transcript;
     const segs = liveResult?.segments;
     if (segs && segs.length > 0) return segs;
     return liveSegments;
@@ -970,8 +970,8 @@ export function DetailView(props: Props) {
         )}
       </div>
 
-      {/* Live processing state — 録音停止後の pipeline (stopping / transcribing) も
-          再文字起こしと同じ retry-status バナーで表示する */}
+      {/* Live processing state — 録音停止後の pipeline (stopping / transcribing) を
+          共通の進捗バナーで表示する */}
       {isLive && (stateLive === "stopping" || stateLive === "transcribing") && (
         <div className="retry-status">
           <div className="retry-status-row">
