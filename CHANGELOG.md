@@ -3,6 +3,25 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.5] - 2026-07-02
+
+録音完了後の文字起こし確定フローを整理し、録音中に確定した transcript をそのまま保存する beta リリース。
+
+### Fixed
+
+- 録音完了後に自動で再文字起こしが始まり、既存の文字起こし結果が表示されないケースを修正
+- 詳細画面で空の transcript が既存のライブ文字起こし表示を上書きしないように修正
+
+### Changed
+
+- 録音完了時の一覧ステータスを「再文字起こし中」固定ではなく、通常の「文字起こし中」として表示
+- 録音停止後の保存用 transcript を `combined.flac` から自動再生成する設計記述を廃止し、手動再文字起こし時のみ `combined.flac` を使う方針に更新
+
+### Tests
+
+- combined 音声が存在しても録音完了時に自動再文字起こしを起動しない回帰テストを追加
+- 対象PR: [#58](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/58), [#59](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/59)
+
 ## [0.2.0-beta.4] - 2026-06-30
 
 Core Audio Tap を唯一の内部音声キャプチャ経路にし、ScreenCaptureKit / BlackHole フォールバックを廃止する beta リリース。
