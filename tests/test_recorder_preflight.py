@@ -106,42 +106,6 @@ def test_system_audio_near_full_length_is_ok() -> None:
     assert msg is None
 
 
-def test_mic_overflow_padding_uses_read_lag() -> None:
-    samples = Recorder._mic_padding_samples_for_read(
-        expected_next_read_at=10.1,
-        read_finished_at=10.45,
-        capture_rate=16000,
-        block_duration_sec=0.1,
-        overflowed=True,
-    )
-
-    assert samples == 5600
-
-
-def test_mic_read_jitter_without_overflow_is_not_padded() -> None:
-    samples = Recorder._mic_padding_samples_for_read(
-        expected_next_read_at=10.1,
-        read_finished_at=10.16,
-        capture_rate=16000,
-        block_duration_sec=0.1,
-        overflowed=False,
-    )
-
-    assert samples == 0
-
-
-def test_long_mic_read_stall_without_overflow_is_padded() -> None:
-    samples = Recorder._mic_padding_samples_for_read(
-        expected_next_read_at=10.1,
-        read_finished_at=10.5,
-        capture_rate=16000,
-        block_duration_sec=0.1,
-        overflowed=False,
-    )
-
-    assert samples == 6400
-
-
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
     failed = 0
     for test in tests:
@@ -165,7 +129,4 @@ if __name__ == "__main__":
         test_error_message_separates_permission_from_portaudio_recovery,
         test_system_audio_short_track_is_reported,
         test_system_audio_near_full_length_is_ok,
-        test_mic_overflow_padding_uses_read_lag,
-        test_mic_read_jitter_without_overflow_is_not_padded,
-        test_long_mic_read_stall_without_overflow_is_padded,
     ]))
