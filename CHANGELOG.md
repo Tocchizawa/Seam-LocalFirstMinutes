@@ -3,6 +3,22 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.7] - 2026-07-02
+
+マイク入力を Core Audio sidecar に寄せ、PortAudio の mic overflow 起因で自分の音声が途切れるケースを避ける beta リリース。
+
+### Fixed
+
+- マイク録音の既定 backend を Python/sounddevice の blocking read から Core Audio Audio Queue sidecar に変更
+- mic sidecar の raw PCM を Python 側で追尾し、`mic.wav` とリアルタイム文字起こし入力へ流す構成に変更
+- 配布ビルドの audio-capture sidecar に microphone mode を同梱
+
+### Tests
+
+- Core Audio mic sidecar 単体起動、`mic.wav` 生成、`Recorder.start()` / `Recorder.stop()` 経由の `combined.flac` 生成をローカル確認
+- 録音 preflight / 録音パイプライン失敗 / audio leveling / デバイス refresh の回帰テストを実行
+- 対象PR: [#63](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/63)
+
 ## [0.2.0-beta.6] - 2026-07-02
 
 マイク入力の overflow 時に、推定無音を録音へ差し込まないようにして、マイク音声だけが断続的に壊れるケースを抑止する beta リリース。
