@@ -8,7 +8,6 @@ import numpy as np
 DEFAULT_AUDIO_LEVELING: dict[str, Any] = {
     "enabled": True,
     "realtime_enabled": True,
-    "final_normalize": True,
     "target_rms": 0.08,
     "noise_floor": 0.003,
     "max_gain": 12.0,
@@ -16,7 +15,6 @@ DEFAULT_AUDIO_LEVELING: dict[str, Any] = {
     "release": 0.55,
     "peak_limit": 0.95,
     "frame_ms": 100,
-    "gauss_size": 3,
 }
 
 
@@ -42,7 +40,6 @@ def normalize_audio_leveling_config(raw: Any) -> dict[str, Any]:
     cfg.update(src)
     cfg["enabled"] = bool(cfg.get("enabled", True))
     cfg["realtime_enabled"] = bool(cfg.get("realtime_enabled", True))
-    cfg["final_normalize"] = bool(cfg.get("final_normalize", True))
     cfg["target_rms"] = _clamp_float(cfg.get("target_rms"), 0.08, 0.01, 0.30)
     cfg["noise_floor"] = _clamp_float(cfg.get("noise_floor"), 0.003, 0.0001, 0.05)
     cfg["max_gain"] = _clamp_float(cfg.get("max_gain"), 12.0, 1.0, 20.0)
@@ -50,28 +47,7 @@ def normalize_audio_leveling_config(raw: Any) -> dict[str, Any]:
     cfg["release"] = _clamp_float(cfg.get("release"), 0.55, 0.01, 1.0)
     cfg["peak_limit"] = _clamp_float(cfg.get("peak_limit"), 0.95, 0.50, 1.0)
     cfg["frame_ms"] = _clamp_int(cfg.get("frame_ms"), 100, 50, 5000)
-    gauss_size = _clamp_int(cfg.get("gauss_size"), 3, 3, 301)
-    if gauss_size % 2 == 0:
-        gauss_size += 1
-    cfg["gauss_size"] = min(301, gauss_size)
     return cfg
-
-
-def build_ffmpeg_loudness_filter(raw: Any) -> str | None:
-    cfg = normalize_audio_leveling_config(raw)
-    if not cfg["enabled"] or not cfg["final_normalize"]:
-        return None
-    return (
-        "dynaudnorm="
-        f"f={cfg['frame_ms']}:"
-        f"g={cfg['gauss_size']}:"
-        f"p={cfg['peak_limit']:.3f}:"
-        f"m={cfg['max_gain']:.2f}:"
-        f"r={cfg['target_rms']:.3f}:"
-        f"t={cfg['noise_floor']:.4f}:"
-        "n=1,"
-        f"alimiter=limit={cfg['peak_limit']:.3f}:attack=5:release=80"
-    )
 
 
 class AdaptiveSpeechGain:
@@ -114,6 +90,7 @@ class AdaptiveSpeechGain:
             attack=cfg["attack"],
             release=cfg["release"],
             peak_limit=cfg["peak_limit"],
+            block_ms=cfg["frame_ms"],
         )
 
     def process(self, samples: np.ndarray) -> np.ndarray:

@@ -15,7 +15,7 @@
 | **LLM** | Ollama + Qwen3 8B | latest | コンテキスト調査・議事録生成 |
 | **マイク録音** | Core Audio Audio Queue | macOS | マイク入力 (Objective-C sidecar) |
 | **内部音声** | Core Audio Process Tap | macOS 14.2+ | システム音声キャプチャ (Objective-C sidecar) |
-| **音声処理** | ffmpeg | 7+ | RAW→WAV変換・レベル正規化・2トラックミキシング (.app同梱) |
+| **音声処理** | ffmpeg | 7+ | mixed WAV→FLAC 変換 (.app同梱) |
 | **ファイル読取** | pymupdf | 1.24+ | PDF (Context Agent) |
 | **ファイル読取** | python-docx | 1.1+ | Word (Context Agent) |
 | **ファイル読取** | openpyxl | 3.1+ | Excel (Context Agent) |
