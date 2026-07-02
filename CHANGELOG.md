@@ -3,6 +3,24 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.6] - 2026-07-02
+
+マイク入力の overflow 時に、推定無音を録音へ差し込まないようにして、マイク音声だけが断続的に壊れるケースを抑止する beta リリース。
+
+### Fixed
+
+- PortAudio の mic buffer overflow 時に、欠落時間を推定して mic WAV / live mixer へ無音 padding を挿入していた処理を削除
+- overflow 連続時にマイクストリームを再オープンし、block size を自動変更する処理を削除
+
+### Changed
+
+- `recording.mic_stream` から overflow 起因の再オープン設定を削除し、マイク音声は実際に読み取れたサンプルだけを保存する方針に整理
+
+### Tests
+
+- 録音 preflight / 録音パイプライン失敗 / audio leveling の回帰テストを実行
+- 対象PR: [#61](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/61)
+
 ## [0.2.0-beta.5] - 2026-07-02
 
 録音完了後の文字起こし確定フローを整理し、録音中に確定した transcript をそのまま保存する beta リリース。
