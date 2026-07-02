@@ -125,6 +125,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "recording": {
         "mic_device": None,
+        "mic_capture": "coreaudio_sidecar",
         "system_capture": "auto",
         "sample_rate": 16000,
         "channels": 1,
@@ -489,6 +490,21 @@ class Config:
         if method not in {"auto", "coreaudio_tap"}:
             method = "auto"
         recording["system_capture"] = method
+        mic_capture = str(recording.get("mic_capture", "coreaudio_sidecar") or "coreaudio_sidecar").strip().lower().replace("-", "_")
+        mic_aliases = {
+            "auto": "coreaudio_sidecar",
+            "coreaudio": "coreaudio_sidecar",
+            "core_audio": "coreaudio_sidecar",
+            "sidecar": "coreaudio_sidecar",
+            "mic_sidecar": "coreaudio_sidecar",
+            "coreaudio_mic": "coreaudio_sidecar",
+            "portaudio": "sounddevice",
+            "sound_device": "sounddevice",
+        }
+        mic_capture = mic_aliases.get(mic_capture, mic_capture)
+        if mic_capture not in {"coreaudio_sidecar", "sounddevice"}:
+            mic_capture = "coreaudio_sidecar"
+        recording["mic_capture"] = mic_capture
         # 旧既定値 false のままだと combined.flac 上で mic / system の時計がずれる。
         # この値は UI 設定ではなく安全側の内部補正なので、既存 config も true に寄せる。
         recording["system_delay_compensation_enabled"] = True

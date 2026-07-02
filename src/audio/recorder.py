@@ -1,6 +1,6 @@
 """2トラック録音: マイク + Core Audio Tap (内部音声)
 
-- mic: sounddevice → WAV 直接書き込み
+- mic: Core Audio sidecar → WAV 直接書き込み
 - system: Core Audio Tap sidecar → WAV 直接書き込み
 - 停止後に ffmpeg で combined.flac (24kHz mono) を生成し、中間 WAV は削除
 """
@@ -104,6 +104,8 @@ class Recorder:
     def __init__(self) -> None:
         self._recording = False
         self._mic_thread: threading.Thread | None = None
+        self._mic_capture = None
+        self._mic_backend: str | None = None
         self._sys_capture = None
         self._start_time: float = 0
         self._session_dir: Path | None = None
@@ -141,6 +143,8 @@ class Recorder:
 
     @property
     def mic_stream_alive(self) -> bool:
+        if self._mic_capture is not None:
+            return bool(getattr(self._mic_capture, "running", False))
         t = self._mic_thread
         return bool(t and t.is_alive())
 
@@ -374,6 +378,82 @@ class Recorder:
             )
         return chosen
 
+    def _recording_sample_rate(self) -> int:
+        recording_cfg = config.get("recording", default={}) or {}
+        preferred_rate_raw = recording_cfg.get("sample_rate", SAMPLE_RATE)
+        try:
+            preferred_rate = int(preferred_rate_raw)
+        except Exception:
+            preferred_rate = SAMPLE_RATE
+        return max(8000, min(48000, preferred_rate))
+
+    def _mic_capture_method(self) -> str:
+        raw = config.get("recording", "mic_capture", default="coreaudio_sidecar")
+        method = str(raw or "coreaudio_sidecar").strip().lower().replace("-", "_")
+        aliases = {
+            "auto": "coreaudio_sidecar",
+            "coreaudio": "coreaudio_sidecar",
+            "core_audio": "coreaudio_sidecar",
+            "sidecar": "coreaudio_sidecar",
+            "mic_sidecar": "coreaudio_sidecar",
+            "coreaudio_mic": "coreaudio_sidecar",
+            "portaudio": "sounddevice",
+            "sound_device": "sounddevice",
+        }
+        method = aliases.get(method, method)
+        if method not in {"coreaudio_sidecar", "sounddevice"}:
+            return "coreaudio_sidecar"
+        return method
+
+    def _resolve_mic_device_index_for_sidecar(self, requested_device: int | None) -> int | None:
+        if requested_device is not None:
+            try:
+                return int(requested_device)
+            except Exception:
+                return None
+        return self._default_input_device_index()
+
+    def _mic_device_name(self, device_idx: int | None) -> str | None:
+        if device_idx is None:
+            return None
+        try:
+            dev_info = sd.query_devices(device_idx)
+            if int(dev_info.get("max_input_channels") or 0) <= 0:
+                return None
+            name = str(dev_info.get("name") or "").strip()
+            return name or None
+        except Exception as e:
+            logger.warning("Failed to resolve mic device name for sidecar (device=%s): %s", device_idx, e)
+            return None
+
+    def _start_coreaudio_mic_capture(self) -> None:
+        from src.audio.mic_capture import CoreAudioMicCapture, is_available as mic_sidecar_available
+
+        if not mic_sidecar_available():
+            raise RuntimeError("Core Audio mic sidecar が利用できません")
+        if self._mic_wav is None:
+            raise RuntimeError("mic output path is not initialized")
+
+        capture_rate = self._recording_sample_rate()
+        device_name = self._mic_device_name(self._mic_device)
+        mic_capture = CoreAudioMicCapture()
+        mic_capture.start(
+            self._mic_wav,
+            sample_rate=capture_rate,
+            device_name=device_name,
+            external_callback=self._pcm_callback,
+            level_callback=self._level_callback,
+            muted_getter=lambda: self._mic_muted,
+        )
+        self._mic_capture = mic_capture
+        self._mic_backend = mic_capture.backend
+        logger.info(
+            "Mic input: backend=%s, capture=%dHz, device=%s",
+            self._mic_backend,
+            capture_rate,
+            device_name or "default",
+        )
+
     def start(
         self,
         mic_device: int | None = None,
@@ -386,11 +466,17 @@ class Recorder:
         if self._recording:
             raise RuntimeError("Already recording")
 
-        self._mic_device = self._prepare_mic_device_for_start(mic_device)
+        mic_method = self._mic_capture_method()
+        if mic_method == "coreaudio_sidecar":
+            self._mic_device = self._resolve_mic_device_index_for_sidecar(mic_device)
+        else:
+            self._mic_device = self._prepare_mic_device_for_start(mic_device)
         self._level_callback = level_callback
         self._pcm_callback = pcm_callback
         self._system_pcm_callback = system_pcm_callback
         self._error = None
+        self._mic_capture = None
+        self._mic_backend = None
         self._sys_capture = None
         self._mic_reopen_total = 0
         self._last_overflow_log_at = 0.0
@@ -411,8 +497,18 @@ class Recorder:
         self._start_time = time.monotonic()
 
         # Start mic
-        self._mic_thread = threading.Thread(target=self._record_mic, daemon=True)
-        self._mic_thread.start()
+        if mic_method == "coreaudio_sidecar":
+            try:
+                self._start_coreaudio_mic_capture()
+            except Exception as e:
+                self._recording = False
+                self._error = str(e)
+                logger.error("Mic capture failed: %s", e)
+                raise
+        else:
+            self._mic_backend = "sounddevice"
+            self._mic_thread = threading.Thread(target=self._record_mic, daemon=True)
+            self._mic_thread.start()
 
         # Start system audio
         has_system = False
@@ -450,6 +546,7 @@ class Recorder:
         return {
             "session_id": self._session_id,
             "mic_device": self._mic_device,
+            "mic_backend": self._mic_backend,
             "has_system_audio": has_system,
             "system_error": sys_error,
             "system_backend": self._sys_capture.backend if self._sys_capture else None,
@@ -727,6 +824,17 @@ class Recorder:
         system_backend = self._sys_capture.backend if self._sys_capture else None
         self._recording = False
 
+        if self._mic_capture:
+            try:
+                self._mic_capture.stop()
+                if self._mic_capture.error:
+                    mic_error = self._mic_capture.error
+                    self._error = f"{self._error}; {mic_error}" if self._error else mic_error
+            except Exception as e:
+                logger.warning("Mic capture stop error: %s", e)
+                self._error = f"{self._error}; {e}" if self._error else str(e)
+            self._mic_capture = None
+
         # Wait for mic thread
         if self._mic_thread:
             self._mic_thread.join(timeout=5)
@@ -809,6 +917,7 @@ class Recorder:
             "system_coverage_ratio": round(system_coverage_ratio, 3)
             if system_coverage_ratio is not None else None,
             "system_backend": system_backend,
+            "mic_backend": self._mic_backend,
             "error": self._error,
             "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)
             if self._system_first_pcm_delay_sec is not None else None,
@@ -1006,6 +1115,7 @@ class Recorder:
             "elapsed_sec": round(self.elapsed_sec, 1) if self._recording else 0,
             "mic_reopen_total": self._mic_reopen_total,
             "mic_stream_alive": self.mic_stream_alive,
+            "mic_backend": self._mic_backend,
             "mic_muted": self._mic_muted,
             "error": self._error,
             "system_first_pcm_delay_sec": round(self._system_first_pcm_delay_sec, 3)

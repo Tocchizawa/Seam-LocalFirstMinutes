@@ -3,7 +3,7 @@
 # 出力先: gui/src-tauri/resources/
 #   - uv                 : aarch64-apple-darwin の uv バイナリ
 #   - seam-backend.tar.gz: src/ + pyproject.toml + uv.lock を固めた tarball
-#   - audio-capture      : Core Audio Tap sidecar
+#   - audio-capture      : Core Audio sidecar (system tap + microphone)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -43,7 +43,7 @@ tar --exclude='__pycache__' \
 SIZE_KB=$(($(stat -f%z "${TAR_TARGET}") / 1024))
 echo "[bundle] backend tarball: ${TAR_TARGET} (${SIZE_KB} KB)"
 
-# ─── Core Audio Tap sidecar ─────────────────────────────────
+# ─── Core Audio sidecar ─────────────────────────────────────
 if [[ "${SKIP_AUDIO_CAPTURE_SIDECAR:-0}" == "1" ]]; then
   echo "[bundle] audio-capture sidecar skipped"
 else
@@ -60,6 +60,7 @@ else
     -mmacosx-version-min=13.0 \
     -framework Foundation \
     -framework CoreAudio \
+    -framework AudioToolbox \
     "${REPO_ROOT}/sidecar/audio-capture/Sources/main.m" \
     -o "${SIDECAR_TARGET}"
   chmod +x "${SIDECAR_TARGET}"
