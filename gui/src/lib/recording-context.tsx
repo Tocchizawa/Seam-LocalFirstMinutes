@@ -68,6 +68,8 @@ interface Ctx {
   setMicDevice: (n: number | null) => void;
   captureSystem: boolean;
   setCaptureSystem: (b: boolean) => void;
+  syncRecordingStatus: () => Promise<void>;
+  resetRecordingState: () => void;
 }
 
 const RecordingCtx = createContext<Ctx | null>(null);
@@ -106,17 +108,45 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
 
+  const resetRecordingState = useCallback(() => {
+    setRecording(false);
+    setActiveSessionId(null);
+    setElapsedSec(0);
+    setLevel(0);
+    setPaused(false);
+    setMicMutedLocal(false);
+    setStreamStatus(null);
+  }, []);
+
+  const syncRecordingStatus = useCallback(async () => {
+    const s = await getRecordingStatus();
+    if (s.recording) {
+      setRecording(true);
+      setActiveSessionId(s.session_id ?? null);
+      setElapsedSec(Math.floor(s.elapsed_sec));
+      if (typeof s.mic_muted === "boolean") setMicMutedLocal(s.mic_muted);
+    } else {
+      resetRecordingState();
+    }
+  }, [resetRecordingState]);
+
   // 起動時に既存のセッションを復元
   useEffect(() => {
-    getRecordingStatus().then((s) => {
-      if (s.recording) {
-        setRecording(true);
-        setActiveSessionId(s.session_id ?? null);
-        setElapsedSec(Math.floor(s.elapsed_sec));
-        if (typeof s.mic_muted === "boolean") setMicMutedLocal(s.mic_muted);
+    syncRecordingStatus().catch(() => {});
+  }, [syncRecordingStatus]);
+
+  useEffect(() => {
+    const stop = listen<{ phase?: string }>("backend-status", (e) => {
+      if (e.payload?.phase === "error") {
+        resetRecordingState();
+      } else if (e.payload?.phase === "ready") {
+        syncRecordingStatus().catch(() => {});
       }
-    }).catch(() => {});
-  }, []);
+    });
+    return () => {
+      stop.then((un) => un()).catch(() => { /* noop */ });
+    };
+  }, [resetRecordingState, syncRecordingStatus]);
 
   const resetLive = useCallback(() => setLiveSegments([]), []);
   const resetElapsed = useCallback(() => setElapsedSec(0), []);
@@ -238,6 +268,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       ws.onopen = () => {
         attempt = 0;
         dispatch("__open", null);
+        syncRecordingStatus().catch(() => {});
       };
       ws.onmessage = handle;
       ws.onclose = scheduleReconnect;
@@ -257,7 +288,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       if (timer) window.clearTimeout(timer);
       try { ws?.close(); } catch {}
     };
-  }, []);
+  }, [syncRecordingStatus]);
 
   // elapsed の細かい tick はクライアントで補完(無音時のみ backend からの recording_status が来ない可能性)
   useEffect(() => {
@@ -351,6 +382,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     modelDownloadAggregate,
     micDevice, setMicDevice,
     captureSystem, setCaptureSystem,
+    syncRecordingStatus,
+    resetRecordingState,
   };
 
   return <RecordingCtx.Provider value={value}>{children}</RecordingCtx.Provider>;

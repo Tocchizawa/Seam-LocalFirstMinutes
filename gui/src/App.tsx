@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import {
@@ -13,7 +14,7 @@ import { LiveView } from "./pages/LiveView";
 import { SettingsModal } from "./pages/Settings";
 import { ProjectSettingsModal } from "./pages/ProjectSettings";
 import { ProjectDialog } from "./components/ProjectDialog";
-import { Splash } from "./components/Splash";
+import { Splash, type BackendStatus } from "./components/Splash";
 import { Toaster } from "./components/Toaster";
 import { RecordingProvider, useRecording } from "./lib/recording-context";
 import { RecordToolbar } from "./components/RecordToolbar";
@@ -39,6 +40,7 @@ function AppInner() {
   const [projectSettingsTarget, setProjectSettingsTarget] = useState<Project | null>(null);
   const [showProjectDialog, setShowProjectDialog] = useState(false);
   const [healthy, setHealthy] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "main" });
@@ -48,7 +50,9 @@ function AppInner() {
   const [activeSummarizes, setActiveSummarizes] = useState<Map<string, string>>(new Map());
   const {
     recording, micDevice, setMicDevice, captureSystem, setCaptureSystem,
+    resetRecordingState, syncRecordingStatus,
   } = useRecording();
+  const healthFailuresRef = useRef(0);
 
   useEffect(() => initTheme(), []);
 
@@ -67,17 +71,60 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
-    const poll = setInterval(async () => {
+    const stop = listen<BackendStatus>("backend-status", (e) => {
+      const status = e.payload;
+      setBackendStatus(status);
+      if (status.phase === "error") {
+        healthFailuresRef.current = 2;
+        resetRecordingState();
+        setHealthy(false);
+      } else if (status.phase === "ready") {
+        syncRecordingStatus().catch(() => {});
+      }
+    });
+    return () => {
+      stop.then((un) => un()).catch(() => { /* noop */ });
+    };
+  }, [resetRecordingState, syncRecordingStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+    const poll = async () => {
       try {
         await checkHealth();
+        if (cancelled) return;
+        healthFailuresRef.current = 0;
+        setBackendStatus(null);
+        if (!healthy) syncRecordingStatus().catch(() => {});
         setHealthy(true);
-        clearInterval(poll);
-      } catch {
-        // backend がまだ起動してない
+      } catch (e) {
+        if (cancelled) return;
+        if (healthy) {
+          healthFailuresRef.current += 1;
+          if (healthFailuresRef.current >= 2) {
+            const detail = e instanceof Error ? e.message : String(e);
+            setBackendStatus({
+              phase: "error",
+              message: "バックエンドとの接続が切断されました",
+              progress: null,
+              detail,
+            });
+            resetRecordingState();
+            setHealthy(false);
+          }
+        }
       }
-    }, 800);
-    return () => clearInterval(poll);
-  }, []);
+      if (!cancelled) {
+        timer = window.setTimeout(poll, healthy ? 3000 : 800);
+      }
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [healthy, resetRecordingState, syncRecordingStatus]);
 
   const refreshProjects = useCallback(async () => {
     const [list, settings] = await Promise.all([
@@ -209,7 +256,7 @@ function AppInner() {
   };
 
   if (!healthy) {
-    return <Splash />;
+    return <Splash initialStatus={backendStatus} />;
   }
 
   const openLive = () => {

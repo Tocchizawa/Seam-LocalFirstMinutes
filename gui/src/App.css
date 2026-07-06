@@ -2319,6 +2319,11 @@ button { font-family: inherit; }
   border: 1px solid color-mix(in srgb, var(--danger) 36%, transparent);
   border-radius: 8px;
 }
+.splash-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
 .splash-note {
   font-size: 11px;
   color: var(--t3);

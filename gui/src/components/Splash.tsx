@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Spinner } from "./Spinner";
 
-interface BackendStatus {
+export interface BackendStatus {
   phase: string;
   message: string;
   progress: number | null;
@@ -33,11 +33,24 @@ interface StartupSnapshot {
 
 const MAX_LOG_LINES = 80;
 
-export function Splash() {
-  const [status, setStatus] = useState<BackendStatus>(DEFAULT_STATUS);
+export function Splash({ initialStatus }: { initialStatus?: BackendStatus | null }) {
+  const [status, setStatus] = useState<BackendStatus>(initialStatus ?? DEFAULT_STATUS);
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [restarting, setRestarting] = useState(false);
   const nextIdRef = useRef(0);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (initialStatus) setStatus(initialStatus);
+  }, [initialStatus]);
+
+  useEffect(() => {
+    invoke<BackendStatus>("backend_process_status")
+      .then((s) => {
+        if (s.phase === "error") setStatus(s);
+      })
+      .catch(() => { /* noop */ });
+  }, []);
 
   useEffect(() => {
     const stop = listen<BackendStatus>("backend-status", (e) => {
@@ -112,6 +125,29 @@ export function Splash() {
   const isReady = status.phase === "ready" && (pct ?? 0) >= 100;
   const isError = status.phase === "error";
 
+  const restartBackend = async () => {
+    setRestarting(true);
+    try {
+      setStatus({
+        phase: "starting",
+        message: "バックエンドを再起動中...",
+        progress: 0.02,
+        detail: null,
+      });
+      await invoke("restart_backend");
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      setStatus({
+        phase: "error",
+        message: "バックエンドの再起動に失敗しました",
+        progress: null,
+        detail,
+      });
+    } finally {
+      setRestarting(false);
+    }
+  };
+
   return (
     <div className="splash-shell">
       <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-9 z-50" />
@@ -155,6 +191,19 @@ export function Splash() {
           {status.message}
         </p>
 
+        {isError && (
+          <div className="splash-actions">
+            <button
+              type="button"
+              className="btn btn-primary h-8 px-4 text-[12px]"
+              onClick={restartBackend}
+              disabled={restarting}
+            >
+              {restarting ? "再起動中..." : "バックエンドを再起動"}
+            </button>
+          </div>
+        )}
+
         {status.detail && (
           <p className={`splash-detail ${isError ? "is-error" : ""}`}>
             {status.detail}
@@ -163,7 +212,7 @@ export function Splash() {
 
         {isError && (
           <div className="splash-note is-error">
-            Seam を終了してから再起動してください。port 競合の場合は表示されたプロセスを終了し、
+            再起動しても復帰しない場合は Seam を終了してから再起動してください。port 競合の場合は表示されたプロセスを終了し、
             依存関係の初期化に失敗した場合はネットワークと空き容量を確認してください。
           </div>
         )}

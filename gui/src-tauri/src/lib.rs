@@ -1,10 +1,10 @@
+use serde::Serialize;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
-use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{include_image, AppHandle, Emitter, Manager, RunEvent, WindowEvent};
@@ -144,7 +144,10 @@ fn kill_process_group_by_pid(pid: i32, reason: &str) {
     if pid <= 1 {
         return;
     }
-    eprintln!("[backend] stopping stale process group pid={} ({})", pid, reason);
+    eprintln!(
+        "[backend] stopping stale process group pid={} ({})",
+        pid, reason
+    );
     unsafe {
         libc::kill(-pid, libc::SIGTERM);
     }
@@ -244,7 +247,11 @@ fn augmented_path() -> String {
     for p in prefixes
         .into_iter()
         .chain(existing.split(':').map(|s| s.to_string()))
-        .chain(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].iter().map(|s| s.to_string()))
+        .chain(
+            ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                .iter()
+                .map(|s| s.to_string()),
+        )
     {
         if p.is_empty() || !seen.insert(p.clone()) {
             continue;
@@ -425,8 +432,8 @@ fn detect_bundled_layout() -> Option<BackendLayout> {
         return None;
     }
     let home = std::env::var("HOME").ok()?;
-    let work_dir = PathBuf::from(home)
-        .join("Library/Application Support/com.seamapp.seam/python-env");
+    let work_dir =
+        PathBuf::from(home).join("Library/Application Support/com.seamapp.seam/python-env");
 
     // 再展開判定: 同梱 tarball の mtime + size を marker に焼き込み、
     // 値が変わった場合のみ再展開する。version 文字列だけだと "0.1.0" のまま
@@ -447,7 +454,10 @@ fn detect_bundled_layout() -> Option<BackendLayout> {
         Err(_) => true,
     };
     if stale {
-        eprintln!("[backend] extracting bundled backend → {}", work_dir.display());
+        eprintln!(
+            "[backend] extracting bundled backend → {}",
+            work_dir.display()
+        );
         if let Err(e) = fs::create_dir_all(&work_dir) {
             eprintln!("[backend] mkdir failed: {}", e);
             return None;
@@ -487,7 +497,11 @@ fn start_backend(runtime_root: &Path) -> Result<Child, StartupFailure> {
     let hf_hub_cache_s = whisper_hub_cache.display().to_string();
     let tf_cache_s = whisper_tf_cache.display().to_string();
     let xdg_cache_s = xdg_cache.display().to_string();
-    let ollama_models_s = runtime_root.join("ollama").join("models").display().to_string();
+    let ollama_models_s = runtime_root
+        .join("ollama")
+        .join("models")
+        .display()
+        .to_string();
     let ollama_base_s = format!("http://{}", DEFAULT_OLLAMA_HOST);
 
     // 配布 .app 同梱モードを優先、無ければ dev モード (リポジトリ + 既存 uv)
@@ -557,6 +571,41 @@ fn start_backend(runtime_root: &Path) -> Result<Child, StartupFailure> {
     Ok(child)
 }
 
+fn start_backend_with_retries(
+    runtime_root: &Path,
+    attempts: usize,
+) -> Result<Child, StartupFailure> {
+    let attempts = attempts.max(1);
+    let mut last_failure: Option<StartupFailure> = None;
+    for attempt in 1..=attempts {
+        match start_backend(runtime_root) {
+            Ok(child) => return Ok(child),
+            Err(failure) => {
+                eprintln!(
+                    "[backend] start attempt {}/{} failed: {}",
+                    attempt, attempts, failure.message
+                );
+                if let Some(detail) = &failure.detail {
+                    eprintln!("[backend] start failure detail: {}", detail);
+                }
+                last_failure = Some(failure);
+            }
+        }
+        if attempt < attempts {
+            std::thread::sleep(Duration::from_millis(700));
+        }
+    }
+    Err(last_failure.unwrap_or_else(|| {
+        StartupFailure::new(
+            "バックエンドの起動に失敗しました",
+            Some(format!(
+                "backend process could not be started after {} attempts",
+                attempts
+            )),
+        )
+    }))
+}
+
 fn which_uv() -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let candidates = [
@@ -572,17 +621,15 @@ fn which_uv() -> Option<String> {
         }
     }
 
-    Command::new("which")
-        .arg("uv")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
+    Command::new("which").arg("uv").output().ok().and_then(|o| {
+        if o.status.success() {
+            String::from_utf8(o.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// ANSI エスケープシーケンス (\x1b[...m など) を除去。
@@ -622,11 +669,27 @@ fn parse_startup_line(raw: &str) -> Option<BackendStatus> {
     // 最優先: Python が emit する [seam-progress] {json} 行
     if let Some(rest) = l.strip_prefix("[seam-progress] ") {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
-            let phase = v.get("phase").and_then(|x| x.as_str()).unwrap_or("starting").to_string();
-            let message = v.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let phase = v
+                .get("phase")
+                .and_then(|x| x.as_str())
+                .unwrap_or("starting")
+                .to_string();
+            let message = v
+                .get("message")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let progress = v.get("progress").and_then(|x| x.as_f64()).map(|f| f as f32);
-            let detail = v.get("detail").and_then(|x| x.as_str()).map(|s| s.to_string());
-            return Some(BackendStatus { phase, message, progress, detail });
+            let detail = v
+                .get("detail")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            return Some(BackendStatus {
+                phase,
+                message,
+                progress,
+                detail,
+            });
         }
     }
 
@@ -654,8 +717,7 @@ fn parse_startup_line(raw: &str) -> Option<BackendStatus> {
             detail: Some(l.to_string()),
         });
     }
-    if l.starts_with("Creating virtual environment")
-        || l.starts_with("Created virtual environment")
+    if l.starts_with("Creating virtual environment") || l.starts_with("Created virtual environment")
     {
         return Some(BackendStatus {
             phase: "venv".into(),
@@ -776,10 +838,7 @@ fn exit_status_detail(status: ExitStatus) -> String {
 /// HuggingFace の tqdm 進捗バーは \r で上書きするため、\n だけだと
 /// ダウンロード完了まで何も出てこない。\r も区切りとして拾うと
 /// リアルタイムに進捗ラインがログに流れる。
-fn spawn_stderr_reader<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    stderr: std::process::ChildStderr,
-) {
+fn spawn_stderr_reader<R: tauri::Runtime>(app: AppHandle<R>, stderr: std::process::ChildStderr) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
@@ -878,6 +937,129 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 }
 
 #[tauri::command]
+fn restart_backend(app: AppHandle) -> Result<(), String> {
+    emit_status(
+        &app,
+        BackendStatus {
+            phase: "starting".into(),
+            message: "バックエンドを再起動中...".into(),
+            progress: Some(0.02),
+            detail: None,
+        },
+    );
+
+    {
+        let Some(state) = app.try_state::<ManagedProcesses>() else {
+            return Err("managed process state is unavailable".into());
+        };
+        let mut guard = state.0.lock().unwrap();
+        kill_child(&mut guard.backend, "backend");
+    }
+
+    let port_conflicts = kill_stale_backend_listener(18900);
+    if !port_conflicts.is_empty() {
+        let detail = port_conflicts.join("\n");
+        emit_startup_failure(
+            &app,
+            &StartupFailure::new(
+                "バックエンドの再起動に失敗しました: port 18900 が使用中です",
+                Some(detail.clone()),
+            ),
+        );
+        return Err(detail);
+    }
+
+    let runtime_root = ensure_runtime_dirs();
+    let mut backend_child = match start_backend_with_retries(&runtime_root, 3) {
+        Ok(child) => Some(child),
+        Err(failure) => {
+            let detail = match &failure.detail {
+                Some(detail) => format!("{}\n{}", failure.message, detail),
+                None => failure.message.clone(),
+            };
+            emit_startup_failure(
+                &app,
+                &StartupFailure::new("バックエンドの再起動に失敗しました", Some(detail.clone())),
+            );
+            return Err(detail);
+        }
+    };
+    let backend_stderr = backend_child.as_mut().and_then(|c| c.stderr.take());
+
+    emit_status(
+        &app,
+        BackendStatus {
+            phase: "starting".into(),
+            message: "バックエンドを起動中...".into(),
+            progress: Some(0.02),
+            detail: None,
+        },
+    );
+    {
+        let Some(state) = app.try_state::<ManagedProcesses>() else {
+            return Err("managed process state is unavailable".into());
+        };
+        let mut guard = state.0.lock().unwrap();
+        guard.backend = backend_child;
+    }
+    if let Some(stderr) = backend_stderr {
+        spawn_stderr_reader(app.clone(), stderr);
+    }
+    spawn_backend_exit_monitor(app);
+    Ok(())
+}
+
+#[tauri::command]
+fn backend_process_status(app: AppHandle) -> BackendStatus {
+    let Some(state) = app.try_state::<ManagedProcesses>() else {
+        return BackendStatus {
+            phase: "error".into(),
+            message: "バックエンド状態を取得できません".into(),
+            progress: None,
+            detail: Some("managed process state is unavailable".into()),
+        };
+    };
+
+    let mut guard = state.0.lock().unwrap();
+    let wait_result = match guard.backend.as_mut() {
+        Some(child) => child.try_wait(),
+        None => {
+            return BackendStatus {
+                phase: "error".into(),
+                message: "バックエンドが起動していません".into(),
+                progress: None,
+                detail: Some("backend process is not running".into()),
+            };
+        }
+    };
+
+    match wait_result {
+        Ok(Some(status)) => {
+            let detail = exit_status_detail(status);
+            guard.backend.take();
+            BackendStatus {
+                phase: "error".into(),
+                message: "バックエンドが停止しました".into(),
+                progress: None,
+                detail: Some(detail),
+            }
+        }
+        Ok(None) => BackendStatus {
+            phase: "starting".into(),
+            message: "バックエンドを起動中...".into(),
+            progress: Some(0.02),
+            detail: None,
+        },
+        Err(e) => BackendStatus {
+            phase: "error".into(),
+            message: "バックエンド状態を取得できません".into(),
+            progress: None,
+            detail: Some(e.to_string()),
+        },
+    }
+}
+
+#[tauri::command]
 fn get_startup_snapshot(state: tauri::State<'_, StartupState>) -> StartupSnapshot {
     state.0.lock().unwrap().clone()
 }
@@ -889,10 +1071,8 @@ pub fn run() {
     // 吸われてモデル状態が壊れたままになる。起動前に stale backend を掃除する。
     let port_conflicts = kill_stale_backend_listener(18900);
     let ollama_child = None;
-    // まずは Splash 固定を避けるため、起動前に確定できる失敗を即表示する。
-    // 設計書上の 3 回 retry / venv repair はこの後の段階で実装する。
     let backend_result = if port_conflicts.is_empty() {
-        start_backend(&runtime_root)
+        start_backend_with_retries(&runtime_root, 3)
     } else {
         Err(StartupFailure::new(
             "バックエンドを起動できません: port 18900 が使用中です",
@@ -911,7 +1091,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .invoke_handler(tauri::generate_handler![get_startup_snapshot])
+        .invoke_handler(tauri::generate_handler![
+            get_startup_snapshot,
+            restart_backend,
+            backend_process_status
+        ])
         .setup(move |app| {
             app.manage(StartupState(Mutex::new(StartupSnapshot::default())));
             app.manage(ManagedProcesses(Mutex::new(ManagedProcessState {
@@ -919,19 +1103,19 @@ pub fn run() {
                 ollama: ollama_child,
             })));
 
-            // 起動状況の初期イベントを送る (Splash が listen 開始する前でも到達するように
-            // window が「ready-to-show」した段階で再送はしないが、frontend は遅延 listen でも
-            // 後続イベントで status を更新できる)。
             let app_handle = app.handle().clone();
             if let Some(failure) = &backend_start_failure {
                 emit_startup_failure(&app_handle, failure);
             } else {
-                emit_status(&app_handle, BackendStatus {
-                    phase: "starting".into(),
-                    message: "バックエンドを起動中...".into(),
-                    progress: Some(0.02),
-                    detail: None,
-                });
+                emit_status(
+                    &app_handle,
+                    BackendStatus {
+                        phase: "starting".into(),
+                        message: "バックエンドを起動中...".into(),
+                        progress: Some(0.02),
+                        detail: None,
+                    },
+                );
                 spawn_backend_exit_monitor(app_handle.clone());
             }
             if let Some(stderr) = backend_stderr {
