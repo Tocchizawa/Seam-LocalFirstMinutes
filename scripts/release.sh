@@ -3,7 +3,7 @@
 #
 #   bash scripts/release.sh 0.2.0-beta.1
 #
-# Steps it performs (in order):
+# Run this on release/vX.Y.Z. Steps it performs (in order):
 #   1. validate args / git state / tag uniqueness
 #   2. bump version in gui/package.json, gui/src-tauri/tauri.conf.json,
 #      gui/src-tauri/Cargo.toml (and let cargo update Cargo.lock at build)
@@ -11,10 +11,12 @@
 #      then generate signed updater artifacts from the final .app
 #   4. prepend CHANGELOG.md entry with auto-generated git log notes
 #      (edits opened in $EDITOR; user can refine before commit)
-#   5. commit "chore(release): vX.Y.Z" + annotated tag vX.Y.Z
-#   6. push commit + tag to origin/main
-#   7. gh release create vX.Y.Z --notes-file <changelog-section> with the DMG
-#      and Tauri updater artifacts, then update the updater-feed release
+#   5. commit "chore(release): vX.Y.Z"
+#   6. push the release branch
+#
+# It intentionally does not push main, create tags, or publish GitHub Releases.
+# After the release PR is merged to main, tag the merge commit and let the
+# Release DMG workflow publish the artifacts.
 #
 # Re-run safety: validates state before any destructive write; aborts on errors.
 #
@@ -26,6 +28,7 @@ if [ -z "$NEW_VERSION" ]; then
   exit 1
 fi
 TAG="v${NEW_VERSION}"
+RELEASE_BRANCH="release/${TAG}"
 
 # semver-ish validation (M.m.p or M.m.p-prerelease)
 if ! printf '%s' "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
@@ -42,12 +45,19 @@ UPDATER_FEED_JSON="gui/src-tauri/target/release/bundle/updater/latest.json"
 
 # ─── 事前チェック ─────────────────────────────────────
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$BRANCH" != "main" ]; then
-  echo "Error: must be on 'main' (currently on '$BRANCH')"
+if [ "$BRANCH" != "$RELEASE_BRANCH" ]; then
+  echo "Error: must be on '$RELEASE_BRANCH' (currently on '$BRANCH')"
+  echo "Create it with: git fetch origin && git switch -c $RELEASE_BRANCH origin/develop"
   exit 1
 fi
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Error: working tree is not clean. commit or stash first."
+  exit 1
+fi
+git fetch origin main develop --tags --prune
+if ! git merge-base --is-ancestor origin/develop HEAD; then
+  echo "Error: release branch must contain origin/develop."
+  echo "Recreate it with: git switch main && git branch -D $RELEASE_BRANCH && git switch -c $RELEASE_BRANCH origin/develop"
   exit 1
 fi
 if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
@@ -64,6 +74,7 @@ PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1 || true)
 
 echo "[release] new version : $NEW_VERSION  (tag: $TAG)"
 echo "[release] previous tag: ${PREV_TAG:-<none>}"
+echo "[release] branch      : $BRANCH"
 echo "[release] DMG output  : $DMG_PATH"
 echo ""
 
@@ -203,48 +214,28 @@ awk -v ver="$NEW_VERSION" '
 echo "[release] generating updater feed..."
 bash scripts/create-updater-feed.sh "$NEW_VERSION" "$TAG" "$NOTES_FILE"
 
-# ─── commit & tag ────────────────────────────────────
+# ─── commit ──────────────────────────────────────────
 echo "[release] committing version bump + changelog..."
 git add gui/package.json gui/src-tauri/tauri.conf.json gui/src-tauri/Cargo.toml \
         gui/src-tauri/Cargo.lock CHANGELOG.md 2>/dev/null || true
 git commit -m "chore(release): ${TAG}"
-git tag -a "$TAG" -m "Release ${TAG}"
 
 # ─── push ────────────────────────────────────────────
-echo "[release] pushing main + tag..."
-git push origin main
-git push origin "$TAG"
-
-# ─── GitHub Release ──────────────────────────────────
-echo "[release] creating GitHub release..."
-# pre-release 判定: バージョン文字列に '-' が含まれていれば prerelease
-PRERELEASE_FLAG=""
-case "$NEW_VERSION" in
-  *-*) PRERELEASE_FLAG="--prerelease" ;;
-esac
-
-gh release create "$TAG" \
-  --title "$TAG" \
-  --notes-file "$NOTES_FILE" \
-  $PRERELEASE_FLAG \
-  "$DMG_PATH" \
-  "$UPDATER_ARCHIVE" \
-  "$UPDATER_SIGNATURE" \
-  "$UPDATER_FEED_JSON"
-
-FEED_TAG="updater-feed"
-if ! gh release view "$FEED_TAG" >/dev/null 2>&1; then
-  gh release create "$FEED_TAG" \
-    --title "Seam updater feed" \
-    --notes "Static Tauri updater feed for Seam." \
-    --latest=false
-fi
-gh release upload "$FEED_TAG" "$UPDATER_FEED_JSON" --clobber
+echo "[release] pushing release branch..."
+git push -u origin "$BRANCH"
 
 rm -f "$NOTES_FILE"
 
 echo ""
-echo "[release] done."
-echo "          tag    : $TAG"
+echo "[release] branch prepared."
+echo "          branch : $BRANCH"
+echo "          tag    : $TAG (create after the release PR is merged)"
 echo "          DMG    : $DMG_PATH"
-gh release view "$TAG" --json url --jq '"          URL    : " + .url'
+echo ""
+echo "Next steps:"
+echo "  1. Create a PR from $BRANCH to main."
+echo "  2. Merge it after required checks pass."
+echo "  3. Tag the merged main commit:"
+echo "     git switch main && git pull --ff-only origin main"
+echo "     git tag -a $TAG -m \"Release $TAG\""
+echo "     git push origin $TAG"

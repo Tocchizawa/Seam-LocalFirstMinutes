@@ -25,8 +25,13 @@ pnpm -C gui install
 
 ## 3. ブランチ
 
-- `main` へ直接 push せず、作業ブランチで開発してください。
+- `main` / `develop` へ直接 push せず、作業ブランチで開発してください。
+- 通常の機能追加・修正は `develop` から `feature/*` / `fix/*` を作成し、PR も `develop` 向けにしてください。
+- リリース時は `origin/develop` から `release/vX.Y.Z` を作成し、release PR として `main` に入れます。
+- 緊急修正だけ `origin/main` から `hotfix/*` を作成し、`main` に入れた後で `develop` に取り込みます。
 - 変更は小さく、目的を1つに絞るとレビューしやすくなります。
+
+詳細は [docs/repository-governance.md](./docs/repository-governance.md) を参照してください。
 
 ## 4. 事前チェック
 
@@ -46,10 +51,13 @@ uv run python -m pytest -q
 
 PR には次を含めてください。
 
+- base branch と head branch が運用ルールに合っていること
 - 変更の目的
 - 何をどう変えたか
 - 動作確認手順
 - 既知の制約や未対応事項
+
+`main` 向け PR は `release/v*`、`hotfix/*`、`dependabot/*` 以外を禁止します。
 
 ## 6. コーディング方針
 
