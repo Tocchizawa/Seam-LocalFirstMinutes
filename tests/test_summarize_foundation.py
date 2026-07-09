@@ -335,6 +335,40 @@ with tempfile.TemporaryDirectory() as tmp:
         assert_eq("consent claude_api default", False, consent.get("claude_api"))
         assert_eq("consent openai default", False, consent.get("openai"))
         assert_eq("consent gemini default", False, consent.get("gemini"))
+        assert_eq(
+            "claude_code connect_timeout_sec default",
+            12,
+            c.get("minutes_ai", "claude_code", "connect_timeout_sec"),
+        )
+        assert_eq(
+            "codex connect_timeout_sec default",
+            12,
+            c.get("minutes_ai", "codex", "connect_timeout_sec"),
+        )
+        c.update({
+            "minutes_ai": {
+                "codex": {
+                    "model": "gpt-5.4",
+                    "launcher_command": "source ~/.zshrc; my_codex",
+                    "connect_timeout_sec": 5,
+                }
+            }
+        })
+        assert_eq(
+            "codex model preserved",
+            "gpt-5.4",
+            c.get("minutes_ai", "codex", "model"),
+        )
+        assert_eq(
+            "codex launcher_command preserved",
+            "source ~/.zshrc; my_codex",
+            c.get("minutes_ai", "codex", "launcher_command"),
+        )
+        assert_eq(
+            "codex connect_timeout_sec preserved",
+            5,
+            c.get("minutes_ai", "codex", "connect_timeout_sec"),
+        )
         assert_eq("app update check_on_startup default", True, c.get("app_update", "check_on_startup"))
         assert_eq(
             "app update auto_install_on_startup default",

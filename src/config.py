@@ -18,7 +18,7 @@ DEFAULTS: dict[str, Any] = {
         "auto_install": True,
     },
     "minutes_ai": {
-        "provider": "ollama",         # ollama | claude_api | openai | gemini
+        "provider": "ollama",         # ollama | claude_api | openai | gemini | claude_code | codex
         "auto_generate": True,        # 録音停止時に自動要約 (provider未設定なら skip)
         "generate_title": True,       # 要約時に議事録タイトルも自動生成して上書き
         "auto_dictionary_update": True,  # 要約後に project.glossary / corrections を自動更新 (Phase B)
@@ -66,6 +66,7 @@ DEFAULTS: dict[str, Any] = {
             "launcher_command": "",
             "launcher_shell": "/bin/zsh",
             "launcher_interactive": True,
+            "connect_timeout_sec": 12,
             "extra_args": [],
         },
         "codex": {
@@ -78,6 +79,7 @@ DEFAULTS: dict[str, Any] = {
             "launcher_command": "",
             "launcher_shell": "/bin/zsh",
             "launcher_interactive": True,
+            "connect_timeout_sec": 12,
             "extra_args": [],
         },
     },
@@ -335,7 +337,6 @@ class Config:
         except Exception:
             ai["timeout_sec"] = 300
         # 旧 keys 削除 (v1 設計レビューで除外した legacy provider)
-        ai.pop("codex", None)
         ai.pop("claude", None)
 
         consent = ai.setdefault("consent", {})
@@ -438,6 +439,12 @@ class Config:
         ai_claude_code.setdefault("launcher_command", "")
         ai_claude_code.setdefault("launcher_shell", "/bin/zsh")
         ai_claude_code.setdefault("launcher_interactive", True)
+        try:
+            ai_claude_code["connect_timeout_sec"] = max(
+                3, min(60, int(ai_claude_code.get("connect_timeout_sec", 12)))
+            )
+        except Exception:
+            ai_claude_code["connect_timeout_sec"] = 12
         if not isinstance(ai_claude_code.get("extra_args"), list):
             ai_claude_code["extra_args"] = []
 
@@ -451,6 +458,12 @@ class Config:
         ai_codex.setdefault("launcher_command", "")
         ai_codex.setdefault("launcher_shell", "/bin/zsh")
         ai_codex.setdefault("launcher_interactive", True)
+        try:
+            ai_codex["connect_timeout_sec"] = max(
+                3, min(60, int(ai_codex.get("connect_timeout_sec", 12)))
+            )
+        except Exception:
+            ai_codex["connect_timeout_sec"] = 12
         if not isinstance(ai_codex.get("extra_args"), list):
             ai_codex["extra_args"] = []
 

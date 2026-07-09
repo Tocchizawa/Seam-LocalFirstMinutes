@@ -28,8 +28,11 @@ from .base import (
 )
 from .cli_launcher import (
     build_command_argv,
+    clamp_connect_timeout,
+    classify_cli_error_code,
     is_shell_command_not_found,
     normalize_extra_args,
+    strip_cli_error,
 )
 from .prompts import build_messages
 
@@ -51,6 +54,9 @@ class ClaudeCodeProvider(SummarizerProvider):
         extra = self._config.get("extra_args", [])
         self._extra_args = normalize_extra_args(extra)
         self._launcher_command = str(self._config.get("launcher_command", "")).strip()
+        self._connect_timeout_sec = clamp_connect_timeout(
+            self._config.get("connect_timeout_sec", 12),
+        )
         self._proc: asyncio.subprocess.Process | None = None
         self._cancel_event = asyncio.Event()
 
@@ -108,9 +114,69 @@ class ClaudeCodeProvider(SummarizerProvider):
                     message=f"`claude --version` exit {proc.returncode}: {version_err[:200]}",
                 )
             version_line = stdout.decode(errors="replace").strip().split("\n")[0]
+
+            probe_args = [
+                "-p",
+                "--output-format", "text",
+                "--model", self._model,
+                "--input-format", "text",
+                "--no-session-persistence",
+                *self._extra_args,
+            ]
+            probe_cmd, _ = self._build_cmd(probe_args)
+            if probe_cmd is None:
+                return ProviderHealth(
+                    ok=False,
+                    code=SummaryErrorCode.MODEL_UNAVAILABLE.value,
+                    message=f"Claude Code CLI ('{self._binary_path}') が見つかりません。",
+                )
+            probe = await asyncio.create_subprocess_exec(
+                *probe_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                probe_out, probe_err = await asyncio.wait_for(
+                    probe.communicate(b"Reply with exactly OK.\n"),
+                    timeout=self._connect_timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    probe.kill()
+                except Exception:
+                    pass
+                return ProviderHealth(
+                    ok=False,
+                    code=SummaryErrorCode.TIMEOUT.value,
+                    message=(
+                        "`claude -p` 接続テストが"
+                        f"{self._connect_timeout_sec:g}秒以内に完了しませんでした"
+                    ),
+                )
+            if probe.returncode != 0:
+                err_text = (
+                    probe_err.decode(errors="replace")
+                    or probe_out.decode(errors="replace")
+                )
+                if self._launcher_command and is_shell_command_not_found(err_text):
+                    return ProviderHealth(
+                        ok=False,
+                        code=SummaryErrorCode.MODEL_UNAVAILABLE.value,
+                        message=(
+                            "Claude Code ランチャーコマンドが実行できません。"
+                            f" launcher_command='{launcher_label}'"
+                        ),
+                    )
+                code = classify_cli_error_code(err_text)
+                return ProviderHealth(
+                    ok=False,
+                    code=code.value,
+                    message=f"`claude -p` 接続失敗: {strip_cli_error(err_text)}",
+                )
             return ProviderHealth(
                 ok=True, code="READY",
-                message=f"Claude Code CLI {version_line}",
+                message=f"Claude Code CLI {version_line} (prompt OK)",
                 model=self._model,
             )
         except Exception as e:
@@ -351,9 +417,10 @@ class ClaudeCodeProvider(SummarizerProvider):
 
         if return_code != 0 and not out_chunks:
             stderr_text = stderr_bytes.decode("utf-8", errors="replace")[:300]
+            code = classify_cli_error_code(stderr_text)
             raise SummaryError(
-                SummaryErrorCode.PROVIDER_DOWN,
-                f"claude exited {return_code}: {stderr_text}",
+                code,
+                f"claude exited {return_code}: {strip_cli_error(stderr_text)}",
                 provider=self.name,
             )
 
@@ -425,10 +492,12 @@ class ClaudeCodeProvider(SummarizerProvider):
                 provider=self.name,
             )
         if proc.returncode != 0:
+            err_text = stderr.decode("utf-8", errors="replace")
+            code = classify_cli_error_code(err_text)
             raise SummaryError(
-                SummaryErrorCode.PROVIDER_DOWN,
+                code,
                 f"claude exited {proc.returncode}: "
-                f"{stderr.decode('utf-8', errors='replace')[:200]}",
+                f"{strip_cli_error(err_text, limit=200)}",
                 provider=self.name,
             )
         return stdout.decode("utf-8", errors="replace").strip()
