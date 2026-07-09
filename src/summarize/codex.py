@@ -29,8 +29,11 @@ from .base import (
 )
 from .cli_launcher import (
     build_command_argv,
+    clamp_connect_timeout,
+    classify_cli_error_code,
     is_shell_command_not_found,
     normalize_extra_args,
+    strip_cli_error,
 )
 from .prompts import build_messages
 
@@ -75,6 +78,9 @@ class CodexProvider(SummarizerProvider):
         # 空文字の場合は --model を付けず、Codex CLI 側の既定モデルを使う。
         self._model = str(self._config.get("model", "")).strip()
         self._launcher_command = str(self._config.get("launcher_command", "")).strip()
+        self._connect_timeout_sec = clamp_connect_timeout(
+            self._config.get("connect_timeout_sec", 12),
+        )
         extra = self._config.get("extra_args", [])
         self._extra_args = normalize_extra_args(extra)
         self._proc: asyncio.subprocess.Process | None = None
@@ -168,7 +174,10 @@ class CodexProvider(SummarizerProvider):
                 await probe.stdin.drain()
                 probe.stdin.close()
                 try:
-                    out, err = await asyncio.wait_for(probe.communicate(), timeout=30.0)
+                    out, err = await asyncio.wait_for(
+                        probe.communicate(),
+                        timeout=self._connect_timeout_sec,
+                    )
                 except asyncio.TimeoutError:
                     try:
                         probe.kill()
@@ -182,7 +191,10 @@ class CodexProvider(SummarizerProvider):
                 return ProviderHealth(
                     ok=False,
                     code=SummaryErrorCode.TIMEOUT.value,
-                    message="`codex exec` 接続テストが30秒以内に完了しませんでした",
+                    message=(
+                        "`codex exec` 接続テストが"
+                        f"{self._connect_timeout_sec:g}秒以内に完了しませんでした"
+                    ),
                 )
             probe_rc, _probe_out, probe_err = probe_res
             model_fallback_used = False
@@ -194,7 +206,10 @@ class CodexProvider(SummarizerProvider):
                         return ProviderHealth(
                             ok=False,
                             code=SummaryErrorCode.TIMEOUT.value,
-                            message="`codex exec` 接続テストが30秒以内に完了しませんでした",
+                            message=(
+                                "`codex exec` 接続テストが"
+                                f"{self._connect_timeout_sec:g}秒以内に完了しませんでした"
+                            ),
                         )
                     probe_rc, _probe_out, probe_err = fallback_res
                     model_fallback_used = probe_rc == 0
@@ -202,21 +217,10 @@ class CodexProvider(SummarizerProvider):
             if probe_rc != 0:
                 err_text = _strip_ansi(probe_err.decode(errors="replace")).strip()
                 excerpt = err_text[-300:] if len(err_text) > 300 else err_text
-                low = err_text.lower()
-                if (
-                    "failed to lookup address information" in low
-                    or "could not resolve host" in low
-                    or "connection refused" in low
-                    or "timed out" in low
-                ):
-                    return ProviderHealth(
-                        ok=False,
-                        code=SummaryErrorCode.OFFLINE.value,
-                        message=f"`codex exec` 接続失敗: {excerpt}",
-                    )
+                code = classify_cli_error_code(err_text)
                 return ProviderHealth(
                     ok=False,
-                    code=SummaryErrorCode.PROVIDER_DOWN.value,
+                    code=code.value,
                     message=f"`codex exec` exit {probe_rc}: {excerpt}",
                 )
 
@@ -445,16 +449,18 @@ class CodexProvider(SummarizerProvider):
                     )
                 fallback_err = _strip_ansi(
                     fallback_stderr.decode("utf-8", errors="replace"),
-                )[:300]
+                )
+                fallback_code_class = classify_cli_error_code(fallback_err)
                 raise SummaryError(
-                    SummaryErrorCode.PROVIDER_DOWN,
-                    f"codex exited {fallback_code}: {fallback_err}",
+                    fallback_code_class,
+                    f"codex exited {fallback_code}: {strip_cli_error(fallback_err)}",
                     provider=self.name,
                 )
             self._proc = None
+            code = classify_cli_error_code(stderr_text)
             raise SummaryError(
-                SummaryErrorCode.PROVIDER_DOWN,
-                f"codex exited {return_code}: {stderr_text}",
+                code,
+                f"codex exited {return_code}: {strip_cli_error(stderr_text)}",
                 provider=self.name,
             )
 
@@ -584,9 +590,23 @@ class CodexProvider(SummarizerProvider):
                                 return ln
                         return lines[-1]
                     err_text = _strip_ansi(f_stderr.decode("utf-8", errors="replace"))
+                    code = classify_cli_error_code(err_text)
+                    raise SummaryError(
+                        code,
+                        f"codex exited {fallback.returncode}: {strip_cli_error(err_text, limit=220)}",
+                        provider=self.name,
+                    )
+                else:
+                    code = classify_cli_error_code(err_text)
+                    raise SummaryError(
+                        code,
+                        f"codex exited {proc.returncode}: {strip_cli_error(err_text, limit=220)}",
+                        provider=self.name,
+                    )
+            code = classify_cli_error_code(err_text)
             raise SummaryError(
-                SummaryErrorCode.PROVIDER_DOWN,
-                f"codex exited {proc.returncode}: {err_text[:220]}",
+                code,
+                f"codex exited {proc.returncode}: {strip_cli_error(err_text, limit=220)}",
                 provider=self.name,
             )
         # codex は ANSI 装飾を含むのでそれを除去

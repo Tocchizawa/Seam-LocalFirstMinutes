@@ -11,7 +11,7 @@
 | **既定動作** | 録音停止 → 自動的に要約生成 (provider未設定時はskip) |
 | **手動再生成** | 既存議事録に対して再要約ボタン (provider切替も可能) |
 | **v1 プロバイダ** | Ollama (Qwen3 4B/8B/14B/32B) / Claude API / OpenAI / Gemini |
-| **v2 プロバイダ** | Claude Code CLI / Codex CLI (subprocess + 出力パースが脆いため後送り) |
+| **CLI プロバイダ** | Claude Code CLI / Codex CLI (subprocess + 起動前 preflight + 出力パース) |
 | **出力形式** | Markdown (構造化セクション) |
 | **プライバシー** | クラウド利用はprovider初使用時に1度だけ同意モーダル。Ollamaは送信なし |
 | **UX** | 生成中はストリーミング表示、完了時に保存 |
@@ -34,7 +34,7 @@ src/summarize/
 └── gemini_api.py           # Google Generative AI API
 ```
 
-v2 で追加: `claude_code.py` / `codex.py` (CLI subprocess)
+CLI provider: `claude_code.py` / `codex.py` (CLI subprocess)
 
 ### 3.2 主要型
 
@@ -238,6 +238,24 @@ minutes_ai:
   gemini:
     model: "gemini-2.0-flash"
     max_tokens: 4096
+
+  claude_code:
+    binary_path: "claude"
+    model: "sonnet"
+    launcher_command: ""       # zsh function 等が必要な場合だけ指定
+    launcher_shell: "/bin/zsh"
+    launcher_interactive: true
+    connect_timeout_sec: 12
+    extra_args: []
+
+  codex:
+    binary_path: "codex"
+    model: ""                  # 空なら CLI 側の既定モデル
+    launcher_command: ""
+    launcher_shell: "/bin/zsh"
+    launcher_interactive: true
+    connect_timeout_sec: 12
+    extra_args: []
 
 # 旧 ollama.minutes_* 設定は migration で minutes_ai.ollama.* へ移動
 ollama:
@@ -493,6 +511,8 @@ UIマウント / WS再接続時の処理:
 | Rate limit (429) | 30秒後に1回リトライ。再失敗で SummaryError(RATE_LIMIT) |
 | context長超過 | 送信前のtoken見積りで SummaryError(CONTEXT_OVERFLOW) |
 | タイムアウト | SummaryError(TIMEOUT) → 再試行ボタン |
+| CLI provider の未ログイン/接続不可 | 要約ジョブ投入前の短い preflight で AUTH_FAILED/OFFLINE/TIMEOUT を返す |
+| CLI binary が shell 起動直後の PATH に無い | 実行前に login shell の PATH を再取得し、shell の command hash を clear してから起動 |
 | 連打で再要約 | runner で in-flightチェック → 既存ジョブ cancel → 新ジョブ採用 |
 | 生成中に対象議事録削除 | runner cancel + WS notify、draft削除 |
 | アプリ強制終了 | 起動時リカバリで draft → DB復元 (§4.3) |
@@ -544,10 +564,9 @@ test_pipeline_integration.py
 | **6** | 再要約 + auto-detect | API endpoint + UI再要約popover + provider auto-detect on first run | E2E: 既存議事録の再要約 |
 | **7** | エッジケース統合 | §9 全ケース、エラーUI整備 | エラーシナリオ網羅 |
 
-**v2 (別実装フロー)**:
-- Phase v2.1: claude_code.py / codex.py (CLI subprocess)
-- Phase v2.2: 長尺対応 map-reduce chunking
-- Phase v2.3: cost tracking / usage metrics
+**後続実装フロー**:
+- Phase next.1: 長尺対応 map-reduce chunking
+- Phase next.2: cost tracking / usage metrics
 
 ## 12. 確定済み決定事項
 

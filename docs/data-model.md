@@ -20,6 +20,22 @@ minutes_ai:
   ollama:
     model: "qwen3:8b"
     num_ctx: 8192
+  claude_code:
+    binary_path: "claude"
+    model: "sonnet"
+    launcher_command: ""
+    launcher_shell: "/bin/zsh"
+    launcher_interactive: true
+    connect_timeout_sec: 12
+    extra_args: []
+  codex:
+    binary_path: "codex"
+    model: ""
+    launcher_command: ""
+    launcher_shell: "/bin/zsh"
+    launcher_interactive: true
+    connect_timeout_sec: 12
+    extra_args: []
 
 # Whisper設定
 whisper:

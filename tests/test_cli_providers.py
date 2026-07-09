@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +20,7 @@ from src.summarize.base import (
     SummaryErrorCode,
 )
 from src.summarize.claude_code import ClaudeCodeProvider
+from src.summarize.cli_launcher import build_command_argv
 from src.summarize.codex import CodexProvider, _strip_ansi
 
 PASS = 0
@@ -115,7 +118,37 @@ ok("model echoed (haiku)", h.model == "haiku")
 
 
 # ─────────────────────────────────────────────────────────
-section("[3] ClaudeCodeProvider — generate streaming (stream-json mock)")
+section("[3] ClaudeCodeProvider — health_check prompt probe offline")
+# ─────────────────────────────────────────────────────────
+
+
+async def _health_probe_offline():
+    version_proc = _make_fake_proc([b"2.1.1 (Claude Code)\n"], returncode=0)
+    probe_proc = _make_fake_proc(
+        [],
+        stderr=b"connection refused",
+        returncode=1,
+    )
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(side_effect=[version_proc, probe_proc]),
+        ):
+            p = ClaudeCodeProvider({
+                "binary_path": "claude",
+                "model": "sonnet",
+                "connect_timeout_sec": 3,
+            })
+            return await p.health_check()
+
+
+h = asyncio.run(_health_probe_offline())
+ok("probe offline → ok=False", not h.ok)
+ok("probe offline → OFFLINE", h.code == "OFFLINE")
+
+
+# ─────────────────────────────────────────────────────────
+section("[4] ClaudeCodeProvider — generate streaming (stream-json mock)")
 # ─────────────────────────────────────────────────────────
 
 
@@ -177,7 +210,7 @@ ok("text contains markdown", "## 概要" in result.text and "## 決定事項" in
 
 
 # ─────────────────────────────────────────────────────────
-section("[4] ClaudeCodeProvider — non-zero exit → PROVIDER_DOWN")
+section("[5] ClaudeCodeProvider — auth exit → AUTH_FAILED")
 # ─────────────────────────────────────────────────────────
 
 
@@ -202,13 +235,13 @@ async def _gen_exit_err():
 
 
 err = asyncio.run(_gen_exit_err())
-ok("non-zero exit → SummaryError", isinstance(err, SummaryError))
+ok("auth exit → SummaryError", isinstance(err, SummaryError))
 if isinstance(err, SummaryError):
-    ok("non-zero exit → PROVIDER_DOWN", err.code == SummaryErrorCode.PROVIDER_DOWN)
+    ok("auth exit → AUTH_FAILED", err.code == SummaryErrorCode.AUTH_FAILED)
 
 
 # ─────────────────────────────────────────────────────────
-section("[5] ClaudeCodeProvider — cancel during streaming")
+section("[6] ClaudeCodeProvider — cancel during streaming")
 # ─────────────────────────────────────────────────────────
 
 
@@ -274,7 +307,7 @@ ok("subprocess.terminate called", proc_mock.terminate.called)
 
 
 # ─────────────────────────────────────────────────────────
-section("[6] CodexProvider — binary not found")
+section("[7] CodexProvider — binary not found")
 # ─────────────────────────────────────────────────────────
 
 
@@ -290,7 +323,7 @@ ok("codex missing → MODEL_UNAVAILABLE", h.code == "MODEL_UNAVAILABLE")
 
 
 # ─────────────────────────────────────────────────────────
-section("[7] CodexProvider — health_check ok (mock)")
+section("[8] CodexProvider — health_check ok (mock)")
 # ─────────────────────────────────────────────────────────
 
 
@@ -311,7 +344,7 @@ ok("codex READY", h.code == "READY")
 
 
 # ─────────────────────────────────────────────────────────
-section("[8] CodexProvider — generate captures stdout")
+section("[9] CodexProvider — generate captures stdout")
 # ─────────────────────────────────────────────────────────
 
 
@@ -343,7 +376,7 @@ ok("codex output preserves Japanese", "概要" in res.text)
 
 
 # ─────────────────────────────────────────────────────────
-section("[9] _strip_ansi: ANSI escape除去")
+section("[10] _strip_ansi: ANSI escape除去")
 # ─────────────────────────────────────────────────────────
 
 raw = "\x1b[1;31mError\x1b[0m: bad thing\n"
@@ -352,7 +385,7 @@ ok("plain pass-through", _strip_ansi("hello") == "hello")
 
 
 # ─────────────────────────────────────────────────────────
-section("[10] CodexProvider — unsupported model fallback to CLI default")
+section("[11] CodexProvider — unsupported model fallback to CLI default")
 # ─────────────────────────────────────────────────────────
 
 
@@ -368,12 +401,13 @@ async def _codex_health_model_fallback():
     )
     fallback_ok_proc = _make_fake_proc([b"OK\n"], returncode=0)
     mock_exec = AsyncMock(side_effect=[version_proc, bad_model_proc, fallback_ok_proc])
-    with patch("asyncio.create_subprocess_exec", new=mock_exec):
-        p = CodexProvider({
-            "binary_path": "codex",
-            "model": "gpt-5",
-        })
-        health = await p.health_check()
+    with patch("shutil.which", return_value="/opt/homebrew/bin/codex"):
+        with patch("asyncio.create_subprocess_exec", new=mock_exec):
+            p = CodexProvider({
+                "binary_path": "codex",
+                "model": "gpt-5",
+            })
+            health = await p.health_check()
     return health
 
 
@@ -384,7 +418,7 @@ ok("fallback message note", "fallback" in (h.message or ""))
 
 
 # ─────────────────────────────────────────────────────────
-section("[11] CodexProvider — launcher_command uses zsh -ic")
+section("[12] CodexProvider — launcher_command uses zsh -ic")
 # ─────────────────────────────────────────────────────────
 
 
@@ -409,6 +443,32 @@ ok("launcher health ok", h.ok)
 ok("launcher uses zsh", len(argv) >= 3 and argv[0] == "/bin/zsh")
 ok("launcher uses -ic", len(argv) >= 3 and argv[1] == "-ic")
 ok("launcher command contains --version", len(argv) >= 3 and "--version" in str(argv[2]))
+ok("launcher clears shell hash", len(argv) >= 3 and "hash -r" in str(argv[2]))
+
+
+# ─────────────────────────────────────────────────────────
+section("[13] cli_launcher — refreshes PATH before direct binary resolution")
+# ─────────────────────────────────────────────────────────
+
+with tempfile.TemporaryDirectory() as td:
+    exe = Path(td) / "fresh-cli"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    fake_run = MagicMock()
+    fake_run.returncode = 0
+    fake_run.stdout = (
+        "startup noise\n"
+        f"__SEAM_REFRESHED_PATH__={td}{os.pathsep}/usr/bin\n"
+    )
+    with patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=False):
+        with patch("subprocess.run", return_value=fake_run):
+            argv, _label = build_command_argv(
+                {"binary_path": "fresh-cli", "launcher_shell": "/bin/zsh"},
+                default_binary="fresh-cli",
+                command_args=["--version"],
+            )
+
+ok("PATH refresh resolves fresh binary", argv is not None and argv[0] == str(exe))
 
 
 # ─── Summary ───

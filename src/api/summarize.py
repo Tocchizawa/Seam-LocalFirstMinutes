@@ -58,6 +58,16 @@ async def trigger_summarize(
                 "CONSENT_REQUIRED",
                 f"{target_provider} の利用同意が未取得です。POST /api/summarize/consent/{target_provider} で同意してください。",
             )
+    ai_cfg = config.get("minutes_ai") or {}
+    try:
+        provider_impl = get_provider(target_provider, ai_cfg)
+        health = await provider_impl.health_check()
+    except SummaryError as e:
+        raise bad_request(e.code.value, e.message)
+    except Exception as e:
+        raise bad_request("PROVIDER_HEALTH_CHECK_FAILED", str(e))
+    if not health.ok:
+        raise bad_request(health.code, health.message)
     get_runner().enqueue(minutes_id, provider_name=provider)
     return {"job_id": minutes_id, "status": "queued"}
 
