@@ -28,6 +28,21 @@ struct StartupSnapshot {
     logs: Vec<String>,
 }
 
+#[derive(Serialize, Clone, Debug)]
+struct StartupAppUpdateSettings {
+    check_on_startup: bool,
+    auto_install_on_startup: bool,
+}
+
+impl Default for StartupAppUpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_on_startup: true,
+            auto_install_on_startup: false,
+        }
+    }
+}
+
 struct StartupState(Mutex<StartupSnapshot>);
 
 #[derive(Clone, Debug)]
@@ -63,6 +78,8 @@ struct ManagedProcessState {
 }
 
 struct ManagedProcesses(Mutex<ManagedProcessState>);
+
+struct RuntimeRoot(PathBuf);
 
 impl ManagedProcesses {
     fn kill(&self) {
@@ -763,6 +780,62 @@ fn emit_startup_failure<R: tauri::Runtime>(app: &AppHandle<R>, failure: &Startup
     }
 }
 
+fn start_managed_backend<R: tauri::Runtime>(app: &AppHandle<R>, runtime_root: &Path) {
+    let Some(state) = app.try_state::<ManagedProcesses>() else {
+        return;
+    };
+    {
+        let guard = state.0.lock().unwrap();
+        if guard.backend.is_some() {
+            return;
+        }
+    }
+
+    emit_status(app, BackendStatus {
+        phase: "starting".into(),
+        message: "バックエンドを起動中...".into(),
+        progress: Some(0.02),
+        detail: None,
+    });
+
+    // 旧プロセスが孤立して 18900 を掴んだままだと、新しい起動が既存プロセスに
+    // 吸われてモデル状態が壊れたままになる。起動直前に stale backend を掃除する。
+    let port_conflicts = kill_stale_backend_listener(18900);
+    let backend_result = if port_conflicts.is_empty() {
+        start_backend(runtime_root)
+    } else {
+        Err(StartupFailure::new(
+            "バックエンドを起動できません: port 18900 が使用中です",
+            Some(port_conflicts.join("\n")),
+        ))
+    };
+
+    let mut backend_child = match backend_result {
+        Ok(child) => Some(child),
+        Err(failure) => {
+            emit_startup_failure(app, &failure);
+            return;
+        }
+    };
+    // 同梱バックエンドの stderr を取り出して後で reader thread に渡す。
+    // (start_backend の Cmd::stderr(piped) のおかげで Some になっているはず)
+    let backend_stderr = backend_child.as_mut().and_then(|c| c.stderr.take());
+
+    {
+        let mut guard = state.0.lock().unwrap();
+        if guard.backend.is_some() {
+            kill_child(&mut backend_child, "backend");
+            return;
+        }
+        guard.backend = backend_child;
+    }
+
+    spawn_backend_exit_monitor(app.clone());
+    if let Some(stderr) = backend_stderr {
+        spawn_stderr_reader(app.clone(), stderr);
+    }
+}
+
 fn exit_status_detail(status: ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("backend exited with code {}", code),
@@ -882,30 +955,156 @@ fn get_startup_snapshot(state: tauri::State<'_, StartupState>) -> StartupSnapsho
     state.0.lock().unwrap().clone()
 }
 
+fn parse_yaml_bool(value: &str) -> Option<bool> {
+    let normalized = value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_startup_app_update_settings(config_text: &str) -> StartupAppUpdateSettings {
+    let mut settings = StartupAppUpdateSettings::default();
+    let mut in_app_update = false;
+
+    for raw_line in config_text.lines() {
+        let line_without_comment = raw_line
+            .split_once('#')
+            .map(|(before, _)| before)
+            .unwrap_or(raw_line)
+            .trim_end();
+        if line_without_comment.trim().is_empty() {
+            continue;
+        }
+
+        let indent = line_without_comment
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .count();
+        let trimmed = line_without_comment.trim();
+
+        if indent == 0 {
+            if trimmed == "app_update:" {
+                in_app_update = true;
+                continue;
+            }
+            if in_app_update {
+                break;
+            }
+            continue;
+        }
+
+        if !in_app_update {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "check_on_startup" => {
+                if let Some(value) = parse_yaml_bool(value) {
+                    settings.check_on_startup = value;
+                }
+            }
+            "auto_install_on_startup" => {
+                if let Some(value) = parse_yaml_bool(value) {
+                    settings.auto_install_on_startup = value;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if settings.auto_install_on_startup {
+        settings.check_on_startup = true;
+    }
+    settings
+}
+
+#[tauri::command]
+fn get_startup_app_update_settings() -> StartupAppUpdateSettings {
+    let Some(home) = std::env::var_os("HOME") else {
+        return StartupAppUpdateSettings::default();
+    };
+    let config_path = PathBuf::from(home).join(".seam").join("config.yaml");
+    match fs::read_to_string(config_path) {
+        Ok(text) => parse_startup_app_update_settings(&text),
+        Err(_) => StartupAppUpdateSettings::default(),
+    }
+}
+
+#[tauri::command]
+async fn start_backend_after_startup_update(
+    app: AppHandle,
+    runtime_root: tauri::State<'_, RuntimeRoot>,
+) -> Result<(), String> {
+    let runtime_root = runtime_root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_managed_backend(&app, &runtime_root);
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_startup_app_update_settings() {
+        let settings = parse_startup_app_update_settings(
+            r#"
+schema_version: 1
+app_update:
+  check_on_startup: false
+  auto_install_on_startup: false
+debug:
+  enabled: true
+"#,
+        );
+
+        assert!(!settings.check_on_startup);
+        assert!(!settings.auto_install_on_startup);
+    }
+
+    #[test]
+    fn auto_install_forces_startup_check() {
+        let settings = parse_startup_app_update_settings(
+            r#"
+app_update:
+  check_on_startup: false
+  auto_install_on_startup: true
+"#,
+        );
+
+        assert!(settings.check_on_startup);
+        assert!(settings.auto_install_on_startup);
+    }
+
+    #[test]
+    fn missing_startup_app_update_settings_use_defaults() {
+        let settings = parse_startup_app_update_settings(
+            r#"
+setup:
+  completed: true
+"#,
+        );
+
+        assert!(settings.check_on_startup);
+        assert!(!settings.auto_install_on_startup);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_root = ensure_runtime_dirs();
-    // 旧プロセスが孤立して 18900 を掴んだままだと、新しい起動が既存プロセスに
-    // 吸われてモデル状態が壊れたままになる。起動前に stale backend を掃除する。
-    let port_conflicts = kill_stale_backend_listener(18900);
-    let ollama_child = None;
-    // まずは Splash 固定を避けるため、起動前に確定できる失敗を即表示する。
-    // 設計書上の 3 回 retry / venv repair はこの後の段階で実装する。
-    let backend_result = if port_conflicts.is_empty() {
-        start_backend(&runtime_root)
-    } else {
-        Err(StartupFailure::new(
-            "バックエンドを起動できません: port 18900 が使用中です",
-            Some(port_conflicts.join("\n")),
-        ))
-    };
-    let (mut backend_child, backend_start_failure) = match backend_result {
-        Ok(child) => (Some(child), None),
-        Err(failure) => (None, Some(failure)),
-    };
-    // 同梱バックエンドの stderr を取り出して後で reader thread に渡す。
-    // (start_backend の Cmd::stderr(piped) のおかげで Some になっているはず)
-    let backend_stderr = backend_child.as_mut().and_then(|c| c.stderr.take());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -913,32 +1112,18 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_startup_snapshot])
+        .invoke_handler(tauri::generate_handler![
+            get_startup_snapshot,
+            get_startup_app_update_settings,
+            start_backend_after_startup_update,
+        ])
         .setup(move |app| {
+            app.manage(RuntimeRoot(runtime_root.clone()));
             app.manage(StartupState(Mutex::new(StartupSnapshot::default())));
             app.manage(ManagedProcesses(Mutex::new(ManagedProcessState {
-                backend: backend_child,
-                ollama: ollama_child,
+                backend: None,
+                ollama: None,
             })));
-
-            // 起動状況の初期イベントを送る (Splash が listen 開始する前でも到達するように
-            // window が「ready-to-show」した段階で再送はしないが、frontend は遅延 listen でも
-            // 後続イベントで status を更新できる)。
-            let app_handle = app.handle().clone();
-            if let Some(failure) = &backend_start_failure {
-                emit_startup_failure(&app_handle, failure);
-            } else {
-                emit_status(&app_handle, BackendStatus {
-                    phase: "starting".into(),
-                    message: "バックエンドを起動中...".into(),
-                    progress: Some(0.02),
-                    detail: None,
-                });
-                spawn_backend_exit_monitor(app_handle.clone());
-            }
-            if let Some(stderr) = backend_stderr {
-                spawn_stderr_reader(app_handle, stderr);
-            }
 
             // ─── Tray icon (macOS menu bar) ─────────────────────
             let show_item = MenuItem::with_id(app, "show", "ウィンドウを表示", true, None::<&str>)?;
