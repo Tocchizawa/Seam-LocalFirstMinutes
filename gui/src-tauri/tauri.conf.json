@@ -56,5 +56,13 @@
       "resources/seam-backend.tar.gz": "seam-backend.tar.gz",
       "resources/audio-capture": "audio-capture"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4NjE2RjgzMzdFQzcxRApSV1FkeDM0eitCYUdCNDlwRFpmM0ZKaENVSEZjSWdQWW5IMnJqU3JOalRtRXJLd1EvMForZHVlYgo=",
+      "endpoints": [
+        "https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases/download/updater-feed/latest.json"
+      ]
+    }
   }
 }

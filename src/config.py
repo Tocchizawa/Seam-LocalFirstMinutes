@@ -196,6 +196,10 @@ DEFAULTS: dict[str, Any] = {
     "setup": {
         "completed": False,
     },
+    "app_update": {
+        "check_on_startup": True,
+        "auto_install_on_startup": False,
+    },
     "debug": {
         "enabled": False,
         "watchdog_stall_sec": 60.0,
@@ -649,6 +653,17 @@ class Config:
                 cleaned_origins.append(value)
         server["allowed_origins"] = cleaned_origins
         server["allow_remote_clients"] = bool(server.get("allow_remote_clients", False))
+
+        app_update = self._data.setdefault("app_update", {})
+        if not isinstance(app_update, dict):
+            app_update = {}
+            self._data["app_update"] = app_update
+        app_update["auto_install_on_startup"] = bool(
+            app_update.get("auto_install_on_startup", False)
+        )
+        app_update["check_on_startup"] = bool(
+            app_update.get("check_on_startup", True)
+        ) or app_update["auto_install_on_startup"]
 
 
 config = Config()

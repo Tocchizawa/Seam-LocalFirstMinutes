@@ -18,6 +18,10 @@
       "allow": [{ "path": "**" }, { "path": "/**" }]
     },
     "dialog:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "updater:allow-check",
+    "updater:allow-download",
+    "updater:allow-install",
+    "process:allow-restart"
   ]
 }

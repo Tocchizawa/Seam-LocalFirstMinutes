@@ -13,8 +13,9 @@ Seam は、**会議の録音・文字起こし・要約をローカル環境中�
 
 ## ダウンロード
 
-最新版の DMG は [Releases ページ](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases/latest) からダウンロードできます。
+最新版の DMG は [Releases ページ](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases) からダウンロードできます。
 DMG を開いて `Seam.app` を `Applications` にドラッグするだけでインストール完了です（Apple Developer ID 署名 + 公証済み）。
+インストール後は設定画面から更新確認できます。起動時自動アップデートを有効にすると、次回起動時に更新を見つけた場合だけ自動で適用します。
 
 ビルドはご自身でも可能です。手順は [ローカル実行（開発）](#ローカル実行開発) と [ビルド](#ビルド) を参照してください。
 

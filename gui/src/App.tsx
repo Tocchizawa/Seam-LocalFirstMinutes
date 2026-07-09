@@ -19,6 +19,13 @@ import { RecordingProvider, useRecording } from "./lib/recording-context";
 import { RecordToolbar } from "./components/RecordToolbar";
 import { DeviceSettingsModal } from "./components/DeviceSettingsModal";
 import { LatestSegmentPreview } from "./components/LatestSegmentPreview";
+import {
+  checkForAppUpdate,
+  closeAppUpdate,
+  installAndRelaunchAppUpdate,
+  updateErrorMessage,
+} from "./lib/updater";
+import { showToast } from "./lib/toast";
 
 type Mode =
   | { kind: "main" }
@@ -49,8 +56,14 @@ function AppInner() {
   const {
     recording, micDevice, setMicDevice, captureSystem, setCaptureSystem,
   } = useRecording();
+  const startupUpdateCheckedRef = useRef(false);
+  const recordingRef = useRef(recording);
 
   useEffect(() => initTheme(), []);
+
+  useEffect(() => {
+    recordingRef.current = recording;
+  }, [recording]);
 
   // WebView のデフォルトコンテキストメニュー (Reload 等) を抑止。
   // 入力欄では OS 標準のメニュー (コピー/ペースト) を残す。
@@ -104,6 +117,76 @@ function AppInner() {
   useEffect(() => {
     if (healthy) refreshProjects();
   }, [healthy, refreshProjects]);
+
+  useEffect(() => {
+    if (!healthy || startupUpdateCheckedRef.current) return;
+    startupUpdateCheckedRef.current = true;
+    let cancelled = false;
+
+    (async () => {
+      const settings = await getSettings().catch(() => null);
+      const updateSettings = ((settings?.app_update as any) || {}) as {
+        check_on_startup?: boolean;
+        auto_install_on_startup?: boolean;
+      };
+      const autoInstall = Boolean(updateSettings.auto_install_on_startup);
+      const checkOnStartup = autoInstall || updateSettings.check_on_startup !== false;
+      if (!checkOnStartup) return;
+
+      let update = null as Awaited<ReturnType<typeof checkForAppUpdate>>;
+      try {
+        update = await checkForAppUpdate({ timeoutMs: 12_000 });
+        if (cancelled || !update) return;
+
+        if (recordingRef.current) {
+          showToast({
+            kind: "info",
+            text: `Seam ${update.version} を利用できます。録音終了後に設定から更新してください`,
+            ttl: 7000,
+          });
+          await closeAppUpdate(update);
+          return;
+        }
+
+        if (!autoInstall) {
+          showToast({
+            kind: "info",
+            text: `Seam ${update.version} を利用できます`,
+            ttl: 8000,
+            onClick: () => setShowSettings(true),
+            hoverHint: "設定を開く",
+          });
+          await closeAppUpdate(update);
+          return;
+        }
+
+        showToast({
+          kind: "info",
+          text: `Seam ${update.version} にアップデートします`,
+          ttl: 5000,
+        });
+        await installAndRelaunchAppUpdate(update, undefined, {
+          shouldContinue: () => !recordingRef.current,
+          abortMessage: "録音中のため自動アップデートを中断しました",
+        });
+      } catch (e) {
+        if (autoInstall && !cancelled) {
+          const message = updateErrorMessage(e);
+          const interrupted = message.includes("中断");
+          showToast({
+            kind: interrupted ? "info" : "err",
+            text: interrupted ? message : `自動アップデート失敗: ${message}`,
+            ttl: 7000,
+          });
+        } else {
+          console.warn("[updater] startup check failed", e);
+        }
+        await closeAppUpdate(update);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [healthy]);
 
   // 録音デバイス設定は MainView 以外のツールバーからも使うため、アプリ全体で復元する。
   useEffect(() => {

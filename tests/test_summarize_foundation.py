@@ -335,6 +335,18 @@ with tempfile.TemporaryDirectory() as tmp:
         assert_eq("consent claude_api default", False, consent.get("claude_api"))
         assert_eq("consent openai default", False, consent.get("openai"))
         assert_eq("consent gemini default", False, consent.get("gemini"))
+        assert_eq("app update check_on_startup default", True, c.get("app_update", "check_on_startup"))
+        assert_eq(
+            "app update auto_install_on_startup default",
+            False,
+            c.get("app_update", "auto_install_on_startup"),
+        )
+        c.update({"app_update": {"check_on_startup": False, "auto_install_on_startup": True}})
+        assert_eq(
+            "auto install forces startup check",
+            True,
+            c.get("app_update", "check_on_startup"),
+        )
     finally:
         config_mod.APP_DIR = orig_app_dir
 

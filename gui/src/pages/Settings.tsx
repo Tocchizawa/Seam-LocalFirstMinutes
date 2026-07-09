@@ -41,6 +41,15 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { showToast } from "../lib/toast";
 import { getThemeMode, setThemeMode, type ThemeMode } from "../lib/theme";
 import { Spinner } from "../components/Spinner";
+import { useRecording } from "../lib/recording-context";
+import {
+  checkForAppUpdate,
+  closeAppUpdate,
+  getCurrentAppVersion,
+  installAndRelaunchAppUpdate,
+  updateErrorMessage,
+  type AppUpdateInfo,
+} from "../lib/updater";
 
 interface Props {
   onClose: () => void;
@@ -55,9 +64,11 @@ const WHISPER_MODELS = [
   { value: "large-v3-turbo", label: "Large v3 Turbo (高精度・高速 / 推奨)" },
 ];
 
-type Category = "appearance" | "transcribe" | "speakers" | "speaker-list" | "ai" | "recording" | "debug";
+type Category = "appearance" | "app" | "transcribe" | "speakers" | "speaker-list" | "ai" | "recording" | "debug";
 
 export function SettingsModal({ onClose }: Props) {
+  const { recording } = useRecording();
+  const recordingRef = useRef(recording);
   const [closing, setClosing] = useState(false);
   const [settings, setSettings] = useState<Record<string, any> | null>(null);
   const [saving, setSaving] = useState(false);
@@ -99,6 +110,12 @@ export function SettingsModal({ onClose }: Props) {
   const [aiConsentDialog, setAiConsentDialog] = useState<SummarizeProvider | null>(null);
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(getThemeMode());
+  const [appVersion, setAppVersion] = useState("");
+  const [updateCheckOnStartup, setUpdateCheckOnStartup] = useState(true);
+  const [updateAutoInstallOnStartup, setUpdateAutoInstallOnStartup] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState("");
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const [stopForgetEnabled, setStopForgetEnabled] = useState(true);
   const [stopForgetSilenceSec, setStopForgetSilenceSec] = useState(300);
   const [stopForgetLevelThreshold, setStopForgetLevelThreshold] = useState(0.02);
@@ -123,6 +140,7 @@ export function SettingsModal({ onClose }: Props) {
   const [hfTokenError, setHfTokenError] = useState("");
   const [diarTesting, setDiarTesting] = useState(false);
   const [diarTestResult, setDiarTestResult] = useState<DiarizationTestResult | null>(null);
+  const availableUpdateRef = useRef<AppUpdateInfo | null>(null);
 
   const refreshDiarStatus = async () => {
     try {
@@ -135,6 +153,7 @@ export function SettingsModal({ onClose }: Props) {
   const categories = useMemo(
     () => [
       { key: "appearance" as const, label: "外観" },
+      { key: "app" as const, label: "アプリ" },
       { key: "transcribe" as const, label: "文字起こし" },
       { key: "speakers" as const, label: "話者分離" },
       { key: "speaker-list" as const, label: "話者一覧" },
@@ -163,12 +182,32 @@ export function SettingsModal({ onClose }: Props) {
   };
 
   useEffect(() => {
+    void getCurrentAppVersion().then(setAppVersion).catch(() => setAppVersion(""));
+  }, []);
+
+  useEffect(() => {
+    recordingRef.current = recording;
+  }, [recording]);
+
+  useEffect(() => {
+    availableUpdateRef.current = availableUpdate;
+  }, [availableUpdate]);
+
+  useEffect(() => () => {
+    void closeAppUpdate(availableUpdateRef.current);
+  }, []);
+
+  useEffect(() => {
     Promise.all([getSettings(), listSpeakers().catch(() => ({ speakers: [] }))]).then(([s, sp]) => {
       setSettings(s);
       setWm((s.whisper as any)?.model || "medium");
       setLm((s.ollama as any)?.context_model || "qwen3:8b");
       setLl((s.logging as any)?.level || "INFO");
       setDebugEnabled(Boolean((s.debug as any)?.enabled));
+      const appUpdate = (s.app_update as any) || {};
+      const autoInstall = Boolean(appUpdate.auto_install_on_startup ?? false);
+      setUpdateAutoInstallOnStartup(autoInstall);
+      setUpdateCheckOnStartup(autoInstall || appUpdate.check_on_startup !== false);
 
       const speakerMemory = (s.whisper as any)?.speaker_memory || {};
       setSpeakerMemoryEnabled(Boolean(speakerMemory.enabled ?? true));
@@ -298,6 +337,10 @@ export function SettingsModal({ onClose }: Props) {
           },
         },
         logging: { level: ll },
+        app_update: {
+          check_on_startup: updateCheckOnStartup || updateAutoInstallOnStartup,
+          auto_install_on_startup: updateAutoInstallOnStartup,
+        },
         debug: { enabled: debugEnabled },
       });
       setSettings(u);
@@ -312,6 +355,91 @@ export function SettingsModal({ onClose }: Props) {
   const pickTheme = (m: ThemeMode) => {
     setTheme(m);
     setThemeMode(m);
+  };
+
+  const setAutoInstallOnStartup = (enabled: boolean) => {
+    setUpdateAutoInstallOnStartup(enabled);
+    if (enabled) setUpdateCheckOnStartup(true);
+  };
+
+  const installUpdate = async (info: AppUpdateInfo) => {
+    if (recordingRef.current) {
+      const message = "録音中はアップデートできません。録音終了後に実行してください";
+      setUpdateStatus(message);
+      showToast({ kind: "info", text: message, ttl: 7000 });
+      return;
+    }
+
+    setUpdateBusy(true);
+    setUpdateStatus("アップデートを開始しています...");
+    try {
+      await installAndRelaunchAppUpdate(info, (progress) => {
+        setUpdateStatus(progress.message);
+      }, {
+        shouldContinue: () => !recordingRef.current,
+        abortMessage: "録音中のためアップデートを中断しました",
+      });
+    } catch (e) {
+      const message = updateErrorMessage(e);
+      const interrupted = message.includes("中断");
+      setUpdateStatus(interrupted ? message : `アップデート失敗: ${message}`);
+      showToast({
+        kind: interrupted ? "info" : "err",
+        text: interrupted ? message : `アップデート失敗: ${message}`,
+        ttl: 7000,
+      });
+      setUpdateBusy(false);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    if (updateBusy) return;
+    if (availableUpdate) {
+      await installUpdate(availableUpdate);
+      return;
+    }
+
+    setUpdateBusy(true);
+    setUpdateStatus("アップデートを確認中...");
+    try {
+      await closeAppUpdate(availableUpdateRef.current);
+      setAvailableUpdate(null);
+      const result = await checkForAppUpdate({ timeoutMs: 15_000 });
+      if (!result) {
+        setUpdateStatus("最新版です");
+        showToast({ kind: "ok", text: "Seam は最新版です" });
+        return;
+      }
+
+      setAvailableUpdate(result);
+      setUpdateStatus(`Seam ${result.version} を利用できます`);
+      if (recordingRef.current) {
+        showToast({
+          kind: "info",
+          text: `Seam ${result.version} を利用できます。録音終了後にインストールしてください`,
+          ttl: 7000,
+        });
+        return;
+      }
+      const ok = await ask(
+        `Seam ${result.version} にアップデートします。インストール後にアプリを再起動します。`,
+        {
+          title: "アップデート",
+          kind: "info",
+          okLabel: "アップデート",
+          cancelLabel: "あとで",
+        },
+      );
+      if (ok) {
+        await installUpdate(result);
+      }
+    } catch (e) {
+      const message = updateErrorMessage(e);
+      setUpdateStatus(`確認失敗: ${message}`);
+      showToast({ kind: "err", text: `確認失敗: ${message}`, ttl: 7000 });
+    } finally {
+      setUpdateBusy(false);
+    }
   };
 
   // ─── 要約 AI 関連ハンドラ ───
@@ -510,6 +638,51 @@ export function SettingsModal({ onClose }: Props) {
                       <ThemePicker value={theme} onChange={pickTheme} />
                     </SRow>
                   </SGroup>
+                )}
+
+                {category === "app" && (
+                  <>
+                    <SGroup title="アプリ">
+                      <SRow label="現在のバージョン">
+                        <span className="text-[12px] text-(--t2)">{appVersion || "取得中..."}</span>
+                      </SRow>
+                      <SRow label="起動時に更新を確認">
+                        <SToggle
+                          value={updateCheckOnStartup}
+                          onChange={(v) => {
+                            setUpdateCheckOnStartup(v);
+                            if (!v) setUpdateAutoInstallOnStartup(false);
+                          }}
+                        />
+                      </SRow>
+                      <SRow
+                        label="起動時に自動アップデート"
+                        hint="ONの場合、更新を見つけたら自動でインストールして再起動します"
+                      >
+                        <SToggle
+                          value={updateAutoInstallOnStartup}
+                          onChange={setAutoInstallOnStartup}
+                        />
+                      </SRow>
+                      <SRow
+                        label="アップデート"
+                        hint={updateStatus || "GitHub Releases の更新フィードを確認します"}
+                      >
+                        <button
+                          onClick={handleCheckUpdate}
+                          disabled={updateBusy}
+                          className="btn h-7 px-2.5 text-[11px]"
+                        >
+                          {updateBusy ? <Spinner size={12} /> : <ArrowsClockwise size={12} />}
+                          {updateBusy
+                            ? "処理中..."
+                            : availableUpdate
+                              ? "インストール"
+                              : "確認"}
+                        </button>
+                      </SRow>
+                    </SGroup>
+                  </>
                 )}
 
                 {category === "transcribe" && (

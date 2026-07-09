@@ -74,6 +74,11 @@ logging:
 # セットアップ状態
 setup:
   completed: true
+
+# アプリ更新
+app_update:
+  check_on_startup: true
+  auto_install_on_startup: false
 ```
 
 **全フィールドにデフォルト値を持たせる**: 新バージョンでフィールドが追加された場合、欠落しているキーはコード側のデフォルト値で補完。`schema_version` でマイグレーション判定。
