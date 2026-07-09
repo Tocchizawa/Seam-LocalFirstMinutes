@@ -23,6 +23,7 @@
 | **設定** | PyYAML | 6+ | YAML |
 | **HTTP** | httpx | 0.27+ | Ollama API |
 | **バンドル** | PyInstaller | 6+ | Python→バイナリ |
+| **更新配布** | Tauri Updater | 2.x | 署名済み `.app.tar.gz` によるアプリ内更新 |
 
 ---
 
@@ -101,6 +102,13 @@ GijirokuN.app/Contents/
 
 .dmg サイズ: ~3.5GB（Python バックエンド + Ollama + ffmpeg）
 初回DL合計: ~6.5GB
+
+### 3.1.1 アプリ内アップデート
+
+- 通常インストール用の DMG に加えて、Tauri updater 用の `Seam.app.tar.gz` / `Seam.app.tar.gz.sig` を GitHub Releases にアップロードする
+- アプリは固定フィード `updater-feed/latest.json` を参照し、`darwin-aarch64` の署名付き artifact を取得する
+- 起動時は設定に従って更新確認を行う。`auto_install_on_startup=true` の場合のみ、自動でダウンロード・インストール・再起動まで進める
+- 更新署名の秘密鍵はリポジトリに含めず、ローカルまたは GitHub Actions secrets の `TAURI_SIGNING_PRIVATE_KEY` で管理する
 
 ### 3.2 初回起動ウィザード
 

@@ -50,6 +50,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           missing=0
           for key in \
@@ -59,7 +60,8 @@ jobs:
             APPLE_SIGNING_IDENTITY \
             APPLE_ID \
             APPLE_APP_PASSWORD \
-            APPLE_TEAM_ID; do
+            APPLE_TEAM_ID \
+            TAURI_SIGNING_PRIVATE_KEY; do
             if [ -z "${!key}" ]; then
               echo "::error::Missing required release signing secret: ${key}"
               missing=1
@@ -105,6 +107,23 @@ jobs:
           cd ..
           bash scripts/create-dmg.sh
 
+      - name: Generate updater artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_UPDATER_REQUIRE_NOTARIZATION: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd ..
+          bash scripts/create-updater-artifact.sh
+
+      - name: Generate updater feed
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cd ..
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash scripts/create-updater-feed.sh "$VERSION" "$GITHUB_REF_NAME"
+
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -112,9 +131,41 @@ jobs:
           path: gui/src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
+      - name: Upload Updater Artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: seam-updater
+          path: |
+            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            gui/src-tauri/target/release/bundle/updater/latest.json
+          if-no-files-found: error
+
       - name: Publish GitHub Release Asset
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: gui/src-tauri/target/release/bundle/dmg/*.dmg
+          files: |
+            gui/src-tauri/target/release/bundle/dmg/*.dmg
+            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            gui/src-tauri/target/release/bundle/updater/latest.json
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Publish updater feed
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd ..
+          FEED_TAG="updater-feed"
+          if ! gh release view "$FEED_TAG" >/dev/null 2>&1; then
+            gh release create "$FEED_TAG" \
+              --title "Seam updater feed" \
+              --notes "Static Tauri updater feed for Seam." \
+              --latest=false
+          fi
+          gh release upload "$FEED_TAG" \
+            gui/src-tauri/target/release/bundle/updater/latest.json \
+            --clobber

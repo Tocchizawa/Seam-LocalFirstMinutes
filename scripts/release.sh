@@ -7,12 +7,14 @@
 #   1. validate args / git state / tag uniqueness
 #   2. bump version in gui/package.json, gui/src-tauri/tauri.conf.json,
 #      gui/src-tauri/Cargo.toml (and let cargo update Cargo.lock at build)
-#   3. pnpm build  (= bundle backend + tauri build + sign + notarize + staple .app/DMG)
+#   3. pnpm build (= bundle backend + tauri build + sign/notarize/staple .app/DMG)
+#      then generate signed updater artifacts from the final .app
 #   4. prepend CHANGELOG.md entry with auto-generated git log notes
 #      (edits opened in $EDITOR; user can refine before commit)
 #   5. commit "chore(release): vX.Y.Z" + annotated tag vX.Y.Z
 #   6. push commit + tag to origin/main
 #   7. gh release create vX.Y.Z --notes-file <changelog-section> with the DMG
+#      and Tauri updater artifacts, then update the updater-feed release
 #
 # Re-run safety: validates state before any destructive write; aborts on errors.
 #
@@ -34,6 +36,9 @@ fi
 # Tauri が DMG ファイル名に使うのは major.minor.patch のみ (pre-release suffix は落ちる)
 SHORT_VERSION="${NEW_VERSION%%-*}"
 DMG_PATH="gui/src-tauri/target/release/bundle/dmg/Seam_${SHORT_VERSION}_aarch64.dmg"
+UPDATER_ARCHIVE="gui/src-tauri/target/release/bundle/macos/Seam.app.tar.gz"
+UPDATER_SIGNATURE="${UPDATER_ARCHIVE}.sig"
+UPDATER_FEED_JSON="gui/src-tauri/target/release/bundle/updater/latest.json"
 
 # ─── 事前チェック ─────────────────────────────────────
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -111,6 +116,25 @@ if [ ! -f "$DMG_PATH" ]; then
   exit 1
 fi
 
+# ─── Tauri updater artifact ─────────────────────────────
+echo "[release] generating updater artifact..."
+if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] \
+  && [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ] \
+  && [ -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY_PATH")"
+fi
+if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$HOME/.tauri/seam-updater.key" ]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$(cat "$HOME/.tauri/seam-updater.key")"
+fi
+RELEASE_UPDATER_REQUIRE_NOTARIZATION="${RELEASE_UPDATER_REQUIRE_NOTARIZATION:-1}" \
+  bash scripts/create-updater-artifact.sh
+if [ ! -f "$UPDATER_ARCHIVE" ] || [ ! -f "$UPDATER_SIGNATURE" ]; then
+  echo "Error: expected updater artifacts not found:"
+  echo "       $UPDATER_ARCHIVE"
+  echo "       $UPDATER_SIGNATURE"
+  exit 1
+fi
+
 # ─── CHANGELOG エントリ生成 ─────────────────────────
 DATE=$(date +%Y-%m-%d)
 RANGE_DESC=""
@@ -175,6 +199,10 @@ awk -v ver="$NEW_VERSION" '
   capture { print }
 ' CHANGELOG.md > "$NOTES_FILE"
 
+# ─── Tauri updater feed ─────────────────────────────────
+echo "[release] generating updater feed..."
+bash scripts/create-updater-feed.sh "$NEW_VERSION" "$TAG" "$NOTES_FILE"
+
 # ─── commit & tag ────────────────────────────────────
 echo "[release] committing version bump + changelog..."
 git add gui/package.json gui/src-tauri/tauri.conf.json gui/src-tauri/Cargo.toml \
@@ -199,7 +227,19 @@ gh release create "$TAG" \
   --title "$TAG" \
   --notes-file "$NOTES_FILE" \
   $PRERELEASE_FLAG \
-  "$DMG_PATH"
+  "$DMG_PATH" \
+  "$UPDATER_ARCHIVE" \
+  "$UPDATER_SIGNATURE" \
+  "$UPDATER_FEED_JSON"
+
+FEED_TAG="updater-feed"
+if ! gh release view "$FEED_TAG" >/dev/null 2>&1; then
+  gh release create "$FEED_TAG" \
+    --title "Seam updater feed" \
+    --notes "Static Tauri updater feed for Seam." \
+    --latest=false
+fi
+gh release upload "$FEED_TAG" "$UPDATER_FEED_JSON" --clobber
 
 rm -f "$NOTES_FILE"
 
