@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import {
@@ -13,7 +14,7 @@ import { LiveView } from "./pages/LiveView";
 import { SettingsModal } from "./pages/Settings";
 import { ProjectSettingsModal } from "./pages/ProjectSettings";
 import { ProjectDialog } from "./components/ProjectDialog";
-import { Splash } from "./components/Splash";
+import { Splash, type SplashStartupUpdate } from "./components/Splash";
 import { Toaster } from "./components/Toaster";
 import { RecordingProvider, useRecording } from "./lib/recording-context";
 import { RecordToolbar } from "./components/RecordToolbar";
@@ -32,6 +33,11 @@ type Mode =
   | { kind: "detail"; minutes: Minutes; query?: string; tab?: "summary" | "transcript" }
   | { kind: "pipeline-detail"; sessionId: string }
   | { kind: "live"; previous: Exclude<Mode, { kind: "live" }> };
+
+interface StartupAppUpdateSettings {
+  check_on_startup: boolean;
+  auto_install_on_startup: boolean;
+}
 
 function App() {
   return (
@@ -56,14 +62,127 @@ function AppInner() {
   const {
     recording, micDevice, setMicDevice, captureSystem, setCaptureSystem,
   } = useRecording();
-  const startupUpdateCheckedRef = useRef(false);
-  const recordingRef = useRef(recording);
+  const [startupUpdatePending, setStartupUpdatePending] = useState(true);
+  const [startupUpdate, setStartupUpdate] = useState<SplashStartupUpdate | null>({
+    message: "アップデート設定を確認中...",
+    progress: null,
+  });
+  const [startupUpdateNotice, setStartupUpdateNotice] = useState<string | null>(null);
+  const startupReady = healthy && !startupUpdatePending;
 
   useEffect(() => initTheme(), []);
 
   useEffect(() => {
-    recordingRef.current = recording;
-  }, [recording]);
+    let cancelled = false;
+    let finishTimer: number | null = null;
+    let update: Awaited<ReturnType<typeof checkForAppUpdate>> | null = null;
+    let autoInstallRequested = false;
+    let backendStartRequested = false;
+
+    const startBackend = async () => {
+      if (cancelled || backendStartRequested) return;
+      backendStartRequested = true;
+      try {
+        await invoke("start_backend_after_startup_update");
+      } catch (e) {
+        console.warn("[startup] backend start command failed", e);
+      }
+    };
+
+    const finish = (delayMs = 0) => {
+      const complete = async () => {
+        await startBackend();
+        if (cancelled) return;
+        setStartupUpdate(null);
+        setStartupUpdatePending(false);
+      };
+      if (delayMs > 0) {
+        void startBackend();
+        finishTimer = window.setTimeout(() => {
+          void complete();
+        }, delayMs);
+      } else {
+        void complete();
+      }
+    };
+
+    (async () => {
+      try {
+        const settings = await invoke<StartupAppUpdateSettings>(
+          "get_startup_app_update_settings",
+        ).catch(() => ({
+          check_on_startup: true,
+          auto_install_on_startup: false,
+        }));
+        const autoInstall = Boolean(settings.auto_install_on_startup);
+        autoInstallRequested = autoInstall;
+        const checkOnStartup = autoInstall || settings.check_on_startup !== false;
+        if (!checkOnStartup) {
+          finish();
+          return;
+        }
+
+        setStartupUpdate({
+          message: "アップデートを確認中...",
+          progress: null,
+        });
+        update = await checkForAppUpdate({ timeoutMs: 12_000 });
+        if (cancelled) return;
+        if (!update) {
+          finish();
+          return;
+        }
+
+        if (!autoInstall) {
+          setStartupUpdateNotice(`Seam ${update.version} を利用できます`);
+          await closeAppUpdate(update);
+          update = null;
+          finish();
+          return;
+        }
+
+        setStartupUpdate({
+          message: `Seam ${update.version} にアップデートします`,
+          progress: null,
+        });
+        await installAndRelaunchAppUpdate(update, (progress) => {
+          if (cancelled) return;
+          setStartupUpdate({
+            message: progress.message,
+            progress: typeof progress.percent === "number" ? progress.percent / 100 : null,
+            detail: progress.totalBytes
+              ? `${Math.round((progress.downloadedBytes ?? 0) / 1024 / 1024)}MB / ${
+                Math.round(progress.totalBytes / 1024 / 1024)
+              }MB`
+              : null,
+          });
+        });
+      } catch (e) {
+        const message = updateErrorMessage(e);
+        if (!cancelled && autoInstallRequested) {
+          setStartupUpdate({
+            message: `自動アップデート失敗: ${message}`,
+            progress: null,
+            detail: "このまま起動を続行します",
+            isError: true,
+          });
+          setStartupUpdateNotice(`自動アップデート失敗: ${message}`);
+          finish(3500);
+        } else if (!cancelled) {
+          console.warn("[updater] startup check failed", e);
+          finish();
+        }
+        await closeAppUpdate(update);
+        update = null;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (finishTimer !== null) window.clearTimeout(finishTimer);
+      closeAppUpdate(update).catch(() => {});
+    };
+  }, []);
 
   // WebView のデフォルトコンテキストメニュー (Reload 等) を抑止。
   // 入力欄では OS 標準のメニュー (コピー/ペースト) を残す。
@@ -115,82 +234,25 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
-    if (healthy) refreshProjects();
-  }, [healthy, refreshProjects]);
+    if (startupReady) refreshProjects();
+  }, [startupReady, refreshProjects]);
 
   useEffect(() => {
-    if (!healthy || startupUpdateCheckedRef.current) return;
-    startupUpdateCheckedRef.current = true;
-    let cancelled = false;
-
-    (async () => {
-      const settings = await getSettings().catch(() => null);
-      const updateSettings = ((settings?.app_update as any) || {}) as {
-        check_on_startup?: boolean;
-        auto_install_on_startup?: boolean;
-      };
-      const autoInstall = Boolean(updateSettings.auto_install_on_startup);
-      const checkOnStartup = autoInstall || updateSettings.check_on_startup !== false;
-      if (!checkOnStartup) return;
-
-      let update = null as Awaited<ReturnType<typeof checkForAppUpdate>>;
-      try {
-        update = await checkForAppUpdate({ timeoutMs: 12_000 });
-        if (cancelled || !update) return;
-
-        if (recordingRef.current) {
-          showToast({
-            kind: "info",
-            text: `Seam ${update.version} を利用できます。録音終了後に設定から更新してください`,
-            ttl: 7000,
-          });
-          await closeAppUpdate(update);
-          return;
-        }
-
-        if (!autoInstall) {
-          showToast({
-            kind: "info",
-            text: `Seam ${update.version} を利用できます`,
-            ttl: 8000,
-            onClick: () => setShowSettings(true),
-            hoverHint: "設定を開く",
-          });
-          await closeAppUpdate(update);
-          return;
-        }
-
-        showToast({
-          kind: "info",
-          text: `Seam ${update.version} にアップデートします`,
-          ttl: 5000,
-        });
-        await installAndRelaunchAppUpdate(update, undefined, {
-          shouldContinue: () => !recordingRef.current,
-          abortMessage: "録音中のため自動アップデートを中断しました",
-        });
-      } catch (e) {
-        if (autoInstall && !cancelled) {
-          const message = updateErrorMessage(e);
-          const interrupted = message.includes("中断");
-          showToast({
-            kind: interrupted ? "info" : "err",
-            text: interrupted ? message : `自動アップデート失敗: ${message}`,
-            ttl: 7000,
-          });
-        } else {
-          console.warn("[updater] startup check failed", e);
-        }
-        await closeAppUpdate(update);
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [healthy]);
+    if (!startupReady || !startupUpdateNotice) return;
+    const text = startupUpdateNotice;
+    setStartupUpdateNotice(null);
+    showToast({
+      kind: text.startsWith("自動アップデート失敗") ? "err" : "info",
+      text,
+      ttl: 8000,
+      onClick: text.startsWith("Seam ") ? () => setShowSettings(true) : undefined,
+      hoverHint: text.startsWith("Seam ") ? "設定を開く" : undefined,
+    });
+  }, [startupReady, startupUpdateNotice]);
 
   // 録音デバイス設定は MainView 以外のツールバーからも使うため、アプリ全体で復元する。
   useEffect(() => {
-    if (!healthy) return;
+    if (!startupReady) return;
     let cancelled = false;
     Promise.all([listDevices({ refresh: true }), getSettings().catch(() => null)]).then(([r, s]) => {
       if (cancelled) return;
@@ -212,7 +274,7 @@ function AppInner() {
       if (mic) setMicDevice(mic.id);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [healthy, setCaptureSystem, setMicDevice]);
+  }, [startupReady, setCaptureSystem, setMicDevice]);
 
   // 「いずれかのタスクが進行中」な project_id の集合を維持。
   // pipelines (録音/文字起こし) + active summarize (要約) をマージする。
@@ -244,7 +306,7 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
-    if (!healthy) return;
+    if (!startupReady) return;
     refreshActiveProjects();
     // WS イベントで即時更新 (recording-context が再配信)
     const onEvt = () => refreshActiveProjects();
@@ -266,7 +328,7 @@ function AppInner() {
       for (const t of evts) window.removeEventListener(t, onEvt);
       window.clearInterval(id);
     };
-  }, [healthy, refreshActiveProjects]);
+  }, [startupReady, refreshActiveProjects]);
 
   // 録音が終わったら live モードからは抜ける
   useEffect(() => {
@@ -291,8 +353,8 @@ function AppInner() {
     getCurrentWindow().startDragging();
   };
 
-  if (!healthy) {
-    return <Splash />;
+  if (!startupReady) {
+    return <Splash startupUpdate={startupUpdatePending ? startupUpdate : null} />;
   }
 
   const openLive = () => {

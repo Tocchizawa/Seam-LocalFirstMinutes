@@ -31,9 +31,16 @@ interface StartupSnapshot {
   logs?: string[];
 }
 
+export interface SplashStartupUpdate {
+  message: string;
+  progress: number | null;
+  detail?: string | null;
+  isError?: boolean;
+}
+
 const MAX_LOG_LINES = 80;
 
-export function Splash() {
+export function Splash({ startupUpdate }: { startupUpdate?: SplashStartupUpdate | null }) {
   const [status, setStatus] = useState<BackendStatus>(DEFAULT_STATUS);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const nextIdRef = useRef(0);
@@ -106,11 +113,19 @@ export function Splash() {
     el.scrollTop = el.scrollHeight;
   }, [logs.length]);
 
-  const pct = typeof status.progress === "number"
-    ? Math.round(Math.max(0, Math.min(1, status.progress)) * 100)
+  const displayStatus: BackendStatus = startupUpdate
+    ? {
+      phase: startupUpdate.isError ? "error" : "update",
+      message: startupUpdate.message,
+      progress: startupUpdate.progress,
+      detail: startupUpdate.detail ?? null,
+    }
+    : status;
+  const pct = typeof displayStatus.progress === "number"
+    ? Math.round(Math.max(0, Math.min(1, displayStatus.progress)) * 100)
     : null;
-  const isReady = status.phase === "ready" && (pct ?? 0) >= 100;
-  const isError = status.phase === "error";
+  const isReady = !startupUpdate && status.phase === "ready" && (pct ?? 0) >= 100;
+  const isError = Boolean(startupUpdate?.isError) || displayStatus.phase === "error";
 
   return (
     <div className="splash-shell">
@@ -150,14 +165,14 @@ export function Splash() {
 
         <p
           className={`splash-message anim-fade-in ${isError ? "is-error" : ""}`}
-          key={status.message}
+          key={displayStatus.message}
         >
-          {status.message}
+          {displayStatus.message}
         </p>
 
-        {status.detail && (
+        {displayStatus.detail && (
           <p className={`splash-detail ${isError ? "is-error" : ""}`}>
-            {status.detail}
+            {displayStatus.detail}
           </p>
         )}
 
@@ -169,7 +184,11 @@ export function Splash() {
         )}
 
         <div ref={logScrollRef} className="splash-log">
-          {logs.length === 0 ? (
+          {startupUpdate ? (
+            <div className="splash-log-line anim-log-in">
+              起動処理へ進む前にアップデート確認を完了します
+            </div>
+          ) : logs.length === 0 ? (
             <div className="splash-log-empty">ログ待機中...</div>
           ) : (
             logs.map((line) => (
