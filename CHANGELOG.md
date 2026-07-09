@@ -3,6 +3,30 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.10] - 2026-07-09
+
+スプラッシュ画面の最初に起動時アップデート確認を挟み、自動アップデートを許可している場合は通常起動前に更新を適用する beta リリース。
+
+### Fixed
+
+- 起動時アップデート確認がバックエンド起動後に走っていたため、最初の読み込み画面で更新処理が見えない問題を修正
+- `auto_install_on_startup=true` の場合、スプラッシュ画面上で更新確認、ダウンロード、インストール、再起動まで進むように修正
+
+### Changed
+
+- 起動時アップデート確認または自動更新の継続判断が終わるまで、バックエンド起動と通常 UI 初期化を待機するように変更
+- 起動直後に backend API を呼ばずに `~/.seam/config.yaml` の `app_update` 設定を Tauri 側で読み取るように変更
+- 更新確認のみ有効な場合は、通常起動後に設定画面へ誘導する通知を表示するように変更
+- 自動更新失敗時はスプラッシュ上で失敗理由を短く表示し、その後通常起動へ進むように変更
+
+### Tests
+
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml -- --nocapture`
+- `pnpm --dir gui build`
+- `git diff --check`
+- `pnpm dev` で、更新ゲート後にバックエンドが起動し、`/health` と通常 API が 200 になることを確認
+- 対象PR: [#71](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/71)
+
 ## [0.2.0-beta.9] - 2026-07-09
 
 Codex CLI / Claude Code CLI などの CLI 型要約プロバイダで、接続不可や認証不備を早く検知できるようにした beta リリース。
