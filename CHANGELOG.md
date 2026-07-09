@@ -3,6 +3,33 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.8] - 2026-07-09
+
+アプリ起動時と設定画面から更新できる、署名検証付きのアプリ内アップデートを追加する beta リリース。
+
+### Added
+
+- Tauri updater によるアプリ内アップデート機能を追加
+- 設定画面に「アプリ」カテゴリを追加し、現在バージョン、起動時の更新確認、起動時自動アップデート、手動更新を操作できるように変更
+- 起動時は設定に従って更新確認し、ユーザーが `起動時に自動アップデート` を有効にした場合のみ自動インストールと再起動まで進めるように変更
+- GitHub Releases に `Seam.app.tar.gz` / `.sig` / `latest.json` を publish し、固定フィード `updater-feed/latest.json` を更新する release workflow を追加
+
+### Changed
+
+- 録音中は起動時・手動更新ともインストールや再起動に進まず、録音終了後に更新する案内に留めるように変更
+- Tauri capability を updater の check/download/install と process restart に限定
+- release 用 updater artifact は署名・公証済みの最終 `.app` から作成し、配布時は codesign / notarization 検証を必須化
+
+### Tests
+
+- `cargo check --manifest-path gui/src-tauri/Cargo.toml`
+- `pnpm --dir gui build`
+- `pnpm --dir gui tauri build --bundles app --ci`
+- `uv run python tests/test_summarize_foundation.py`
+- backend 一時起動で `app_update` の既定値と保存時正規化を確認
+- updater artifact / signature / feed JSON の生成を確認
+- 対象PR: [#66](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/66)
+
 ## [0.2.0-beta.7] - 2026-07-02
 
 マイク入力を Core Audio sidecar に寄せ、PortAudio の mic overflow 起因で自分の音声が途切れるケースを避ける beta リリース。
