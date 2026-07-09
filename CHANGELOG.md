@@ -3,6 +3,27 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.9] - 2026-07-09
+
+Codex CLI / Claude Code CLI などの CLI 型要約プロバイダで、接続不可や認証不備を早く検知できるようにした beta リリース。
+
+### Fixed
+
+- 手動要約の開始前に CLI 型プロバイダの preflight を行い、CLI 未導入、未認証、ネットワーク不可、プロバイダ障害、タイムアウトを早期にエラー表示するように修正
+- Codex CLI / Claude Code CLI の実行前にシェルのコマンドキャッシュを消去し、ログインシェル由来の PATH を読み直してから実行するように修正
+- Codex CLI の設定保存で `minutes_ai.codex` 配下の既存設定が失われないように修正
+
+### Changed
+
+- CLI 型プロバイダの接続失敗を `AUTH_FAILED` / `OFFLINE` / `TIMEOUT` / `PROVIDER_DOWN` などの扱いやすい分類へ正規化
+- 手動要約APIの前処理でプロバイダ状態を確認し、失敗時は長い要約処理へ進まず即時に応答するように変更
+
+### Tests
+
+- `uv run python tests/test_summarize_foundation.py tests/test_settings_api.py`
+- `pnpm --dir gui build`
+- 対象PR: [#68](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/68)
+
 ## [0.2.0-beta.8] - 2026-07-09
 
 アプリ起動時と設定画面から更新できる、署名検証付きのアプリ内アップデートを追加する beta リリース。
