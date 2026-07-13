@@ -3,6 +3,37 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.11] - 2026-07-13
+
+This beta release replaces the internal system audio capture path with ScreenCaptureKit and removes the previous Core Audio Tap fallback paths.
+
+### Fixed
+
+- Use ScreenCaptureKit as the only internal system audio capture backend.
+- Fail recording startup when requested internal audio cannot start, instead of continuing as a microphone-only recording.
+- Detect recordings where ScreenCaptureKit writes raw bytes for the full duration but produces only silence.
+- Reject removed backend modes such as `coreaudio_tap`, `tap`, and `blackhole`.
+
+### Changed
+
+- Update the native `audio-capture` sidecar to write ScreenCaptureKit audio as mono `f32le` raw PCM with metadata.
+- Update internal audio documentation and availability checks to describe ScreenCaptureKit-only capture.
+- Bundle the native sidecar with ScreenCaptureKit, CoreMedia, CoreGraphics, AppKit, CoreAudio, and AudioToolbox frameworks.
+
+### Tests
+
+- `uv run python tests/test_system_capture_failures.py`
+- `uv run python tests/test_recorder_preflight.py`
+- `uv run python tests/test_recording_pipeline_failures.py`
+- `PYTHONPATH=. uv run python tests/test_audio_leveling.py`
+- `uv run python tests/test_audio_devices.py`
+- `uv run python -m py_compile src/api/recording.py src/audio/recorder.py src/audio/system_capture.py src/config.py src/api/devices.py tests/test_system_capture_failures.py tests/test_recorder_preflight.py tests/test_recording_pipeline_failures.py tests/test_audio_leveling.py tests/test_audio_devices.py`
+- `xcrun clang ... sidecar/audio-capture/Sources/main.m -o /tmp/seam-audio-capture-test`
+- `cargo check --manifest-path gui/src-tauri/Cargo.toml`
+- `pnpm --dir gui build`
+- `pnpm build`
+- Target PR: [#75](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/75)
+
 ## [0.2.0-beta.10] - 2026-07-09
 
 スプラッシュ画面の最初に起動時アップデート確認を挟み、自動アップデートを許可している場合は通常起動前に更新を適用する beta リリース。
