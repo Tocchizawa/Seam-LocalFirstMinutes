@@ -1124,10 +1124,16 @@ async def start_recording(req: StartRequest) -> dict:
             session_id=session_id,
         )
     except Exception as e:
+        if req.capture_system and "内部音声" in str(e):
+            code = "SYSTEM_AUDIO_START_FAILED"
+            message = f"内部音声の録音開始失敗: {e}"
+        else:
+            code = "RECORDER_START_FAILED"
+            message = f"録音開始失敗: {e}"
         _cleanup_session(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
-        raise conflict("RECORDER_START_FAILED", f"録音開始失敗: {e}")
+        raise conflict(code, message)
     if req.capture_system and not result.get("has_system_audio"):
         system_error = str(result.get("system_error") or "内部音声を開始できませんでした")
         try:

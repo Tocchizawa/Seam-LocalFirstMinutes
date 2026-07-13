@@ -1,4 +1,4 @@
-"""Core Audio Process Tap sidecar でシステム内部音声をキャプチャする。"""
+"""ScreenCaptureKit sidecar でシステム内部音声をキャプチャする。"""
 from __future__ import annotations
 
 import json
@@ -14,7 +14,8 @@ from src.config import config
 
 logger = logging.getLogger(__name__)
 
-CORE_AUDIO_TAP_MIN_VERSION = (14, 2)
+SCREEN_CAPTURE_KIT_MIN_VERSION = (13, 0)
+RAW_SAMPLE_WIDTH = 4
 
 
 def _find_ffmpeg() -> str:
@@ -23,6 +24,7 @@ def _find_ffmpeg() -> str:
     # 配布ビルドは imageio_ffmpeg 同梱の静的 binary を優先
     try:
         import imageio_ffmpeg
+
         p = imageio_ffmpeg.get_ffmpeg_exe()
         if p and Path(p).exists():
             return p
@@ -41,22 +43,14 @@ def _find_ffmpeg() -> str:
 def _normalize_capture_method(value: object | None = None) -> str:
     raw = value
     if raw is None:
-        raw = config.get("recording", "system_capture", default="auto")
-    method = str(raw or "auto").strip().lower().replace("-", "_")
+        raw = config.get("recording", "system_capture", default="screencapturekit")
+    method = str(raw or "screencapturekit").strip().lower().replace("-", "_")
     aliases = {
-        "coreaudio": "coreaudio_tap",
-        "core_audio": "coreaudio_tap",
-        "core_audio_tap": "coreaudio_tap",
-        "process_tap": "coreaudio_tap",
-        "tap": "coreaudio_tap",
-        # 旧設定値。ScreenCaptureKit フォールバックは廃止したため Core Audio Tap 扱いに寄せる。
-        "sck": "auto",
-        "screen_capture_kit": "auto",
-        "screen_capturekit": "auto",
-        "screencapturekit": "auto",
-        "blackhole": "auto",
+        "sck": "screencapturekit",
+        "screen_capture_kit": "screencapturekit",
+        "screen_capturekit": "screencapturekit",
     }
-    return aliases.get(method, method if method else "auto")
+    return aliases.get(method, method if method else "screencapturekit")
 
 
 def _macos_version_tuple() -> tuple[int, int]:
@@ -72,10 +66,10 @@ def _macos_version_tuple() -> tuple[int, int]:
     return parts[0], parts[1]
 
 
-def _core_audio_tap_os_supported() -> bool:
+def _screen_capture_kit_os_supported() -> bool:
     if platform.system() != "Darwin":
         return False
-    return _macos_version_tuple() >= CORE_AUDIO_TAP_MIN_VERSION
+    return _macos_version_tuple() >= SCREEN_CAPTURE_KIT_MIN_VERSION
 
 
 def _find_audio_capture_sidecar() -> Path | None:
@@ -114,21 +108,17 @@ def _is_placeholder_sidecar(path: Path) -> bool:
         return False
 
 
-def _core_audio_tap_available() -> bool:
-    return _core_audio_tap_os_supported() and _find_audio_capture_sidecar() is not None
+def _screen_capture_kit_available() -> bool:
+    return _screen_capture_kit_os_supported() and _find_audio_capture_sidecar() is not None
 
 
 def is_available() -> bool:
-    method = _normalize_capture_method()
-    if method == "coreaudio_tap":
-        return _core_audio_tap_available()
-    return _core_audio_tap_available()
+    return _normalize_capture_method() == "screencapturekit" and _screen_capture_kit_available()
 
 
 class SystemAudioCapture:
     def __init__(self) -> None:
         self._running = False
-        self._wav_file = None
         self._raw_path: Path | None = None
         self._wav_path: Path | None = None
         self._meta_path: Path | None = None
@@ -142,6 +132,13 @@ class SystemAudioCapture:
         self._tail_stop = threading.Event()
         self._raw_format = "f32le"
         self._external_callback = None
+        self._sidecar_path: Path | None = None
+        self._read_offset = 0
+        self._raw_bytes_seen = 0
+        self._has_bytes = False
+        self._has_nonzero_audio = False
+        self._started_at = 0.0
+        self._last_byte_at = 0.0
 
     @property
     def error(self) -> str | None:
@@ -151,44 +148,79 @@ class SystemAudioCapture:
     def backend(self) -> str | None:
         return self._backend
 
-    def start(self, output_path: Path, sample_rate: int = 48000,
-              external_callback=None) -> None:
+    @property
+    def restart_count(self) -> int:
+        return 0
+
+    @property
+    def recovery_reasons(self) -> list[str]:
+        return []
+
+    @property
+    def recovery_gap_sec(self) -> float:
+        return 0.0
+
+    def get_diagnostics(self) -> dict:
+        return {
+            "backend": self._backend,
+            "bytes": self._current_raw_size(),
+            "sample_rate": self._sample_rate,
+            "raw_path": str(self._raw_path) if self._raw_path else None,
+            "has_bytes": self._has_bytes,
+            "has_audio": self._has_nonzero_audio,
+            "last_byte_age_sec": round(max(0.0, time.monotonic() - self._last_byte_at), 3)
+            if self._last_byte_at else None,
+            "restart_count": 0,
+            "restart_reasons": [],
+            "gap_sec": 0.0,
+        }
+
+    def start(self, output_path: Path, sample_rate: int = 48000, external_callback=None) -> None:
         if self._running:
             raise RuntimeError("Already capturing")
 
         self._error = None
         self._backend = None
         self._external_callback = external_callback
+        self._sample_rate = max(8000, min(192000, int(sample_rate or 48000)))
 
         method = _normalize_capture_method()
-        if method in {"auto", "coreaudio_tap"}:
-            try:
-                self._start_core_audio_tap(output_path)
-                return
-            except Exception as e:
-                self._error = f"Core Audio Tap のキャプチャ開始に失敗: {e}"
-                raise RuntimeError(self._error)
+        if method != "screencapturekit":
+            self._error = f"未対応の内部音声キャプチャ方式です: {method}"
+            raise RuntimeError(self._error)
 
-        self._error = f"未対応の内部音声キャプチャ方式です: {method}"
-        raise RuntimeError(self._error)
+        try:
+            self._start_screen_capture_kit(output_path)
+        except Exception as e:
+            self._error = f"ScreenCaptureKit のキャプチャ開始に失敗: {e}"
+            self._running = False
+            self._stop_sidecar_process()
+            raise RuntimeError(self._error) from e
 
-    def _start_core_audio_tap(self, output_path: Path) -> None:
-        if not _core_audio_tap_os_supported():
-            raise RuntimeError("Core Audio Tap は macOS 14.2+ でのみ利用できます")
+    def _start_screen_capture_kit(self, output_path: Path) -> None:
+        if not _screen_capture_kit_os_supported():
+            raise RuntimeError("ScreenCaptureKit 内部音声キャプチャは macOS 13.0+ でのみ利用できます")
 
         sidecar = _find_audio_capture_sidecar()
         if sidecar is None:
-            raise RuntimeError("Core Audio Tap sidecar が見つかりません")
+            raise RuntimeError("audio-capture sidecar が見つかりません")
 
-        self._backend = "coreaudio_tap"
-        self._raw_path = output_path.with_suffix(".raw")
+        self._backend = "screencapturekit"
+        self._sidecar_path = sidecar
         self._wav_path = output_path
+        self._raw_path = output_path.with_suffix(".raw")
         self._meta_path = output_path.with_suffix(".meta.json")
         self._raw_format = "f32le"
         self._stderr_lines = []
         self._tail_stop.clear()
+        self._read_offset = 0
+        self._raw_bytes_seen = 0
+        self._has_bytes = False
+        self._has_nonzero_audio = False
+        self._started_at = time.monotonic()
+        self._last_byte_at = 0.0
 
-        for path in (self._raw_path, self._meta_path):
+        for path in (self._raw_path, self._meta_path, self._wav_path):
             try:
                 path.unlink(missing_ok=True)
             except Exception:
@@ -197,8 +229,12 @@ class SystemAudioCapture:
         cmd = [
             str(sidecar),
             str(self._raw_path),
+            "--mode",
+            "screencapturekit",
             "--meta-path",
             str(self._meta_path),
+            "--sample-rate",
+            str(self._sample_rate),
         ]
         try:
             self._process = subprocess.Popen(
@@ -209,15 +245,33 @@ class SystemAudioCapture:
                 bufsize=1,
             )
         except Exception as e:
-            self._process = None
-            raise RuntimeError(f"Core Audio Tap sidecar の起動に失敗: {e}") from e
+            raise RuntimeError(f"audio-capture sidecar の起動に失敗: {e}") from e
 
         self._stderr_thread = threading.Thread(
             target=self._drain_sidecar_stderr,
             daemon=True,
-            name="coreaudio-tap-stderr",
+            name="screencapturekit-audio-stderr",
         )
         self._stderr_thread.start()
+
+        self._wait_for_metadata()
+        self._running = True
+        self._tail_thread = threading.Thread(
+            target=self._tail_raw_audio,
+            daemon=True,
+            name="screencapturekit-audio-raw-tail",
+        )
+        self._tail_thread.start()
+
+        logger.info(
+            "System audio capture started (ScreenCaptureKit %dHz -> %s)",
+            self._sample_rate,
+            output_path,
+        )
+
+    def _wait_for_metadata(self) -> None:
+        if self._meta_path is None:
+            raise RuntimeError("metadata path is not initialized")
 
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
@@ -227,37 +281,22 @@ class SystemAudioCapture:
                     raw_format = str(meta.get("format") or "f32le").lower()
                     if raw_format != "f32le":
                         raise RuntimeError(f"unsupported sidecar format: {raw_format}")
+                    channels = int(meta.get("channels") or 1)
+                    if channels != 1:
+                        raise RuntimeError(f"unsupported sidecar channel count: {channels}")
                     self._raw_format = raw_format
                     self._sample_rate = max(8000, min(192000, int(float(meta.get("sample_rate") or 48000))))
+                    return
                 except Exception as e:
-                    self._stop_sidecar_process()
-                    raise RuntimeError(f"Core Audio Tap metadata の読み込みに失敗: {e}") from e
+                    raise RuntimeError(f"ScreenCaptureKit metadata の読み込みに失敗: {e}") from e
 
-                if self._external_callback is not None:
-                    self._tail_thread = threading.Thread(
-                        target=self._tail_raw_audio,
-                        daemon=True,
-                        name="coreaudio-tap-raw-tail",
-                    )
-                    self._tail_thread.start()
-
-                self._running = True
-                logger.info(
-                    "System audio capture started (Core Audio Tap %dHz → %s)",
-                    self._sample_rate,
-                    output_path,
-                )
-                return
-
-            code = self._process.poll() if self._process is not None else None
+            process = self._process
+            code = process.poll() if process is not None else None
             if code is not None:
-                err = self._sidecar_error_tail()
-                self._stop_sidecar_process()
-                raise RuntimeError(f"Core Audio Tap sidecar exited early ({code}): {err}")
+                raise RuntimeError(f"ScreenCaptureKit sidecar exited early ({code}): {self._sidecar_error_tail()}")
             time.sleep(0.05)
 
-        self._stop_sidecar_process()
-        raise RuntimeError("Core Audio Tap sidecar のキャプチャ開始がタイムアウトしました")
+        raise RuntimeError("ScreenCaptureKit sidecar のキャプチャ開始がタイムアウトしました")
 
     def _drain_sidecar_stderr(self) -> None:
         process = self._process
@@ -273,52 +312,88 @@ class SystemAudioCapture:
                 if len(self._stderr_lines) > 40:
                     self._stderr_lines = self._stderr_lines[-40:]
                 if "ERROR" in text:
-                    logger.warning("Core Audio Tap sidecar: %s", text)
+                    logger.warning("ScreenCaptureKit sidecar: %s", text)
                 else:
-                    logger.info("Core Audio Tap sidecar: %s", text)
+                    logger.info("ScreenCaptureKit sidecar: %s", text)
         except Exception as e:
-            logger.debug("Core Audio Tap stderr drain ended: %s", e)
+            logger.debug("ScreenCaptureKit stderr drain ended: %s", e)
 
     def _sidecar_error_tail(self) -> str:
         return "\n".join(self._stderr_lines[-8:]).strip() or "no stderr"
 
     def _tail_raw_audio(self) -> None:
-        callback = self._external_callback
-        if callback is None:
-            return
         raw_path = self._raw_path
-        offset = 0
+        if raw_path is None:
+            return
+
         pending = b""
-        frame_size = 4
+        callback = self._external_callback
         while True:
             try:
                 size = raw_path.stat().st_size if raw_path.exists() else 0
-                if size > offset:
+                if size > self._read_offset:
                     with open(raw_path, "rb") as f:
-                        f.seek(offset)
-                        data = f.read(size - offset)
-                    offset = size
-                    if data:
-                        payload = pending + data
-                        aligned = (len(payload) // frame_size) * frame_size
-                        if aligned > 0:
+                        f.seek(self._read_offset)
+                        data = f.read(size - self._read_offset)
+                    self._read_offset = size
+                    payload = pending + data
+                    aligned = (len(payload) // RAW_SAMPLE_WIDTH) * RAW_SAMPLE_WIDTH
+                    if aligned > 0:
+                        chunk = payload[:aligned]
+                        self._update_audio_stats(chunk)
+                        if callback is not None:
                             import numpy as np
-                            samples = np.frombuffer(payload[:aligned], dtype="<f4").copy()
+
+                            samples = np.frombuffer(chunk, dtype="<f4").copy()
                             try:
                                 callback(samples, self._sample_rate)
                             except Exception as e:
-                                logger.error("Core Audio Tap PCM callback error: %s", e)
-                        pending = payload[aligned:]
+                                logger.error("ScreenCaptureKit PCM callback error: %s", e)
+                    pending = payload[aligned:]
+
                 if self._tail_stop.is_set():
-                    latest_size = raw_path.stat().st_size if raw_path.exists() else offset
-                    if latest_size <= offset:
+                    latest_size = raw_path.stat().st_size if raw_path.exists() else size
+                    if latest_size <= self._read_offset:
                         break
                 time.sleep(0.05)
             except Exception as e:
                 if self._tail_stop.is_set():
                     break
-                logger.warning("Core Audio Tap raw tail error: %s", e)
+                logger.warning("ScreenCaptureKit raw tail error: %s", e)
                 time.sleep(0.1)
+
+    def _update_audio_stats(self, data: bytes) -> None:
+        if not data:
+            return
+        now = time.monotonic()
+        self._has_bytes = True
+        self._last_byte_at = now
+        self._raw_bytes_seen = max(self._raw_bytes_seen, self._read_offset)
+        try:
+            import numpy as np
+
+            samples = np.frombuffer(data, dtype="<f4")
+            if samples.size == 0:
+                return
+            rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float32)))))
+            if rms > 0.0001:
+                self._has_nonzero_audio = True
+        except Exception:
+            pass
+
+    @staticmethod
+    def _aligned_byte_count(value: int | None) -> int:
+        if not value or value <= 0:
+            return 0
+        return int(value // RAW_SAMPLE_WIDTH * RAW_SAMPLE_WIDTH)
+
+    def _current_raw_size(self) -> int:
+        try:
+            if self._raw_path is not None and self._raw_path.exists():
+                return self._aligned_byte_count(self._raw_path.stat().st_size)
+        except Exception:
+            pass
+        return self._aligned_byte_count(self._raw_bytes_seen)
 
     def _stop_sidecar_process(self) -> None:
         process = self._process
@@ -335,40 +410,52 @@ class SystemAudioCapture:
         finally:
             self._process = None
 
+    def _convert_raw_to_wav(self) -> None:
+        if self._raw_path is None or self._wav_path is None:
+            return
+        if not self._raw_path.exists() or self._current_raw_size() <= 0:
+            self._error = "System audio conversion failed: no captured ScreenCaptureKit audio data"
+            logger.error(self._error)
+            return
+
+        try:
+            result = subprocess.run([
+                _find_ffmpeg(),
+                "-y",
+                "-f",
+                "f32le",
+                "-ar",
+                str(self._sample_rate),
+                "-ac",
+                "1",
+                "-i",
+                str(self._raw_path),
+                "-c:a",
+                "pcm_s16le",
+                str(self._wav_path),
+            ], capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                raise RuntimeError(f"ffmpeg exited {result.returncode}: {stderr[-500:]}")
+            if not (self._wav_path.exists() and self._wav_path.stat().st_size > 44):
+                raise RuntimeError("converted WAV was not created or is empty")
+            self._raw_path.unlink(missing_ok=True)
+            if self._meta_path:
+                self._meta_path.unlink(missing_ok=True)
+            logger.info("System audio: ScreenCaptureKit raw -> %s", self._wav_path.name)
+        except Exception as e:
+            self._error = f"System audio conversion failed: {e}"
+            logger.error("System audio conversion failed: %s", e)
+
     def stop(self) -> None:
         if not self._running:
             return
         self._running = False
 
-        if self._backend == "coreaudio_tap":
-            self._stop_sidecar_process()
-            self._tail_stop.set()
-            if self._tail_thread:
-                self._tail_thread.join(timeout=2)
-                self._tail_thread = None
-
-        # ffmpeg: raw float32 mono (config sample_rate) → WAV mono
-        if self._raw_path and self._raw_path.exists():
-            import subprocess
-            try:
-                result = subprocess.run([
-                    _find_ffmpeg(), "-y",
-                    "-f", "f32le", "-ar", str(self._sample_rate), "-ac", "1",
-                    "-i", str(self._raw_path),
-                    str(self._wav_path),
-                ], capture_output=True, text=True, timeout=120)
-                if result.returncode != 0:
-                    stderr = (result.stderr or "").strip()
-                    raise RuntimeError(f"ffmpeg exited {result.returncode}: {stderr[-500:]}")
-                if not (self._wav_path.exists() and self._wav_path.stat().st_size > 44):
-                    raise RuntimeError("converted WAV was not created or is empty")
-                self._raw_path.unlink(missing_ok=True)
-                if self._meta_path:
-                    self._meta_path.unlink(missing_ok=True)
-                logger.info("System audio: raw → %s", self._wav_path.name)
-            except Exception as e:
-                self._error = f"System audio conversion failed: {e}"
-                logger.error("System audio conversion failed: %s", e)
-
-        self._process = None
+        self._stop_sidecar_process()
+        self._tail_stop.set()
+        if self._tail_thread:
+            self._tail_thread.join(timeout=2)
+            self._tail_thread = None
+        self._convert_raw_to_wav()
         logger.info("System audio capture stopped")

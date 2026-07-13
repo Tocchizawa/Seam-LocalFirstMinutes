@@ -14,7 +14,7 @@
 | **音声認識** | faster-whisper | 1.0+ | ストリーミング文字起こし |
 | **LLM** | Ollama + Qwen3 8B | latest | コンテキスト調査・議事録生成 |
 | **マイク録音** | Core Audio Audio Queue | macOS | マイク入力 (Objective-C sidecar) |
-| **内部音声** | Core Audio Process Tap | macOS 14.2+ | システム音声キャプチャ (Objective-C sidecar) |
+| **内部音声** | ScreenCaptureKit audio stream | macOS 13.0+ | システム音声キャプチャ (Objective-C sidecar) |
 | **音声処理** | ffmpeg | 7+ | mixed WAV→FLAC 変換 (.app同梱) |
 | **ファイル読取** | pymupdf | 1.24+ | PDF (Context Agent) |
 | **ファイル読取** | python-docx | 1.1+ | Word (Context Agent) |
@@ -34,7 +34,7 @@
 3つの役割を1つで担える:
 1. **GUI**: 軽量 (~10MB)、メモリを AI に回せる
 2. **Sidecar管理**: Python Backend の起動・監視・停止（Ollama は Python が Phase 2 で起動）
-3. **Sidecar管理**: Core Audio Tap sidecar と Python Backend の起動に必要なリソース/環境変数を管理
+3. **Sidecar管理**: native audio sidecar と Python Backend の起動に必要なリソース/環境変数を管理
 
 ### 2.2 FastAPI
 
@@ -42,14 +42,14 @@
 - async でパイプラインの非同期実行
 - Whisper の `transcribe()` は同期関数だが `run_in_executor` で共存
 
-### 2.3 音声キャプチャ (Core Audio sidecar)
+### 2.3 音声キャプチャ (native audio sidecar)
 
 - マイク入力は **Audio Queue** を使い、Objective-C sidecar が RAW PCM (`float32`, mono, 16kHz) を書き出す。Python は raw を追尾して `mic.wav` とリアルタイムミックスへ流す。
-- **Core Audio Process Tap** を使う。音声専用 API のため、ScreenCaptureKit / ReplayKit 経路で長時間録音中に音声 callback が止まるリスクを避けやすい。
+- 内部音声は **ScreenCaptureKit audio stream** を使う。`SCStreamOutputTypeAudio` を Objective-C sidecar で受け取り、mono `float32` RAW PCM と metadata JSON を書き出す。
 - **Objective-C sidecar バイナリ**として実装し、Tauri の resources に同梱する。
-- sidecar は RAW PCM (`float32`, mono, native sample rate) とメタデータ JSON を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。
-- ScreenCaptureKit / BlackHole へのフォールバックは行わない。macOS 14.2 未満、sidecar 起動失敗、Core Audio Tap 権限/初期化失敗時は内部音声録音を開始失敗として扱う。
-- Core Audio Tap 用に `NSAudioCaptureUsageDescription` を Info.plist に含める。
+- sidecar は `system.raw` (`float32`, mono, requested sample rate) と `system.meta.json` を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。
+- 内部音声の取得経路は ScreenCaptureKit のみ。macOS 13.0 未満、sidecar 起動失敗、ScreenCaptureKit 権限/初期化失敗時は内部音声録音を開始失敗として扱う。
+- システム音声取得用に `NSAudioCaptureUsageDescription` を Info.plist に含める。
 
 ### 2.4 faster-whisper
 
@@ -90,7 +90,7 @@ GijirokuN.app/Contents/
 │   ├── backend/                 # PyInstaller --onedir 出力
 │   │   ├── seam-backend     # エントリーポイント
 │   │   └── _internal/           # Python + 依存 (~3GB)
-│   ├── audio-capture            # Objective-C sidecar (Core Audio Tap)
+│   ├── audio-capture            # Objective-C sidecar (ScreenCaptureKit + Core Audio mic)
 │   ├── ollama/ollama            # Ollama バイナリ (~200MB)
 │   └── ffmpeg/ffmpeg            # ffmpeg バイナリ (~80MB)
 └── Info.plist
@@ -118,7 +118,7 @@ GijirokuN.app/Contents/
 3. Whisper medium ダウンロード → プログレスバー
 4. macOS 権限リクエスト:
    → マイクアクセス
-   → システム音声取得 (Core Audio Tap 用)
+   → システム音声取得
 5. 完了 → メイン画面
 ```
 
@@ -161,7 +161,7 @@ Seam/
 │   │       ├── main.rs
 │   │       └── sidecar.rs   # Python Backend + native sidecar 起動管理
 │   ├── sidecar/
-│   │   └── audio-capture/   # Objective-C sidecar (Core Audio Tap)
+│   │   └── audio-capture/   # Objective-C sidecar (ScreenCaptureKit + Core Audio mic)
 │   │       └── Sources/main.m
 │   ├── src/                 # React
 │   │   ├── pages/
@@ -192,8 +192,8 @@ Seam/
 | リスク | 影響 | 対策 |
 |--------|------|------|
 | PyInstaller バンドル ~3GB | 初回DLが大きい | UPX圧縮 + 不要依存除外 |
-| Core Audio Tap macOS 14.2+ 限定 | 古い macOS 非対応 | 内部音声録音を利用不可にし、マイク録音のみで継続できるようにする |
-| システム音声 sidecar 停止 | 相手音声が途中から消える | 停止検知 watchdog と coverage 検証で正常完了扱いにしない |
+| ScreenCaptureKit macOS 13.0+ 限定 | 古い macOS 非対応 | 内部音声を要求した録音は開始失敗にし、OS/権限の確認を促す |
+| システム音声 sidecar 停止/無音化 | 相手音声が途中から消える | 開始失敗・空ファイル・coverage 不足を正常完了扱いにしない |
 | native sidecar 停止 | 音声データロス | RAW PCM を常にファイル書き込みし、Python 側で coverage を検証 |
 | ストリーミング Whisper 遅延蓄積 | 文字起こしが遅れる | チャンク長動的調整 + 1秒オーバーラップ + run_in_executor |
 | 3時間会議で Qwen3 コンテキスト超え | 議事録品質低下 | 話題ベースチャンク分割 + 段階的要約 |

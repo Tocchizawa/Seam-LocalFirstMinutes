@@ -20,7 +20,7 @@ async def get_devices(refresh: bool = False) -> dict:
 
     return {
         "devices": list_input_devices(refresh=refresh_devices),
-        # 既存UI互換のキー名。実態は Core Audio Tap の利用可否。
+        # 既存UI互換のキー名。実態は ScreenCaptureKit 内部音声取得の利用可否。
         "screen_capture_available": system_audio_available,
         "system_audio_available": system_audio_available,
         "devices_refreshed": refresh_devices,

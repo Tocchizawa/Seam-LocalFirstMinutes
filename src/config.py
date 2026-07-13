@@ -128,7 +128,7 @@ DEFAULTS: dict[str, Any] = {
     "recording": {
         "mic_device": None,
         "mic_capture": "coreaudio_sidecar",
-        "system_capture": "auto",
+        "system_capture": "screencapturekit",
         "sample_rate": 16000,
         "channels": 1,
         "last_project_id": None,
@@ -484,23 +484,15 @@ class Config:
         if not isinstance(recording, dict):
             recording = {}
             self._data["recording"] = recording
-        method = str(recording.get("system_capture", "auto") or "auto").strip().lower().replace("-", "_")
+        method = str(recording.get("system_capture", "screencapturekit") or "screencapturekit").strip().lower().replace("-", "_")
         method_aliases = {
-            "coreaudio": "coreaudio_tap",
-            "core_audio": "coreaudio_tap",
-            "core_audio_tap": "coreaudio_tap",
-            "process_tap": "coreaudio_tap",
-            "tap": "coreaudio_tap",
-            # 旧設定値。ScreenCaptureKit / BlackHole フォールバックは廃止したため auto に戻す。
-            "sck": "auto",
-            "screen_capture_kit": "auto",
-            "screen_capturekit": "auto",
-            "screencapturekit": "auto",
-            "blackhole": "auto",
+            "sck": "screencapturekit",
+            "screen_capture_kit": "screencapturekit",
+            "screen_capturekit": "screencapturekit",
         }
         method = method_aliases.get(method, method)
-        if method not in {"auto", "coreaudio_tap"}:
-            method = "auto"
+        if method not in {"screencapturekit"}:
+            method = "screencapturekit"
         recording["system_capture"] = method
         mic_capture = str(recording.get("mic_capture", "coreaudio_sidecar") or "coreaudio_sidecar").strip().lower().replace("-", "_")
         mic_aliases = {
@@ -588,7 +580,6 @@ class Config:
             )
         except Exception:
             watchdog["max_missing_sec"] = 20.0
-
         whisper = self._data.setdefault("whisper", {})
         if not isinstance(whisper, dict):
             whisper = {}

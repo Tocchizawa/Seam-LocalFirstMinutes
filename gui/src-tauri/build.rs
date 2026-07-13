@@ -16,7 +16,7 @@ fn ensure_audio_capture_placeholder() {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let content = b"#!/usr/bin/env sh\necho \"CORE_AUDIO_TAP_ERROR audio-capture sidecar has not been built\" >&2\nexit 1\n";
+    let content = b"#!/usr/bin/env sh\necho \"SCREEN_CAPTURE_KIT_AUDIO_ERROR audio-capture sidecar has not been built\" >&2\nexit 1\n";
     if std::fs::write(&path, content).is_ok() {
         #[cfg(unix)]
         {

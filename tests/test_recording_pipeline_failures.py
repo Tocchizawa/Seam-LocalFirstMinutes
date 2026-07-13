@@ -108,7 +108,7 @@ class FakeStartRecorder:
         return {
             "session_id": _kwargs.get("session_id"),
             "has_system_audio": False,
-            "system_error": "Core Audio Tap sidecar failed",
+            "system_error": "ScreenCaptureKit sidecar failed",
         }
 
     def stop(self) -> dict:
