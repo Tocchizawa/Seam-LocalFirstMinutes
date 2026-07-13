@@ -51,7 +51,7 @@ whisper:
 recording:
   mic_device: null              # null = システム既定
   mic_capture: "coreaudio_sidecar" # coreaudio_sidecar / sounddevice
-  system_capture: "auto"        # auto / coreaudio_tap
+  system_capture: "screencapturekit" # screencapturekit
   sample_rate: 16000
   channels: 1
   system_capture_watchdog:
@@ -139,7 +139,7 @@ projects:
   "duration_sec": 2700,
   "devices": {
     "mic": { "name": "MacBook Pro Microphone", "device_id": 1 },
-    "system": { "method": "coreaudio_tap" }
+    "system": { "method": "screencapturekit" }
   },
   "stages": {
     "recording":              { "status": "completed", "completed_at": "2026-04-03T15:15:00" },
@@ -160,7 +160,8 @@ projects:
 ~/.seam/sessions/{session_id}/
 ├── state.json
 ├── mic.raw / mic.wav
-├── system.raw / system.wav
+├── system.raw / system.meta.json
+├── system.wav
 ├── combined.flac
 ├── streaming_transcript.json
 ├── context.json
@@ -329,13 +330,13 @@ def build_transcript_text(transcript: list[dict]) -> str:
 ```
 録音開始
   │
-  ├── RAW PCM 書き込み (mic.raw, system.raw)   [一時]
+  ├── RAW PCM 書き込み (mic.raw, system.raw) [一時]
   ├── リアルタイムミックス → Whisper → GUI       [一時]
   │
 録音停止
   │
   ├── Whisper バッファ flush                     [保存用 transcript の確定]
-  ├── RAW → WAV 変換                            [一時]
+  ├── system.raw → system.wav 変換               [一時]
   ├── realtime mixed stream → combined.flac      [再生・手動再文字起こし用]
   │
 コンテキスト調査

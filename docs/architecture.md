@@ -7,7 +7,7 @@
 │                     GUI (Tauri + React)                       │
 │  プロジェクト管理 / 録音操作 / リアルタイム表示 / 議事録ビューア │
 │                                                              │
-│  Rust側: native sidecar (Core Audio Tap) / Python Backend 管理│
+│  Rust側: native audio sidecar / Python Backend 管理             │
 └────────────────────────┬─────────────────────────────────────┘
                          │ HTTP / WebSocket
 ┌────────────────────────▼─────────────────────────────────────┐
@@ -73,9 +73,9 @@ gui/
 │       ├── main.rs               # ウィンドウ管理
 │       └── sidecar.rs            # Python Backend + native sidecar 起動・管理
 ├── sidecar/
-│   └── audio-capture/            # Objective-C sidecar (Core Audio Tap)
+│   └── audio-capture/            # Objective-C sidecar (ScreenCaptureKit + Core Audio mic)
 │       └── Sources/
-│           └── main.m            # Core Audio Tap 音声キャプチャ → raw PCM 書き出し
+│           └── main.m            # システム音声/マイク → raw PCM 書き出し
 │
 └── src/
     ├── App.tsx
@@ -126,7 +126,7 @@ src/
 ├── audio/
 │   ├── recorder.py          # 2トラック同時録音オーケストレーション
 │   ├── mic_capture.py       # sounddevice でマイク録音
-│   ├── system_capture.py    # Core Audio Tap sidecar からシステム音声受信
+│   ├── system_capture.py    # ScreenCaptureKit sidecar からシステム音声受信
 │   ├── mixer.py             # リアルタイムミキシング + 自動ゲイン補正
 │   ├── devices.py           # デバイス一覧
 │   ├── raw_writer.py        # RAW PCM 書き込み
@@ -172,7 +172,7 @@ GijirokuN.app/Contents/
 │   ├── backend/                 # PyInstaller --onedir 出力
 │   │   ├── seam-backend     # エントリーポイント
 │   │   └── _internal/           # Python + 依存 (~3GB)
-│   ├── audio-capture            # native sidecar (Core Audio Tap 音声キャプチャ)
+│   ├── audio-capture            # native audio sidecar
 │   ├── ollama/ollama            # Ollama バイナリ (~200MB)
 │   └── ffmpeg/ffmpeg            # ffmpeg バイナリ (~80MB)
 └── Info.plist
@@ -195,7 +195,7 @@ GijirokuN.app/Contents/
 
 ```
 [native sidecar]                   [Python Backend]
-Core Audio Tap                         sounddevice
+ScreenCaptureKit                       sounddevice
   │                                      │
   │ raw PCM (float32, mono)              │ audio buffer
   │ + metadata JSON                      │
@@ -211,23 +211,22 @@ raw file tail ───(raw PCM)────→ system_capture.py
                                          │
                               ┌──────────┼──────────┐
                               ▼          ▼          ▼
-                          mic.raw    system.raw   → WebSocket → GUI
-                          (個別保存)  (個別保存)    (文字起こし結果)
+                          mic.raw    system.raw → WebSocket → GUI
+                          (個別保存)  (個別保存)   (文字起こし結果)
 ```
 
 #### IPC プロトコル (native sidecar → Python)
 
-- **トランスポート**: sidecar が `system.raw` に追記し、Python が同ファイルを tail してリアルタイムミックスへ渡す
+- **トランスポート**: sidecar が `system.raw` に追記し、Python が raw を tail してリアルタイムミックスへ渡す
 - **メタデータ**: `system.meta.json` に backend / format / sample_rate / channels を記録
-- **フォーマット**: Raw PCM (`float32`, mono, little-endian, native sample rate)
-- **停止後変換**: Python 側が ffmpeg で `system.raw` → `system.wav` へ変換する
-- **フォールバックなし**: Core Audio Tap が使えない場合、内部音声録音は開始失敗として扱う
+- **フォーマット**: Raw PCM (`float32`, mono, little-endian, metadata の sample rate)
+- **停止後変換**: Python 側が ffmpeg で `system.raw` を `system.wav` へ変換する
+- **取得経路固定**: 内部音声は ScreenCaptureKit のみ。代替の内部音声取得経路は持たない
 
 #### トラック同期
 
-- 両トラックに `time.monotonic_ns()` でタイムスタンプ付与
-- リアルタイムミキサーがタイムスタンプでアラインメント
-- 3時間でも monotonic clock のドリフトは無視可能（同一マシン上）
+- リアルタイムミキサーは mic timeline を基準にし、system 欠損分は無音で埋める
+- DB 保存用 transcript は録音中に Whisper へ投入した realtime mixed stream を正とする
 
 #### ffmpeg の使用箇所
 
@@ -240,7 +239,7 @@ raw file tail ───(raw PCM)────→ system_capture.py
 #### クラッシュ耐性
 
 - RAW PCM で常にファイルに書き込み（WAVヘッダ不要→途中切断でもデータ有効）
-- 正常停止時: RAW → WAV 変換 (ffmpeg)
+- 正常停止時: `system.raw` → `system.wav` 変換 (ffmpeg)
 - 異常終了後の再起動: RAW ファイル検出 → WAV 変換 → stopped_at を RAW ファイル末尾時刻で自動設定 → Phase 2 から再開
 
 ### 3.3 ストリーミング Whisper
@@ -561,7 +560,7 @@ class PipelineStage(Enum):
 ~/.seam/sessions/{session_id}/
 ├── state.json                   # パイプライン状態
 ├── mic.raw → mic.wav            # ← 完了後に全削除
-├── system.raw → system.wav      # ←
+├── system.raw → system.wav
 ├── combined.flac                # ←
 ├── streaming_transcript.json    # ←
 ├── context.json                 # ←
@@ -657,9 +656,10 @@ ws://localhost:18900/ws
 | Ollama 未起動 | Python Backend (startup.py) が Phase 2 開始時に自動起動。失敗時はエラー表示 |
 | モデル未DL | セットアップウィザードへ誘導 |
 | Python Backend 起動失敗 | 3回リトライ → エラー表示 |
-| Core Audio Tap 権限/初期化失敗 | 内部音声録音を開始失敗扱いにし、システム音声取得権限と sidecar 配置を確認する |
+| ScreenCaptureKit 権限/初期化失敗 | 内部音声録音を開始失敗扱いにし、システム音声取得権限と sidecar 配置を確認する |
 | マイクデバイス未検出 | デバイス一覧を表示して選択を促す |
 | sidecar 停止 (native↔Python) | RAW PCM はファイルに保持。停止後に coverage を検証し、内部音声欠落を正常完了扱いしない |
+| 内部音声の全時間無音 | ScreenCaptureKit の RAW bytes はあるが非ゼロ音声が検出できない場合、内部音声欠落として正常完了扱いしない |
 | 録音中クラッシュ | RAW PCM 保持 → 再起動後に検出 → stopped_at を RAW ファイル末尾時刻で自動設定 → Phase 2 から再開提案 |
 | Tauri 終了 (録音後処理中) | Python Backend に SIGTERM → state.json を保存して graceful shutdown → 再起動後に current_stage から再開 |
 | Whisper OOM | 小さいモデルへのフォールバック提案 |

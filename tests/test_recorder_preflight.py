@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.audio import recorder as recorder_module
 from src.audio.recorder import Recorder
 
 
@@ -106,6 +108,72 @@ def test_system_audio_near_full_length_is_ok() -> None:
     assert msg is None
 
 
+def test_system_audio_full_length_silence_is_reported() -> None:
+    rec = Recorder()
+    rec._capture_system_requested = True
+    rec._system_capture_started = True
+    rec._system_coverage_settings = lambda: (True, 60.0, 0.85, 20.0)  # type: ignore[method-assign]
+
+    msg = rec._validate_system_audio_coverage(
+        mic_duration=600.0,
+        system_duration=600.0,
+        elapsed=600.0,
+        sys_ok=True,
+        system_diagnostics={"has_bytes": True, "has_audio": False},
+    )
+
+    assert msg is not None
+    assert "only silence" in msg
+    assert "全時間で無音" in msg
+
+
+def test_short_system_audio_silence_is_not_reported() -> None:
+    rec = Recorder()
+    rec._capture_system_requested = True
+    rec._system_capture_started = True
+    rec._system_coverage_settings = lambda: (True, 60.0, 0.85, 20.0)  # type: ignore[method-assign]
+
+    msg = rec._validate_system_audio_coverage(
+        mic_duration=12.0,
+        system_duration=12.0,
+        elapsed=12.0,
+        sys_ok=True,
+        system_diagnostics={"has_bytes": True, "has_audio": False},
+    )
+
+    assert msg is None
+
+
+def test_system_capture_failure_prevents_mic_only_start() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        old_sessions_dir = recorder_module.SESSIONS_DIR
+        try:
+            recorder_module.SESSIONS_DIR = Path(td)
+            rec = Recorder()
+            mic_started: list[bool] = []
+
+            rec._mic_capture_method = lambda: "coreaudio_sidecar"  # type: ignore[method-assign]
+            rec._resolve_mic_device_index_for_sidecar = lambda _device: None  # type: ignore[method-assign]
+            rec._start_coreaudio_mic_capture = lambda: mic_started.append(True)  # type: ignore[method-assign]
+
+            def fail_system() -> bool:
+                raise RuntimeError("ScreenCaptureKit unavailable")
+
+            rec._start_system_capture = fail_system  # type: ignore[method-assign]
+
+            try:
+                rec.start(capture_system=True, session_id="system-failure")
+                raised = False
+            except RuntimeError as e:
+                raised = "内部音声" in str(e)
+
+            assert raised
+            assert mic_started == []
+            assert not rec.is_recording
+        finally:
+            recorder_module.SESSIONS_DIR = old_sessions_dir
+
+
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
     failed = 0
     for test in tests:
@@ -129,4 +197,7 @@ if __name__ == "__main__":
         test_error_message_separates_permission_from_portaudio_recovery,
         test_system_audio_short_track_is_reported,
         test_system_audio_near_full_length_is_ok,
+        test_system_audio_full_length_silence_is_reported,
+        test_short_system_audio_silence_is_not_reported,
+        test_system_capture_failure_prevents_mic_only_start,
     ]))

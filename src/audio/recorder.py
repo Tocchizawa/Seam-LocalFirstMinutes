@@ -1,7 +1,7 @@
-"""2トラック録音: マイク + Core Audio Tap (内部音声)
+"""2トラック録音: マイク + ScreenCaptureKit (内部音声)
 
 - mic: Core Audio sidecar → WAV 直接書き込み
-- system: Core Audio Tap sidecar → WAV 直接書き込み
+- system: ScreenCaptureKit sidecar → WAV 直接書き込み
 - combined.flac は Whisper に渡した realtime mixed stream から API 層で生成
 """
 from __future__ import annotations
@@ -449,6 +449,42 @@ class Recorder:
             device_name or "default",
         )
 
+    def _start_system_capture(self) -> bool:
+        from src.audio.system_capture import SystemAudioCapture, is_available
+
+        if not is_available():
+            raise RuntimeError("ScreenCaptureKit 内部音声キャプチャが利用できません")
+        if self._sys_wav is None:
+            raise RuntimeError("system output path is not initialized")
+
+        rec_cfg = config.get("recording", default={}) or {}
+        sys_rate_raw = rec_cfg.get("sample_rate", SAMPLE_RATE)
+        try:
+            sys_rate = int(sys_rate_raw)
+        except Exception:
+            sys_rate = SAMPLE_RATE
+        sys_rate = max(8000, min(48000, sys_rate))
+        self._sys_capture = SystemAudioCapture()
+        self._sys_capture.start(
+            self._sys_wav,
+            sample_rate=sys_rate,
+            external_callback=self._on_system_pcm,
+        )
+        self._system_capture_started = True
+        return True
+
+    def _stop_system_capture_after_failed_start(self) -> None:
+        capture = self._sys_capture
+        if capture is None:
+            return
+        try:
+            capture.stop()
+        except Exception as e:
+            logger.warning("System capture cleanup after failed start failed: %s", e)
+        finally:
+            self._sys_capture = None
+            self._system_capture_started = False
+
     def start(
         self,
         mic_device: int | None = None,
@@ -490,6 +526,22 @@ class Recorder:
         self._recording = True
         self._start_time = time.monotonic()
 
+        # Start system audio first. If it is requested and cannot start,
+        # fail the recording before opening the microphone.
+        has_system = False
+        sys_error = None
+        if capture_system:
+            try:
+                has_system = self._start_system_capture()
+            except Exception as e:
+                sys_error = str(e)
+                self._system_capture_start_error = sys_error
+                self._recording = False
+                self._error = sys_error
+                self._stop_system_capture_after_failed_start()
+                logger.warning("System capture failed: %s", e)
+                raise RuntimeError(f"内部音声の録音開始失敗: {sys_error}") from e
+
         # Start mic
         if mic_method == "coreaudio_sidecar":
             try:
@@ -497,42 +549,13 @@ class Recorder:
             except Exception as e:
                 self._recording = False
                 self._error = str(e)
+                self._stop_system_capture_after_failed_start()
                 logger.error("Mic capture failed: %s", e)
                 raise
         else:
             self._mic_backend = "sounddevice"
             self._mic_thread = threading.Thread(target=self._record_mic, daemon=True)
             self._mic_thread.start()
-
-        # Start system audio
-        has_system = False
-        sys_error = None
-        if capture_system:
-            try:
-                from src.audio.system_capture import SystemAudioCapture, is_available
-                if is_available():
-                    rec_cfg = config.get("recording", default={}) or {}
-                    sys_rate_raw = rec_cfg.get("sample_rate", SAMPLE_RATE)
-                    try:
-                        sys_rate = int(sys_rate_raw)
-                    except Exception:
-                        sys_rate = SAMPLE_RATE
-                    sys_rate = max(8000, min(48000, sys_rate))
-                    self._sys_capture = SystemAudioCapture()
-                    self._sys_capture.start(
-                        self._sys_wav,
-                        sample_rate=sys_rate,
-                        external_callback=self._on_system_pcm,
-                    )
-                    has_system = True
-                    self._system_capture_started = True
-                else:
-                    sys_error = "内部音声キャプチャが利用できません"
-            except Exception as e:
-                sys_error = str(e)
-                logger.warning("System capture failed: %s", e)
-                self._sys_capture = None
-            self._system_capture_start_error = sys_error
 
         logger.info("Recording started (mic=%s, system=%s, session=%s)",
                      self._mic_device, has_system, self._session_id)
@@ -828,9 +851,13 @@ class Recorder:
             self._mic_thread = None
 
         # Stop system capture
+        system_recovery: dict | None = None
         if self._sys_capture:
             try:
                 self._sys_capture.stop()
+                get_diag = getattr(self._sys_capture, "get_diagnostics", None)
+                if callable(get_diag):
+                    system_recovery = get_diag()
                 if self._sys_capture.error:
                     sys_error = self._sys_capture.error
                     self._error = f"{self._error}; {sys_error}" if self._error else sys_error
@@ -854,6 +881,7 @@ class Recorder:
             system_duration=system_duration,
             elapsed=elapsed,
             sys_ok=bool(sys_ok),
+            system_diagnostics=system_recovery,
         )
         if system_coverage_error:
             self._error = (
@@ -888,6 +916,10 @@ class Recorder:
             "system_duration_sec": round(system_duration, 1) if system_duration > 0 else None,
             "system_coverage_ratio": round(system_coverage_ratio, 3)
             if system_coverage_ratio is not None else None,
+            "system_restart_count": int((system_recovery or {}).get("restart_count") or 0),
+            "system_restart_reasons": list((system_recovery or {}).get("restart_reasons") or []),
+            "system_audio_gap_sec": round(float((system_recovery or {}).get("gap_sec") or 0.0), 3),
+            "system_capture_diagnostics": system_recovery,
             "system_backend": system_backend,
             "mic_backend": self._mic_backend,
             "error": self._error,
@@ -923,6 +955,7 @@ class Recorder:
         system_duration: float,
         elapsed: float,
         sys_ok: bool,
+        system_diagnostics: dict | None = None,
     ) -> str | None:
         if not self._capture_system_requested:
             return None
@@ -943,6 +976,17 @@ class Recorder:
         if expected < min_duration_sec:
             return None
 
+        if (
+            system_diagnostics
+            and system_diagnostics.get("has_bytes") is True
+            and system_diagnostics.get("has_audio") is False
+        ):
+            return (
+                "System audio contains only silence "
+                "(内部音声が全時間で無音です): "
+                f"system={system_duration:.1f}s expected={expected:.1f}s"
+            )
+
         missing = max(0.0, expected - float(system_duration or 0.0))
         coverage = float(system_duration or 0.0) / expected if expected > 0 else 0.0
         if missing > max_missing_sec and coverage < min_coverage_ratio:
@@ -954,6 +998,14 @@ class Recorder:
         return None
 
     def get_status(self) -> dict:
+        system_diagnostics = None
+        if self._sys_capture is not None:
+            get_diag = getattr(self._sys_capture, "get_diagnostics", None)
+            if callable(get_diag):
+                try:
+                    system_diagnostics = get_diag()
+                except Exception:
+                    system_diagnostics = None
         return {
             "recording": self._recording,
             "elapsed_sec": round(self.elapsed_sec, 1) if self._recording else 0,
@@ -961,6 +1013,7 @@ class Recorder:
             "mic_stream_alive": self.mic_stream_alive,
             "mic_backend": self._mic_backend,
             "mic_muted": self._mic_muted,
+            "system_capture": system_diagnostics,
             "error": self._error,
         }
 

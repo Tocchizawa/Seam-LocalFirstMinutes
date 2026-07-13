@@ -1,7 +1,7 @@
 #import <CoreAudio/CoreAudio.h>
-#import <CoreAudio/AudioHardwareTapping.h>
-#import <CoreAudio/CATapDescription.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
 #import <errno.h>
@@ -58,20 +58,6 @@ static NSString *DescribeFormat(AudioStreamBasicDescription format) {
                                       format.mBytesPerFrame,
                                       format.mFormatID,
                                       format.mFormatFlags];
-}
-
-static BOOL GetInputFormat(AudioObjectID deviceID, AudioStreamBasicDescription *format, NSError **error) {
-    AudioObjectPropertyAddress address = {
-        .mSelector = kAudioDevicePropertyStreamFormat,
-        .mScope = kAudioDevicePropertyScopeInput,
-        .mElement = kAudioObjectPropertyElementMain,
-    };
-    UInt32 size = sizeof(AudioStreamBasicDescription);
-    return CheckStatus(
-        AudioObjectGetPropertyData(deviceID, &address, 0, NULL, &size, format),
-        @"AudioObjectGetPropertyData(kAudioDevicePropertyStreamFormat)",
-        error
-    );
 }
 
 static NSString *GetAudioObjectStringProperty(AudioObjectID objectID, AudioObjectPropertySelector selector, AudioObjectPropertyScope scope) {
@@ -213,57 +199,42 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
     return devices.firstObject;
 }
 
-@interface CoreAudioTapCapture : NSObject <SeamAudioCapture>
-- (instancetype)initWithOutputPath:(NSString *)outputPath metaPath:(NSString *)metaPath;
+@interface ScreenCaptureKitAudioCapture : NSObject <SeamAudioCapture, SCStreamOutput, SCStreamDelegate>
+- (instancetype)initWithOutputPath:(NSString *)outputPath metaPath:(NSString *)metaPath sampleRate:(double)sampleRate;
 - (BOOL)startWithError:(NSError **)error;
 - (void)stop;
-- (void)handleInputData:(const AudioBufferList *)inputData;
+- (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type;
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error;
 @end
 
-static OSStatus AudioCaptureIOProc(
-    AudioObjectID inDevice,
-    const AudioTimeStamp *inNow,
-    const AudioBufferList *inInputData,
-    const AudioTimeStamp *inInputTime,
-    AudioBufferList *outOutputData,
-    const AudioTimeStamp *inOutputTime,
-    void *inClientData
-) {
-    (void)inDevice;
-    (void)inNow;
-    (void)inInputTime;
-    (void)outOutputData;
-    (void)inOutputTime;
-    CoreAudioTapCapture *capture = (__bridge CoreAudioTapCapture *)inClientData;
-    [capture handleInputData:inInputData];
-    return noErr;
-}
-
-@implementation CoreAudioTapCapture {
+@implementation ScreenCaptureKitAudioCapture {
     NSString *_outputPath;
     NSString *_metaPath;
+    double _requestedSampleRate;
     int _fd;
-    NSUUID *_tapUUID;
-    AudioObjectID _tapID;
-    AudioObjectID _aggregateDeviceID;
-    AudioDeviceIOProcID _ioProcID;
-    AudioStreamBasicDescription _format;
+    SCStream *_stream;
+    dispatch_queue_t _sampleQueue;
     UInt64 _bytesWritten;
+    NSInteger _sampleRate;
+    NSInteger _sourceChannels;
     atomic_bool _stopped;
+    atomic_bool _loggedUnsupportedFormat;
 }
 
-- (instancetype)initWithOutputPath:(NSString *)outputPath metaPath:(NSString *)metaPath {
+- (instancetype)initWithOutputPath:(NSString *)outputPath metaPath:(NSString *)metaPath sampleRate:(double)sampleRate {
     self = [super init];
     if (self) {
         _outputPath = [outputPath copy];
         _metaPath = [metaPath copy];
+        _requestedSampleRate = sampleRate > 0 ? sampleRate : 48000.0;
         _fd = -1;
-        _tapUUID = [NSUUID UUID];
-        _tapID = kAudioObjectUnknown;
-        _aggregateDeviceID = kAudioObjectUnknown;
-        _ioProcID = NULL;
+        _stream = nil;
+        _sampleQueue = nil;
         _bytesWritten = 0;
+        _sampleRate = (NSInteger)MAX(8000.0, MIN(192000.0, _requestedSampleRate));
+        _sourceChannels = 2;
         atomic_init(&_stopped, false);
+        atomic_init(&_loggedUnsupportedFormat, false);
     }
     return self;
 }
@@ -273,7 +244,7 @@ static OSStatus AudioCaptureIOProc(
 }
 
 - (BOOL)startWithError:(NSError **)error {
-    if (@available(macOS 14.2, *)) {
+    if (@available(macOS 13.0, *)) {
         _fd = open([_outputPath fileSystemRepresentation], O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (_fd < 0) {
             if (error != NULL) {
@@ -282,57 +253,92 @@ static OSStatus AudioCaptureIOProc(
             return NO;
         }
 
-        CATapDescription *desc = [[CATapDescription alloc] initMonoGlobalTapButExcludeProcesses:@[]];
-        desc.name = @"Seam System Audio";
-        desc.UUID = _tapUUID;
-        desc.privateTap = YES;
-        desc.muteBehavior = CATapUnmuted;
-
-        if (!CheckStatus(AudioHardwareCreateProcessTap(desc, &_tapID), @"AudioHardwareCreateProcessTap", error)) {
-            [self stop];
-            return NO;
-        }
-
-        NSString *aggregateUID = [NSString stringWithFormat:@"com.seamapp.seam.coreaudio-tap.%@", [NSUUID UUID].UUIDString];
-        NSDictionary *tapEntry = @{
-            @kAudioSubTapUIDKey: _tapUUID.UUIDString,
-            @kAudioSubTapDriftCompensationKey: @YES,
-        };
-        NSDictionary *aggregateDescription = @{
-            @kAudioAggregateDeviceNameKey: @"Seam System Audio",
-            @kAudioAggregateDeviceUIDKey: aggregateUID,
-            @kAudioAggregateDeviceIsPrivateKey: @YES,
-            @kAudioAggregateDeviceTapAutoStartKey: @YES,
-            @kAudioAggregateDeviceTapListKey: @[tapEntry],
-        };
-        if (!CheckStatus(
-                AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggregateDescription, &_aggregateDeviceID),
-                @"AudioHardwareCreateAggregateDevice",
-                error
-            )) {
-            [self stop];
-            return NO;
-        }
-
-        if (!GetInputFormat(_aggregateDeviceID, &_format, error)) {
-            [self stop];
-            return NO;
-        }
-        BOOL isLinearPCM = _format.mFormatID == kAudioFormatLinearPCM;
-        BOOL isFloat = (_format.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
-        if (!isLinearPCM || !isFloat || _format.mBitsPerChannel != 32) {
+        __block SCShareableContent *shareableContent = nil;
+        __block NSError *shareableError = nil;
+        dispatch_semaphore_t contentSemaphore = dispatch_semaphore_create(0);
+        [SCShareableContent getShareableContentExcludingDesktopWindows:YES
+                                                    onScreenWindowsOnly:YES
+                                                      completionHandler:^(SCShareableContent *content, NSError *contentError) {
+            shareableContent = content;
+            shareableError = contentError;
+            dispatch_semaphore_signal(contentSemaphore);
+        }];
+        if (dispatch_semaphore_wait(contentSemaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
             if (error != NULL) {
-                *error = MakeError([NSString stringWithFormat:@"Unsupported tap format: %@", DescribeFormat(_format)]);
+                *error = MakeError(@"Timed out while loading ScreenCaptureKit shareable content");
+            }
+            [self stop];
+            return NO;
+        }
+        if (shareableError != nil) {
+            if (error != NULL) {
+                *error = shareableError;
+            }
+            [self stop];
+            return NO;
+        }
+
+        SCDisplay *display = shareableContent.displays.firstObject;
+        if (display == nil) {
+            if (error != NULL) {
+                *error = MakeError(@"No display is available for ScreenCaptureKit audio capture");
+            }
+            [self stop];
+            return NO;
+        }
+
+        SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+        configuration.width = MAX(2, MIN((NSInteger)display.width, 16));
+        configuration.height = MAX(2, MIN((NSInteger)display.height, 16));
+        configuration.minimumFrameInterval = CMTimeMake(1, 1);
+        configuration.queueDepth = 3;
+        configuration.showsCursor = NO;
+        configuration.capturesAudio = YES;
+        configuration.sampleRate = _sampleRate;
+        configuration.channelCount = _sourceChannels;
+        configuration.excludesCurrentProcessAudio = YES;
+
+        _stream = [[SCStream alloc] initWithFilter:filter configuration:configuration delegate:self];
+        _sampleQueue = dispatch_queue_create("seam.screencapturekit.audio", DISPATCH_QUEUE_SERIAL);
+
+        NSError *addOutputError = nil;
+        if (![_stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:_sampleQueue error:&addOutputError]) {
+            if (error != NULL) {
+                *error = addOutputError ?: MakeError(@"Failed to add ScreenCaptureKit audio output");
+            }
+            [self stop];
+            return NO;
+        }
+
+        __block NSError *startError = nil;
+        dispatch_semaphore_t startSemaphore = dispatch_semaphore_create(0);
+        [_stream startCaptureWithCompletionHandler:^(NSError *captureError) {
+            startError = captureError;
+            dispatch_semaphore_signal(startSemaphore);
+        }];
+        if (dispatch_semaphore_wait(startSemaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
+            if (error != NULL) {
+                *error = MakeError(@"Timed out while starting ScreenCaptureKit audio capture");
+            }
+            [self stop];
+            return NO;
+        }
+        if (startError != nil) {
+            if (error != NULL) {
+                *error = startError;
             }
             [self stop];
             return NO;
         }
 
         NSDictionary *metadata = @{
-            @"backend": @"coreaudio_tap",
+            @"backend": @"screencapturekit",
             @"format": @"f32le",
             @"channels": @1,
-            @"sample_rate": @(_format.mSampleRate),
+            @"source_channels": @(_sourceChannels),
+            @"sample_rate": @(_sampleRate),
+            @"excludes_current_process_audio": @YES,
             @"started_at": [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
         };
         NSData *metadataData = [NSJSONSerialization dataWithJSONObject:metadata options:(NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys) error:error];
@@ -341,27 +347,14 @@ static OSStatus AudioCaptureIOProc(
             return NO;
         }
 
-        if (!CheckStatus(
-                AudioDeviceCreateIOProcID(_aggregateDeviceID, AudioCaptureIOProc, (__bridge void *)self, &_ioProcID),
-                @"AudioDeviceCreateIOProcID",
-                error
-            )) {
-            [self stop];
-            return NO;
-        }
-        if (!CheckStatus(AudioDeviceStart(_aggregateDeviceID, _ioProcID), @"AudioDeviceStart", error)) {
-            [self stop];
-            return NO;
-        }
-
-        fprintf(stderr, "CORE_AUDIO_TAP_STARTED sample_rate=%.0f format=f32le output=%s\n",
-                _format.mSampleRate,
+        fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_STARTED sample_rate=%ld format=f32le output=%s\n",
+                (long)_sampleRate,
                 [_outputPath fileSystemRepresentation]);
         return YES;
     }
 
     if (error != NULL) {
-        *error = MakeError(@"Core Audio Process Tap requires macOS 14.2+");
+        *error = MakeError(@"ScreenCaptureKit audio capture requires macOS 13.0+");
     }
     return NO;
 }
@@ -372,57 +365,145 @@ static OSStatus AudioCaptureIOProc(
         return;
     }
 
-    if (_aggregateDeviceID != kAudioObjectUnknown) {
-        if (_ioProcID != NULL) {
-            AudioDeviceStop(_aggregateDeviceID, _ioProcID);
-            AudioDeviceDestroyIOProcID(_aggregateDeviceID, _ioProcID);
-            _ioProcID = NULL;
-        } else {
-            AudioDeviceStop(_aggregateDeviceID, NULL);
+    if (_stream != nil) {
+        if (@available(macOS 13.0, *)) {
+            dispatch_semaphore_t stopSemaphore = dispatch_semaphore_create(0);
+            [_stream stopCaptureWithCompletionHandler:^(NSError *error) {
+                if (error != nil) {
+                    fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_ERROR stop failed: %s\n", error.localizedDescription.UTF8String);
+                }
+                dispatch_semaphore_signal(stopSemaphore);
+            }];
+            dispatch_semaphore_wait(stopSemaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+            NSError *removeError = nil;
+            [_stream removeStreamOutput:self type:SCStreamOutputTypeAudio error:&removeError];
+            if (removeError != nil) {
+                fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_ERROR remove output failed: %s\n", removeError.localizedDescription.UTF8String);
+            }
         }
-        AudioHardwareDestroyAggregateDevice(_aggregateDeviceID);
-        _aggregateDeviceID = kAudioObjectUnknown;
-    }
-    if (_tapID != kAudioObjectUnknown) {
-        if (@available(macOS 14.2, *)) {
-            AudioHardwareDestroyProcessTap(_tapID);
-        }
-        _tapID = kAudioObjectUnknown;
+        _stream = nil;
     }
     if (_fd >= 0) {
         close(_fd);
         _fd = -1;
     }
 
-    double duration = _format.mSampleRate > 0 ? (double)_bytesWritten / (_format.mSampleRate * sizeof(float)) : 0;
-    fprintf(stderr, "CORE_AUDIO_TAP_STOPPED bytes=%llu duration=%.1fs\n", _bytesWritten, duration);
+    double duration = _sampleRate > 0 ? (double)_bytesWritten / ((double)_sampleRate * sizeof(float)) : 0;
+    fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_STOPPED bytes=%llu duration=%.1fs\n", _bytesWritten, duration);
 }
 
-- (void)handleInputData:(const AudioBufferList *)inputData {
-    if (inputData == NULL || atomic_load(&_stopped) || _fd < 0 || inputData->mNumberBuffers == 0) {
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
+    (void)stream;
+    fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_ERROR stream stopped: %s\n", error.localizedDescription.UTF8String);
+}
+
+- (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
+    (void)stream;
+    if (type != SCStreamOutputTypeAudio || sampleBuffer == NULL || atomic_load(&_stopped) || _fd < 0) {
+        return;
+    }
+    if (!CMSampleBufferDataIsReady(sampleBuffer)) {
         return;
     }
 
-    if (inputData->mNumberBuffers == 1) {
-        AudioBuffer buffer = inputData->mBuffers[0];
+    CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (formatDescription == NULL) {
+        return;
+    }
+    const AudioStreamBasicDescription *format = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription);
+    if (format == NULL) {
+        return;
+    }
+
+    size_t bufferListSize = 0;
+    OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer,
+        &bufferListSize,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        NULL
+    );
+    if (status != noErr || bufferListSize == 0) {
+        return;
+    }
+
+    AudioBufferList *bufferList = (AudioBufferList *)malloc(bufferListSize);
+    if (bufferList == NULL) {
+        return;
+    }
+    CMBlockBufferRef blockBuffer = NULL;
+    status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer,
+        NULL,
+        bufferList,
+        bufferListSize,
+        kCFAllocatorDefault,
+        kCFAllocatorDefault,
+        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        &blockBuffer
+    );
+    if (status == noErr) {
+        [self writeMonoFromBufferList:bufferList format:*format];
+    }
+    if (blockBuffer != NULL) {
+        CFRelease(blockBuffer);
+    }
+    free(bufferList);
+}
+
+- (BOOL)supportsFormat:(AudioStreamBasicDescription)format {
+    if (format.mFormatID != kAudioFormatLinearPCM) {
+        return NO;
+    }
+    BOOL isFloat32 = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && format.mBitsPerChannel == 32;
+    BOOL isInt16 = (format.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 && format.mBitsPerChannel == 16;
+    return isFloat32 || isInt16;
+}
+
+- (float)floatSampleAt:(const void *)base index:(UInt32)index format:(AudioStreamBasicDescription)format {
+    if ((format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 && format.mBitsPerChannel == 32) {
+        const float *samples = (const float *)base;
+        return samples[index];
+    }
+    if ((format.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 && format.mBitsPerChannel == 16) {
+        const int16_t *samples = (const int16_t *)base;
+        return (float)samples[index] / 32768.0f;
+    }
+    return 0.0f;
+}
+
+- (void)writeMonoFromBufferList:(const AudioBufferList *)bufferList format:(AudioStreamBasicDescription)format {
+    if (bufferList == NULL || bufferList->mNumberBuffers == 0 || ![self supportsFormat:format]) {
+        bool alreadyLogged = atomic_exchange(&_loggedUnsupportedFormat, true);
+        if (!alreadyLogged) {
+            fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_ERROR unsupported format: %s\n", DescribeFormat(format).UTF8String);
+        }
+        return;
+    }
+
+    UInt32 bytesPerSample = MAX(format.mBitsPerChannel / 8, 1);
+    BOOL nonInterleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+
+    if (!nonInterleaved && bufferList->mNumberBuffers == 1) {
+        AudioBuffer buffer = bufferList->mBuffers[0];
         if (buffer.mData == NULL || buffer.mDataByteSize == 0) {
             return;
         }
         UInt32 channels = MAX(buffer.mNumberChannels, 1);
-        if (channels == 1) {
-            [self writeBytes:buffer.mData byteCount:buffer.mDataByteSize];
+        UInt32 frames = buffer.mDataByteSize / (bytesPerSample * channels);
+        if (frames == 0) {
             return;
         }
-
-        UInt32 frames = buffer.mDataByteSize / (UInt32)(sizeof(float) * channels);
         NSMutableData *monoData = [NSMutableData dataWithLength:frames * sizeof(float)];
         float *mono = (float *)monoData.mutableBytes;
-        const float *input = (const float *)buffer.mData;
         for (UInt32 frame = 0; frame < frames; frame++) {
             float sum = 0.0f;
-            UInt32 base = frame * channels;
+            UInt32 baseIndex = frame * channels;
             for (UInt32 ch = 0; ch < channels; ch++) {
-                sum += input[base + ch];
+                sum += [self floatSampleAt:buffer.mData index:(baseIndex + ch) format:format];
             }
             mono[frame] = sum / (float)channels;
         }
@@ -431,12 +512,13 @@ static OSStatus AudioCaptureIOProc(
     }
 
     UInt32 frames = UINT32_MAX;
-    for (UInt32 i = 0; i < inputData->mNumberBuffers; i++) {
-        AudioBuffer buffer = inputData->mBuffers[i];
+    for (UInt32 i = 0; i < bufferList->mNumberBuffers; i++) {
+        AudioBuffer buffer = bufferList->mBuffers[i];
         if (buffer.mData == NULL || buffer.mDataByteSize == 0) {
             continue;
         }
-        UInt32 candidateFrames = buffer.mDataByteSize / (UInt32)sizeof(float);
+        UInt32 channels = nonInterleaved ? 1 : MAX(buffer.mNumberChannels, 1);
+        UInt32 candidateFrames = buffer.mDataByteSize / (bytesPerSample * channels);
         frames = MIN(frames, candidateFrames);
     }
     if (frames == UINT32_MAX || frames == 0) {
@@ -445,23 +527,27 @@ static OSStatus AudioCaptureIOProc(
 
     NSMutableData *monoData = [NSMutableData dataWithLength:frames * sizeof(float)];
     float *mono = (float *)monoData.mutableBytes;
-    UInt32 usedBuffers = 0;
-    for (UInt32 i = 0; i < inputData->mNumberBuffers; i++) {
-        AudioBuffer buffer = inputData->mBuffers[i];
+    UInt32 usedChannels = 0;
+    for (UInt32 i = 0; i < bufferList->mNumberBuffers; i++) {
+        AudioBuffer buffer = bufferList->mBuffers[i];
         if (buffer.mData == NULL || buffer.mDataByteSize == 0) {
             continue;
         }
-        const float *input = (const float *)buffer.mData;
+        UInt32 channels = nonInterleaved ? 1 : MAX(buffer.mNumberChannels, 1);
         for (UInt32 frame = 0; frame < frames; frame++) {
-            mono[frame] += input[frame];
+            for (UInt32 ch = 0; ch < channels; ch++) {
+                UInt32 index = nonInterleaved ? frame : (frame * channels + ch);
+                mono[frame] += [self floatSampleAt:buffer.mData index:index format:format];
+                usedChannels++;
+            }
         }
-        usedBuffers++;
     }
-    if (usedBuffers == 0) {
+    if (usedChannels == 0) {
         return;
     }
+    UInt32 divisor = MAX(1, usedChannels / frames);
     for (UInt32 frame = 0; frame < frames; frame++) {
-        mono[frame] /= (float)usedBuffers;
+        mono[frame] /= (float)divisor;
     }
     [self writeBytes:monoData.bytes byteCount:(UInt32)monoData.length];
 }
@@ -732,7 +818,7 @@ static void MicrophoneInputCallback(
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc < 2) {
-            fprintf(stderr, "Usage: audio-capture <output.raw> [--mode system|microphone] [--meta-path capture.meta.json] [--sample-rate 16000] [--mic-device-name name]\n");
+            fprintf(stderr, "Usage: audio-capture <output.raw> [--mode system|screencapturekit|microphone] [--meta-path capture.meta.json] [--sample-rate 16000] [--mic-device-name name]\n");
             return 2;
         }
 
@@ -769,7 +855,7 @@ int main(int argc, const char *argv[]) {
         }
 
         id<SeamAudioCapture> capture = nil;
-        NSString *errorPrefix = @"CORE_AUDIO_TAP_ERROR";
+        NSString *errorPrefix = @"SCREEN_CAPTURE_KIT_AUDIO_ERROR";
         if ([mode isEqualToString:@"mic"] || [mode isEqualToString:@"microphone"]) {
             capture = [[CoreAudioMicCapture alloc] initWithOutputPath:outputPath
                                                               metaPath:metaPath
@@ -778,10 +864,17 @@ int main(int argc, const char *argv[]) {
                                                              deviceUID:micDeviceUID
                                                               bufferMS:bufferMS];
             errorPrefix = @"CORE_AUDIO_MIC_ERROR";
-        } else if ([mode isEqualToString:@"system"] || [mode isEqualToString:@"tap"] || [mode isEqualToString:@"coreaudio_tap"]) {
-            capture = [[CoreAudioTapCapture alloc] initWithOutputPath:outputPath metaPath:metaPath];
+        } else if ([mode isEqualToString:@"system"] ||
+                   [mode isEqualToString:@"sck"] ||
+                   [mode isEqualToString:@"screen_capture_kit"] ||
+                   [mode isEqualToString:@"screen-capture-kit"] ||
+                   [mode isEqualToString:@"screen_capturekit"] ||
+                   [mode isEqualToString:@"screencapturekit"]) {
+            capture = [[ScreenCaptureKitAudioCapture alloc] initWithOutputPath:outputPath
+                                                                      metaPath:metaPath
+                                                                    sampleRate:sampleRate];
         } else {
-            fprintf(stderr, "CORE_AUDIO_CAPTURE_ERROR unsupported mode: %s\n", mode.UTF8String);
+            fprintf(stderr, "AUDIO_CAPTURE_ERROR unsupported mode: %s\n", mode.UTF8String);
             return 2;
         }
 
