@@ -62,15 +62,19 @@
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
 
   /* シェル (透過させて macOS の vibrancy ブラーを見せる = フロストガラス) */
-  --shell-bg: rgba(10, 10, 12, 0.62);
+  --shell-bg: rgba(10, 10, 12, 0.48);
   --shell-bg-opaque: #0a0a0c;
   --shell-border: rgba(255, 255, 255, 0.08);
-  --sidebar-bg: rgba(5, 5, 7, 0.32);
+  --sidebar-bg: rgba(5, 5, 7, 0.20);
   --titlebar-bg: rgba(0, 0, 0, 0.6);
 
   /* ホバー/押下は不透明色ではなく半透明オーバーレイで背景に馴染ませる */
   --hover-bg: rgba(255, 255, 255, 0.06);
   --hover-bg-strong: rgba(255, 255, 255, 0.11);
+
+  /* 検索バー等、フロスト背景上に直接置くフィールドの半透明背景 */
+  --field-bg: rgba(255, 255, 255, 0.06);
+  --field-bg-focus: rgba(255, 255, 255, 0.10);
 
   /* dialog */
   --dialog-bg: #16161a;
@@ -115,14 +119,17 @@
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.16);
 
-  --shell-bg: rgba(250, 250, 250, 0.62);
+  --shell-bg: rgba(250, 250, 250, 0.48);
   --shell-bg-opaque: #fafafa;
   --shell-border: rgba(0, 0, 0, 0.08);
-  --sidebar-bg: rgba(244, 244, 245, 0.32);
+  --sidebar-bg: rgba(244, 244, 245, 0.20);
   --titlebar-bg: rgba(255, 255, 255, 0.85);
 
   --hover-bg: rgba(0, 0, 0, 0.05);
   --hover-bg-strong: rgba(0, 0, 0, 0.09);
+
+  --field-bg: rgba(255, 255, 255, 0.45);
+  --field-bg-focus: rgba(255, 255, 255, 0.78);
 
   --dialog-bg: #ffffff;
   --dialog-border: rgba(0, 0, 0, 0.08);
@@ -486,12 +493,12 @@ button { font-family: inherit; }
   width: 32px;
   height: 32px;
   border: 1px solid var(--border);
-  background: var(--surface);
+  background: var(--field-bg);
 }
 .minutes-import-btn:hover {
   border-color: var(--border-hover);
   color: var(--t1);
-  background: var(--surface-2);
+  background: var(--hover-bg-strong);
 }
 .minutes-import-menu {
   position: absolute;
@@ -719,13 +726,14 @@ button { font-family: inherit; }
   font-size: 12px;
   font-family: inherit;
   color: var(--t1);
-  background: var(--surface);
+  background: var(--field-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   outline: none;
-  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.sidebar-search:focus { border-color: var(--accent-line); }
+.sidebar-search:focus { border-color: var(--accent-line); background: var(--field-bg-focus); }
 .sidebar-search::placeholder { color: var(--t3); }
 
 .project-row {
@@ -1537,7 +1545,7 @@ button { font-family: inherit; }
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  background: var(--surface);
+  background: var(--field-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
@@ -1546,7 +1554,7 @@ button { font-family: inherit; }
 .search-bar:hover { border-color: var(--border-hover); }
 .search-bar:focus-within {
   border-color: var(--accent-line);
-  background: var(--surface-2);
+  background: var(--field-bg-focus);
 }
 .search-bar-input {
   flex: 1;
