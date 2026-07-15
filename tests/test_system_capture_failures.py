@@ -220,6 +220,77 @@ def test_raw_conversion_creates_wav_and_removes_intermediates() -> None:
         assert 0.09 <= duration <= 0.11
 
 
+def test_audio_diagnostics_track_silent_tail_after_audio() -> None:
+    old_monotonic = system_capture.time.monotonic
+    try:
+        ticks = iter([10.0, 25.0])
+        system_capture.time.monotonic = lambda: next(ticks, 25.0)  # type: ignore[assignment]
+
+        cap = system_capture.SystemAudioCapture()
+        cap._sample_rate = 10
+        cap._update_audio_stats(array("f", [0.25] * 10).tobytes())
+        cap._update_audio_stats(array("f", [0.0] * 30).tobytes())
+
+        diag = cap.get_diagnostics()
+
+        assert diag["has_bytes"] is True
+        assert diag["has_audio"] is True
+        assert diag["captured_duration_sec"] == 4.0
+        assert diag["last_nonzero_audio_sec"] == 1.0
+        assert diag["silent_tail_sec"] == 3.0
+    finally:
+        system_capture.time.monotonic = old_monotonic  # type: ignore[assignment]
+
+
+def test_segmented_raw_conversion_preserves_all_segments() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        raw1 = Path(td) / "system.raw"
+        raw2 = Path(td) / "system.part1.raw"
+        wav = Path(td) / "system.wav"
+        rate = 16000
+        raw1.write_bytes(array("f", [0.1] * int(rate * 0.1)).tobytes())
+        raw2.write_bytes(array("f", [0.2] * int(rate * 0.1)).tobytes())
+
+        cap = system_capture.SystemAudioCapture()
+        cap._raw_path = raw2
+        cap._wav_path = wav
+        cap._sample_rate = rate
+        cap._segment_paths = [raw1, raw2]
+
+        cap._convert_raw_to_wav()
+
+        assert cap.error is None
+        assert wav.exists() and wav.stat().st_size > 44
+        assert not raw1.exists()
+        assert not raw2.exists()
+        with wave.open(str(wav), "rb") as wf:
+            duration = wf.getnframes() / wf.getframerate()
+        assert 0.19 <= duration <= 0.21
+
+
+def test_silent_tail_restart_keeps_same_capture_path() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._segment_index = 0
+    stopped: list[bool] = []
+    started: list[tuple[int, float | None]] = []
+
+    cap._stop_active_segment = lambda: stopped.append(True)  # type: ignore[method-assign]
+    cap._start_segment = (  # type: ignore[method-assign]
+        lambda index, gap_started_at=None: started.append((index, gap_started_at))
+    )
+
+    restarted = cap._restart_for_silence(22.0, 5)
+
+    assert restarted is True
+    assert stopped == [True]
+    assert len(started) == 1
+    assert started[0][0] == 1
+    assert started[0][1] is not None
+    assert cap.restart_count == 1
+    assert cap.recovery_reasons == ["silent_tail_sec=22.0"]
+
+
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
     failed = 0
     for test in tests:
@@ -245,4 +316,7 @@ if __name__ == "__main__":
         test_ffmpeg_conversion_failure_keeps_raw_audio,
         test_placeholder_sidecar_is_not_available,
         test_raw_conversion_creates_wav_and_removes_intermediates,
+        test_audio_diagnostics_track_silent_tail_after_audio,
+        test_segmented_raw_conversion_preserves_all_segments,
+        test_silent_tail_restart_keeps_same_capture_path,
     ]))

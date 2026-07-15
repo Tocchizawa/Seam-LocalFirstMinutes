@@ -987,6 +987,36 @@ class Recorder:
                 f"system={system_duration:.1f}s expected={expected:.1f}s"
             )
 
+        if (
+            system_diagnostics
+            and system_diagnostics.get("has_audio") is True
+        ):
+            try:
+                silent_tail_sec = float(system_diagnostics.get("silent_tail_sec") or 0.0)
+            except Exception:
+                silent_tail_sec = 0.0
+            tail_threshold = max(60.0, max_missing_sec)
+            try:
+                cfg = config.get("recording", "system_capture_watchdog", default={}) or {}
+                tail_threshold = max(
+                    max_missing_sec,
+                    float(cfg.get("max_silent_tail_sec", tail_threshold)),
+                )
+            except Exception:
+                pass
+            if silent_tail_sec > tail_threshold:
+                last_audio = system_diagnostics.get("last_nonzero_audio_sec")
+                detail = (
+                    f"last_audio={float(last_audio):.1f}s "
+                    if isinstance(last_audio, (int, float)) else ""
+                )
+                return (
+                    "System audio became silent before recording stopped "
+                    "(内部音声が途中から無音化した可能性があります): "
+                    f"{detail}silent_tail={silent_tail_sec:.1f}s "
+                    f"system={system_duration:.1f}s expected={expected:.1f}s"
+                )
+
         missing = max(0.0, expected - float(system_duration or 0.0))
         coverage = float(system_duration or 0.0) / expected if expected > 0 else 0.0
         if missing > max_missing_sec and coverage < min_coverage_ratio:
