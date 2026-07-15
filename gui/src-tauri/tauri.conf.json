@@ -23,7 +23,7 @@
         "hiddenTitle": true,
         "windowEffects": {
           "effects": [
-            "underWindowBackground"
+            "sidebar"
           ],
           "state": "followsWindowActiveState"
         }
