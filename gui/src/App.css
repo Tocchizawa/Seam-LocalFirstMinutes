@@ -462,14 +462,16 @@ button { font-family: inherit; }
 .search-result-card:hover .flat-row-actions { opacity: 1; }
 
 /* ─── Minutes list search bar (sticky header) ─────────── */
+/* フロスト背景を殺さないよう不透明帯にせず、薄い色 + 強めの backdrop blur で
+   スクロールしてきた行だけをぼかす。 */
 .minutes-search-wrap {
   position: sticky;
   top: 0;
   z-index: 5;
   padding: 14px 20px;
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
-  backdrop-filter: saturate(140%) blur(8px);
-  -webkit-backdrop-filter: saturate(140%) blur(8px);
+  background: color-mix(in srgb, var(--shell-bg-opaque) 30%, transparent);
+  backdrop-filter: saturate(140%) blur(18px);
+  -webkit-backdrop-filter: saturate(140%) blur(18px);
   border-bottom: 1px solid var(--border);
 }
 .minutes-list-toolbar {
@@ -891,7 +893,7 @@ button { font-family: inherit; }
   width: 56px;
   flex-shrink: 0;
   border-left: 1px solid var(--border);
-  background: var(--bg);
+  background: color-mix(in srgb, var(--shell-bg-opaque) 35%, transparent);
   cursor: pointer;
   overflow: hidden;
   user-select: none;
@@ -2030,7 +2032,9 @@ button { font-family: inherit; }
   gap: 2px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--shell-bg-opaque) 30%, transparent);
+  backdrop-filter: saturate(140%) blur(18px);
+  -webkit-backdrop-filter: saturate(140%) blur(18px);
   position: sticky;
   top: 0;
   z-index: 1;
