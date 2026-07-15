@@ -1,13 +1,15 @@
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{include_image, AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 /// Splash 画面に渡す起動進捗。
 #[derive(Serialize, Clone, Debug)]
@@ -71,6 +73,113 @@ impl StartupFailure {
 
 const DEFAULT_OLLAMA_HOST: &str = "127.0.0.1:11434";
 const STARTUP_LOG_CAP: usize = 80;
+const BACKEND_PORT: u16 = 18900;
+
+/// 終了確認ダイアログで「終了」が選択済みかどうか。
+/// true の場合、以降の ExitRequested は確認なしで通す。
+static EXIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
+
+/// localhost backend への最小 HTTP/1.0 GET。依存を増やさないために手書き。
+/// 失敗時 (backend 未起動含む) は None。
+fn http_get_backend(path: &str, timeout: Duration) -> Option<serde_json::Value> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], BACKEND_PORT));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    // HTTP/1.0 なら chunked transfer が使われず、EOF まで読めば body が取れる
+    let req = format!(
+        "GET {} HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        path, BACKEND_PORT,
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut raw = Vec::new();
+    BufReader::new(stream).read_to_end(&mut raw).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n")?;
+    let status_line = head.lines().next()?;
+    if !status_line.contains(" 200") {
+        return None;
+    }
+    serde_json::from_str(body.trim()).ok()
+}
+
+/// backend に処理中の作業があるか確認し、あれば理由文を返す。
+/// backend 未起動・応答なしは「作業なし」扱い (None)。
+fn backend_busy_reason() -> Option<String> {
+    let timeout = Duration::from_millis(600);
+    let mut reasons: Vec<&str> = Vec::new();
+
+    if let Some(pipelines) = http_get_backend("/api/recording/pipelines", timeout) {
+        if let Some(items) = pipelines.as_array() {
+            let mut recording = false;
+            let mut processing = false;
+            for p in items {
+                match p.get("state").and_then(|s| s.as_str()).unwrap_or("") {
+                    "recording" => recording = true,
+                    "stopping" | "transcribing" => processing = true,
+                    _ => {}
+                }
+            }
+            if recording {
+                reasons.push("録音が進行中です。");
+            }
+            if processing {
+                reasons.push("録音後の文字起こし処理が実行中です。");
+            }
+        }
+    }
+
+    if let Some(active) = http_get_backend("/api/summarize/active", timeout) {
+        if active.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            reasons.push("議事録の要約を生成中です。");
+        }
+    }
+
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join("\n"))
+    }
+}
+
+/// 確認ダイアログを表示し、「終了」が選ばれたらクリーンアップして終了する。
+fn confirm_quit_and_exit(app: &AppHandle, reason: String) {
+    let app_handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "{}\n\nこのまま終了すると処理が中断され、データが失われる可能性があります。\n本当に終了しますか?",
+            reason,
+        ))
+        .title("Seam を終了しますか?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "終了".into(),
+            "キャンセル".into(),
+        ))
+        .show(move |confirmed| {
+            if confirmed {
+                EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+                kill_managed_processes(&app_handle, "confirmed quit");
+                app_handle.exit(0);
+            }
+        });
+}
+
+/// Tray「終了」等からの終了リクエスト。処理中なら確認ダイアログを挟む。
+fn request_quit(app: &AppHandle) {
+    if EXIT_CONFIRMED.load(Ordering::SeqCst) {
+        app.exit(0);
+        return;
+    }
+    match backend_busy_reason() {
+        Some(reason) => confirm_quit_and_exit(app, reason),
+        None => {
+            EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+            kill_managed_processes(app, "quit");
+            app.exit(0);
+        }
+    }
+}
 
 struct ManagedProcessState {
     backend: Option<Child>,
@@ -1109,6 +1218,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1147,9 +1257,8 @@ pub fn run() {
                         show_main_window(app);
                     }
                     "quit" => {
-                        // 終了操作時に先に子プロセス停止を実行してからアプリ終了。
-                        kill_managed_processes(app, "TrayQuit");
-                        app.exit(0);
+                        // 録音/文字起こし/要約が動いている場合は確認ダイアログを挟む。
+                        request_quit(app);
                     }
                     _ => {}
                 })
@@ -1192,7 +1301,17 @@ pub fn run() {
                     // Dock アイコン再クリック時に隠したメインウィンドウを復帰。
                     show_main_window(app);
                 }
-                RunEvent::ExitRequested { .. } => {
+                RunEvent::ExitRequested { code, api, .. } => {
+                    // code=None は Cmd+Q / メニューの Quit 由来。処理中なら確認を挟む。
+                    // code=Some(_) は request_quit / confirm 後の明示 exit なのでそのまま通す。
+                    if code.is_none() && !EXIT_CONFIRMED.load(Ordering::SeqCst) {
+                        if let Some(reason) = backend_busy_reason() {
+                            api.prevent_exit();
+                            confirm_quit_and_exit(app, reason);
+                            return;
+                        }
+                        EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+                    }
                     // Exit より前の段階でも必ず子プロセス停止を試みる。
                     kill_managed_processes(app, "ExitRequested");
                 }

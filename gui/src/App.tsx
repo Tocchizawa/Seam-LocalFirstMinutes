@@ -27,6 +27,7 @@ import {
   updateErrorMessage,
 } from "./lib/updater";
 import { showToast } from "./lib/toast";
+import { ensureNotificationPermission } from "./lib/notify";
 
 type Mode =
   | { kind: "main" }
@@ -236,6 +237,12 @@ function AppInner() {
   useEffect(() => {
     if (startupReady) refreshProjects();
   }, [startupReady, refreshProjects]);
+
+  // 通知許可を起動時に確認しておく (録音中の音声未検出警告などで使うため、
+  // 初回の許可ダイアログが録音の途中に出ないようにする)
+  useEffect(() => {
+    if (startupReady) void ensureNotificationPermission();
+  }, [startupReady]);
 
   useEffect(() => {
     if (!startupReady || !startupUpdateNotice) return;

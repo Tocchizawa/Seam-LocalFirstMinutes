@@ -7,6 +7,7 @@ import {
   WS_URL, getRecordingStatus, type TranscriptSegment,
 } from "./api";
 import { showToast } from "./toast";
+import { notifyNative } from "./notify";
 import { isByteSizeToken, parseHFProgress, parseSize } from "./parse-hf-progress";
 
 export interface LiveSegment extends TranscriptSegment {
@@ -209,21 +210,20 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         const min = Math.max(1, Math.floor(thresholdSec / 60));
         const text = `無音が${min}分続いています。録音停止忘れにご注意ください。`;
         showToast({ kind: "info", text, ttl: 7000 });
-        if (
-          typeof window !== "undefined"
-          && "Notification" in window
-          && document.visibilityState === "hidden"
-          && Notification.permission === "granted"
-        ) {
-          new Notification("Seam", { body: text });
+        // アプリが非表示/バックグラウンドのときは macOS 通知でも知らせる
+        if (document.visibilityState === "hidden") {
+          void notifyNative("Seam", text);
         }
         return;
       }
       if (t === "mic_silent_warning") {
-        showToast({
-          kind: "err",
-          text: "マイクの音声が検出されません。デバイス設定を確認してください。",
-          ttl: 12000,
+        // 音声を拾えていない警告は macOS のネイティブ通知で出す。
+        // 通知許可が無い場合のみトーストにフォールバック。
+        const text = "音声が検出されません。マイク/内部音声のデバイス設定を確認してください。";
+        void notifyNative("Seam — 音声が検出されません", text).then((ok) => {
+          if (!ok) {
+            showToast({ kind: "err", text, ttl: 12000 });
+          }
         });
         return;
       }

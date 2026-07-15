@@ -61,10 +61,11 @@
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
 
-  /* シェル */
-  --shell-bg: #000000;
+  /* シェル (少し透過させ、macOS の under-window vibrancy を薄く見せる) */
+  --shell-bg: rgba(8, 8, 10, 0.82);
+  --shell-bg-opaque: #0a0a0c;
   --shell-border: rgba(255, 255, 255, 0.08);
-  --sidebar-bg: #050507;
+  --sidebar-bg: rgba(5, 5, 7, 0.55);
   --titlebar-bg: rgba(0, 0, 0, 0.6);
 
   /* dialog */
@@ -110,9 +111,10 @@
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.16);
 
-  --shell-bg: #fafafa;
+  --shell-bg: rgba(250, 250, 250, 0.84);
+  --shell-bg-opaque: #fafafa;
   --shell-border: rgba(0, 0, 0, 0.08);
-  --sidebar-bg: #f4f4f5;
+  --sidebar-bg: rgba(244, 244, 245, 0.6);
   --titlebar-bg: rgba(255, 255, 255, 0.85);
 
   --dialog-bg: #ffffff;
@@ -129,7 +131,9 @@
 
 html, body, #root {
   height: 100%; margin: 0;
-  background: var(--shell-bg);
+  /* ウィンドウの vibrancy (underWindowBackground) を透かすため透明。
+     実際の背景色は .shell / .splash-shell 側の半透明色が担う。 */
+  background: transparent;
   color: var(--t1);
   font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "SF Pro Text", system-ui, sans-serif;
   font-size: 13px;
@@ -218,6 +222,35 @@ button { font-family: inherit; }
 .input option { background: var(--bg); color: var(--t1); }
 
 .input::placeholder { color: var(--t3); }
+
+.textarea {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+  line-height: 1.6;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.textarea:hover { border-color: var(--border-hover); }
+.textarea:focus { border-color: var(--blue); background: var(--surface-2); }
+.textarea::placeholder { color: var(--t3); }
+
+/* 要約 system prompt 編集用 */
+.prompt-editor {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  min-height: 240px;
+  white-space: pre-wrap;
+}
 
 .btn {
   display: inline-flex;
@@ -1723,12 +1756,26 @@ button { font-family: inherit; }
    Scrollbar
    ═══════════════════════════════════════════════════════════════════ */
 
-/* スクロールバー全面非表示 (スクロール機能は維持) */
-::-webkit-scrollbar { width: 0; height: 0; display: none; }
+/* 細いスクロールバー: 通常は透明、スクロール領域にホバーした時だけ薄く表示。
+   完全非表示だと現在位置が分からず操作しづらいため。 */
+::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: transparent; }
-* { scrollbar-width: none; }   /* Firefox */
-* { -ms-overflow-style: none; } /* Edge legacy */
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  border: 2.5px solid transparent;
+  background-clip: padding-box;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--t1) 22%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--t1) 38%, transparent);
+  background-clip: padding-box;
+}
+* { scrollbar-width: thin; scrollbar-color: transparent transparent; } /* Firefox */
+*:hover { scrollbar-color: color-mix(in srgb, var(--t1) 25%, transparent) transparent; }
 
 /* ═══════════════════════════════════════════════════════════════════
    Animations
