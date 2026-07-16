@@ -6,8 +6,6 @@
  * - <html data-theme="dark|light"> として DOM に適用
  */
 
-import { getCurrentWindow } from "@tauri-apps/api/window";
-
 export type ThemeMode = "dark" | "light" | "system";
 
 const STORAGE_KEY = "seam.theme";
@@ -34,16 +32,6 @@ function resolveActual(mode: ThemeMode): "dark" | "light" {
 function apply(mode: ThemeMode): void {
   const actual = resolveActual(mode);
   document.documentElement.setAttribute("data-theme", actual);
-  // ネイティブウィンドウの外観 (vibrancy レイヤーの明暗) も同期させる。
-  // これが無いと「アプリはライトなのに OS がダーク」のとき、
-  // 半透明背景の裏に暗いブラーが透けて濁った色になる。
-  try {
-    void getCurrentWindow()
-      .setTheme(mode === "system" ? null : actual)
-      .catch(() => { /* Tauri 外 (vite dev in browser) では失敗するだけ */ });
-  } catch {
-    // ignore
-  }
 }
 
 export function getThemeMode(): ThemeMode {

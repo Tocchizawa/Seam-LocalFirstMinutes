@@ -67,10 +67,6 @@
   --sidebar-bg: #050507;
   --titlebar-bg: rgba(0, 0, 0, 0.6);
 
-  /* ホバー/押下は不透明色ではなく半透明オーバーレイで背景に馴染ませる */
-  --hover-bg: rgba(255, 255, 255, 0.06);
-  --hover-bg-strong: rgba(255, 255, 255, 0.11);
-
   /* dialog */
   --dialog-bg: #16161a;
   --dialog-border: rgba(255, 255, 255, 0.08);
@@ -118,9 +114,6 @@
   --shell-border: rgba(0, 0, 0, 0.08);
   --sidebar-bg: #f4f4f5;
   --titlebar-bg: rgba(255, 255, 255, 0.85);
-
-  --hover-bg: rgba(0, 0, 0, 0.05);
-  --hover-bg-strong: rgba(0, 0, 0, 0.09);
 
   --dialog-bg: #ffffff;
   --dialog-border: rgba(0, 0, 0, 0.08);
@@ -284,7 +277,7 @@ button { font-family: inherit; }
   color: var(--t2);
 }
 .btn-ghost:hover {
-  background: var(--hover-bg);
+  background: var(--surface);
   color: var(--t1);
   border-color: var(--border);
 }
@@ -321,8 +314,8 @@ button { font-family: inherit; }
   cursor: pointer;
   transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.icon-btn:hover { color: var(--t1); background: var(--hover-bg); }
-.icon-btn:active { background: var(--hover-bg-strong); transform: scale(0.94); }
+.icon-btn:hover { color: var(--t1); background: var(--surface-2); }
+.icon-btn:active { background: var(--surface-3); transform: scale(0.94); }
 
 /* ─── Pill button ────────────────────────────────────────── */
 /* 副次アクション。角丸の dark capsule。 */
@@ -431,7 +424,7 @@ button { font-family: inherit; }
   from { opacity: 0; transform: translateY(-6px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.flat-row:hover { background: var(--hover-bg); }
+.flat-row:hover { background: var(--surface); }
 .flat-row::before {
   content: '';
   position: absolute;
@@ -517,7 +510,7 @@ button { font-family: inherit; }
   cursor: pointer;
 }
 .minutes-import-menu-item:hover {
-  background: var(--hover-bg);
+  background: var(--surface-2);
   color: var(--t1);
 }
 .minutes-list-state,
@@ -557,7 +550,7 @@ button { font-family: inherit; }
     border-color 240ms cubic-bezier(0.16, 1, 0.3, 1);
   animation: row-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.minutes-card:hover { background: var(--hover-bg); }
+.minutes-card:hover { background: var(--surface); }
 .minutes-card::before {
   content: '';
   position: absolute;
@@ -740,10 +733,10 @@ button { font-family: inherit; }
   transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
               background 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.project-row:hover { color: var(--t1); background: var(--hover-bg); }
+.project-row:hover { color: var(--t1); background: var(--surface); }
 .project-row.active {
   color: var(--t1);
-  background: var(--hover-bg-strong);
+  background: var(--surface);
 }
 .project-row.active::before {
   content: '';
@@ -828,12 +821,12 @@ button { font-family: inherit; }
 }
 .settings-nav-item:hover {
   color: var(--t1);
-  background: var(--hover-bg);
+  background: var(--surface-2);
 }
 .settings-nav-item.active {
   color: var(--t1);
   border-color: var(--border);
-  background: var(--hover-bg-strong);
+  background: var(--surface-2);
 }
 
 /* ─── Radio card (設定画面のプロバイダ選択など) ──────── */
@@ -1068,7 +1061,7 @@ button { font-family: inherit; }
   border-bottom: none;
 }
 .s-radio-row:hover {
-  background: var(--hover-bg);
+  background: var(--surface);
 }
 .s-radio-dot {
   width: 14px;
@@ -1183,7 +1176,7 @@ button { font-family: inherit; }
   transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .spk-row:last-child { border-bottom: none; }
-.spk-row:hover { background: var(--hover-bg); }
+.spk-row:hover { background: var(--surface-2); }
 .spk-row.is-selected { background: var(--accent-soft); }
 
 .spk-check {
@@ -1305,7 +1298,7 @@ button { font-family: inherit; }
   outline: none;
 }
 .merge-card:hover {
-  background: var(--hover-bg);
+  background: var(--surface);
 }
 .merge-card:focus-visible {
   border-color: var(--accent-line);
@@ -1484,7 +1477,7 @@ button { font-family: inherit; }
   cursor: text;
 }
 .title-row.is-editable:hover {
-  background: var(--hover-bg);
+  background: var(--surface-2);
 }
 
 .title-edit-btn {
@@ -1507,7 +1500,7 @@ button { font-family: inherit; }
 .title-row:hover .title-edit-btn { opacity: 1; }
 .title-edit-btn:hover {
   color: var(--t1);
-  background: var(--hover-bg-strong);
+  background: var(--surface-3);
 }
 
 .title-edit-input {
@@ -1759,26 +1752,12 @@ button { font-family: inherit; }
    Scrollbar
    ═══════════════════════════════════════════════════════════════════ */
 
-/* 細いスクロールバー: 通常は透明、スクロール領域にホバーした時だけ薄く表示。
-   完全非表示だと現在位置が分からず操作しづらいため。 */
-::-webkit-scrollbar { width: 9px; height: 9px; }
+/* スクロールバー全面非表示 (スクロール機能は維持) */
+::-webkit-scrollbar { width: 0; height: 0; display: none; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 999px;
-  border: 2.5px solid transparent;
-  background-clip: padding-box;
-}
-*:hover::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--t1) 22%, transparent);
-  background-clip: padding-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--t1) 38%, transparent);
-  background-clip: padding-box;
-}
-* { scrollbar-width: thin; scrollbar-color: transparent transparent; } /* Firefox */
-*:hover { scrollbar-color: color-mix(in srgb, var(--t1) 25%, transparent) transparent; }
+::-webkit-scrollbar-thumb { background: transparent; }
+* { scrollbar-width: none; }   /* Firefox */
+* { -ms-overflow-style: none; } /* Edge legacy */
 
 /* ═══════════════════════════════════════════════════════════════════
    Animations
