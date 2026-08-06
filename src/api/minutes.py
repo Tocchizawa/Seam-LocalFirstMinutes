@@ -241,7 +241,7 @@ def _prepare_import_audio(source_audio: Path, session_dir: Path) -> Path:
             FFMPEG, "-y",
             "-loglevel", "error",
             "-i", str(source_audio),
-            "-ar", "24000",
+            "-ar", "16000",
             "-ac", "1",
             "-c:a", "flac",
             str(dest),
@@ -294,7 +294,7 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
         duration_sec = 0
         try:
             from src.api import recording as rec_mod
-            duration_sec = int(rec_mod._wav_duration_sec(stored_audio))
+            duration_sec = int(rec_mod._audio_duration_sec(stored_audio))
         except Exception:
             duration_sec = 0
         if duration_sec <= 0 and initial_transcript:
@@ -639,13 +639,25 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
         rec_mod._pipelines[session_id]["progress"] = 0.0
         await rec_mod._broadcast_pipeline(session_id)
 
+        from src.audio.resource_monitor import model_resource_gate
+
+        while not model_resource_gate.try_acquire_whisper():
+            _assert_not_cancelled()
+            _set_retry_stage(Stage.QUEUED, "別のローカルAI処理が終わるまで待機中...")
+            await rec_mod._broadcast_pipeline(session_id)
+            await asyncio.sleep(1)
+        whisper_lease = True
+
         loop = asyncio.get_event_loop()
 
         def do_transcribe() -> list[dict]:
-            import os
+            from src.audio.resource_monitor import ResourceMonitor
+
             try:
-                os.nice(10)
-            except (OSError, AttributeError):
+                ResourceMonitor().apply_process_priority(
+                    int(config.get("whisper", "performance", "worker_nice", default=3))
+                )
+            except (OSError, AttributeError, TypeError, ValueError):
                 pass
 
             def _assert_not_cancelled_sync() -> None:
@@ -900,7 +912,17 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
         try:
             _assert_not_cancelled()
             t0 = _time.perf_counter()
-            segments = await loop.run_in_executor(None, do_transcribe)
+            try:
+                segments = await loop.run_in_executor(None, do_transcribe)
+            finally:
+                if whisper_lease:
+                    try:
+                        from src.transcribe.streaming import unload_model
+
+                        unload_model()
+                    finally:
+                        model_resource_gate.release_whisper()
+                    whisper_lease = False
             t1 = _time.perf_counter()
             _assert_not_cancelled()
             logger.info(
@@ -936,15 +958,25 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
 
             _assert_not_cancelled()
             t2 = _time.perf_counter()
-            segments = await loop.run_in_executor(
-                None,
-                lambda: speaker_memory.rediarize_segments(
-                    segments,
-                    wav_path=wav_path,
-                    session_id=session_id,
-                    on_progress=_on_diarize_progress,
-                ),
-            )
+            diarization_lease = False
+            if config.get(
+                "whisper", "speaker_memory", "diarization_provider", default="legacy"
+            ) == "pyannote":
+                await model_resource_gate.acquire_llm_async()
+                diarization_lease = True
+            try:
+                segments = await loop.run_in_executor(
+                    None,
+                    lambda: speaker_memory.rediarize_segments(
+                        segments,
+                        wav_path=wav_path,
+                        session_id=session_id,
+                        on_progress=_on_diarize_progress,
+                    ),
+                )
+            finally:
+                if diarization_lease:
+                    model_resource_gate.release_llm()
             t3 = _time.perf_counter()
             _assert_not_cancelled()
             logger.info(
@@ -1005,5 +1037,12 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             })
             await rec_mod._broadcast_pipeline(session_id)
         finally:
+            if whisper_lease:
+                try:
+                    from src.transcribe.streaming import unload_model
+
+                    unload_model()
+                finally:
+                    model_resource_gate.release_whisper()
             _retranscribe_tasks.pop(session_id, None)
             _retranscribe_cancel_events.pop(session_id, None)

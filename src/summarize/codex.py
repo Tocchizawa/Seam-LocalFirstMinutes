@@ -79,7 +79,8 @@ class CodexProvider(SummarizerProvider):
         self._model = str(self._config.get("model", "")).strip()
         self._launcher_command = str(self._config.get("launcher_command", "")).strip()
         self._connect_timeout_sec = clamp_connect_timeout(
-            self._config.get("connect_timeout_sec", 12),
+            self._config.get("connect_timeout_sec", 30),
+            default=30,
         )
         extra = self._config.get("extra_args", [])
         self._extra_args = normalize_extra_args(extra)

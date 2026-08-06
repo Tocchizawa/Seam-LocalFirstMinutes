@@ -254,7 +254,7 @@ minutes_ai:
     launcher_command: ""
     launcher_shell: "/bin/zsh"
     launcher_interactive: true
-    connect_timeout_sec: 12
+    connect_timeout_sec: 30
     extra_args: []
 
 # 旧 ollama.minutes_* 設定は migration で minutes_ai.ollama.* へ移動

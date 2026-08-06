@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +24,12 @@ from src.api.errors import bad_request, conflict, not_found
 from src.api.ws import ws_manager
 from src.audio.mixer import RealtimeMixer
 from src.audio.mixed_writer import RealtimeMixedAudioWriter
-from src.audio.recorder import FFMPEG, SESSIONS_DIR, recorder
+from src.audio.recorder import SESSIONS_DIR, recorder
+from src.audio.resource_monitor import (
+    ResourceBusyError,
+    ResourceMonitor,
+    model_resource_gate,
+)
 from src.config import config
 from src.project.manager import project_manager
 from src.security import is_safe_session_id
@@ -38,7 +42,8 @@ SESSION_META_FILENAME = "session_meta.json"
 TRANSCRIPT_JSONL_FILENAME = "transcript.jsonl"
 _RECOVERABLE_STATES = {"stopping", "transcribing", "rediarizing", "saving"}
 AUDIO_FILE_PRIORITY = ("combined.flac", "combined.wav", "system.wav", "mic.wav")
-PLAYBACK_AUDIO_FILE_PRIORITY = ("combined.play.wav", "combined.wav", "combined.flac", "system.wav", "mic.wav")
+# 正本を優先し、旧セッションに残る再生用WAVだけ最後の互換 fallback にする。
+PLAYBACK_AUDIO_FILE_PRIORITY = AUDIO_FILE_PRIORITY + ("combined.play.wav",)
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
 
@@ -78,6 +83,7 @@ _recovery_state: dict = {
 }
 
 _ACTIVE_PIPELINE_STATES = {"recording", "stopping", "transcribing"}
+_resource_monitor = ResourceMonitor()
 
 
 def _watchdog_stall_sec() -> float:
@@ -143,6 +149,14 @@ def _is_valid_audio_file(path: Path) -> bool:
         return path.exists() and path.stat().st_size > 44
     except Exception:
         return False
+
+
+def _pick_audio_file(session_dir: Path, priority: tuple[str, ...]) -> Path | None:
+    for name in priority:
+        path = session_dir / name
+        if _is_valid_audio_file(path):
+            return path
+    return None
 
 
 def _has_usable_audio_from_result(result: dict | None) -> bool:
@@ -222,70 +236,8 @@ def _remove_intermediate_track_wavs(result: dict, *, keep: Path) -> None:
         result[key] = None
 
 
-def _ensure_playback_wav(flac_path: Path, wav_path: Path) -> Path | None:
-    """FLAC 再生互換のため、必要時に WAV を生成して返す。
-
-    Safari/WebView で FLAC seek が不安定なケースがあるため、
-    再生系は WAV 優先にする。
-    """
-    try:
-        if _is_valid_audio_file(wav_path):
-            # 元 FLAC より古い場合だけ再生成
-            if wav_path.stat().st_mtime >= flac_path.stat().st_mtime:
-                return wav_path
-        tmp_path = wav_path.with_suffix(".tmp.wav")
-        cmd = [
-            FFMPEG, "-y",
-            "-i", str(flac_path),
-            "-ar", "24000",
-            "-ac", "1",
-            "-c:a", "pcm_s16le",
-            str(tmp_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        if result.returncode != 0:
-            logger.warning(
-                "playback wav generation failed for %s (code=%s): %s",
-                flac_path.name,
-                result.returncode,
-                (result.stderr or "")[-400:],
-            )
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return None
-        if not _is_valid_audio_file(tmp_path):
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return None
-        tmp_path.replace(wav_path)
-        return wav_path
-    except Exception as e:
-        logger.warning("playback wav generation error: %s", e)
-        return None
-
-
 def _pick_playback_audio(session_dir: Path) -> Path | None:
-    for name in PLAYBACK_AUDIO_FILE_PRIORITY:
-        path = session_dir / name
-        if not _is_valid_audio_file(path):
-            continue
-        if name == "combined.play.wav":
-            flac_path = session_dir / "combined.flac"
-            if _is_valid_audio_file(flac_path):
-                refreshed = _ensure_playback_wav(flac_path, path)
-                if refreshed is not None:
-                    return refreshed
-        if name == "combined.flac":
-            wav_path = session_dir / "combined.play.wav"
-            generated = _ensure_playback_wav(path, wav_path)
-            if generated is not None:
-                return generated
-        return path
-    return None
+    return _pick_audio_file(session_dir, PLAYBACK_AUDIO_FILE_PRIORITY)
 
 
 def build_pipeline_transcript_payload(segments: list[dict]) -> dict:
@@ -364,6 +316,10 @@ def get_runtime_debug_snapshot() -> dict:
         "memory_guard": {
             "max_retained_pipelines": _max_retained_pipelines(),
             "max_transcript_segments_per_pipeline": _max_transcript_segments(),
+        },
+        "resource": {
+            "system": _resource_monitor.snapshot(),
+            "model_gate": model_resource_gate.snapshot(),
         },
         "pipelines_by_state": states,
         "active_pipeline": active_pipeline,
@@ -874,15 +830,26 @@ async def _finalize_session(session_id: str) -> None:
             except Exception:
                 pass
 
-        transcript = await loop.run_in_executor(
-            None,
-            lambda: speaker_memory.rediarize_segments(
-                segments,
-                wav_path=wav_path,
-                session_id=session_id,
-                on_progress=_on_diarize_progress,
-            ),
-        )
+        diarization_lease = False
+        if config.get(
+            "whisper", "speaker_memory", "diarization_provider", default="legacy"
+        ) == "pyannote":
+            # pyannote も MPS メモリを使うため、Whisper/LLM と排他にする。
+            await model_resource_gate.acquire_llm_async()
+            diarization_lease = True
+        try:
+            transcript = await loop.run_in_executor(
+                None,
+                lambda: speaker_memory.rediarize_segments(
+                    segments,
+                    wav_path=wav_path,
+                    session_id=session_id,
+                    on_progress=_on_diarize_progress,
+                ),
+            )
+        finally:
+            if diarization_lease:
+                model_resource_gate.release_llm()
         # rediarize 完了したので、progress フィールドをクリア (次の SAVING で再計算)
         if session_id in _pipelines:
             _pipelines[session_id]["progress"] = 1.0
@@ -1018,7 +985,7 @@ async def start_recording(req: StartRequest) -> dict:
     # 衝突回避: 同秒に再開した場合は連番付与
     suffix = 0
     sid = session_id
-    while sid in _pipelines:
+    while sid in _pipelines or _session_dir(sid).exists():
         suffix += 1
         sid = f"{session_id}_{suffix}"
     session_id = sid
@@ -1083,7 +1050,15 @@ async def start_recording(req: StartRequest) -> dict:
         corrections=corrections_list,
         vad_provider=vad_provider,
     )
-    streamer.start(loop)
+    try:
+        streamer.start(loop)
+    except ResourceBusyError:
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        raise conflict(
+            "LOCAL_MODEL_BUSY",
+            "別のローカルAI処理中のため、処理完了後に録音を開始してください",
+        )
     rec_cfg = config.get("recording", default={}) or {}
     mix_writer = RealtimeMixedAudioWriter(_session_dir(session_id))
     try:
@@ -1278,7 +1253,8 @@ async def get_session_segments(session_id: str) -> list[dict]:
 @router.get("/sessions/{session_id}/audio_info")
 async def get_session_audio_info(session_id: str) -> dict:
     """セッションの再生対象音声ファイルのメタ情報を返す。
-    優先: combined.play.wav → combined.wav → combined.flac → system.wav → mic.wav。
+    優先: combined.flac → combined.wav → system.wav → mic.wav。
+    旧セッションの combined.play.wav は最後の互換 fallback。
     """
     from src.config import APP_DIR
     sid = _require_safe_session_id(session_id)
@@ -1342,21 +1318,17 @@ async def recover_session_minutes(session_id: str, start_retranscribe: bool = Fa
     return resp
 
 
-def _pick_recovery_wav(session_dir: Path) -> Path | None:
-    for name in AUDIO_FILE_PRIORITY:
-        wav = session_dir / name
-        if wav.exists() and wav.stat().st_size > 44:
-            return wav
-    return None
+def _pick_recovery_audio(session_dir: Path) -> Path | None:
+    return _pick_audio_file(session_dir, AUDIO_FILE_PRIORITY)
 
 
-def _wav_duration_sec(wav: Path) -> int:
+def _audio_duration_sec(audio: Path) -> int:
     try:
-        if wav.suffix.lower() == ".flac":
+        if audio.suffix.lower() == ".flac":
             from src.audio.recorder import _flac_duration_sec
-            return int(_flac_duration_sec(wav))
+            return int(_flac_duration_sec(audio))
         import wave
-        with wave.open(str(wav), "rb") as wf:
+        with wave.open(str(audio), "rb") as wf:
             rate = wf.getframerate()
             if rate <= 0:
                 return 0
@@ -1400,7 +1372,7 @@ async def _materialize_session_minutes(
     if existing is not None:
         return existing, {
             "created": False,
-            "used_audio": _pick_recovery_wav(_session_dir(session_id)) is not None,
+            "used_audio": _pick_recovery_audio(_session_dir(session_id)) is not None,
             "used_segments": bool(existing.get("transcript")),
         }
 
@@ -1417,24 +1389,24 @@ async def _materialize_session_minutes(
             meta = {}
 
     segments = _load_persisted_segments(session_id)
-    wav_path = _pick_recovery_wav(session_dir)
-    if not segments and wav_path is None:
+    audio_path = _pick_recovery_audio(session_dir)
+    if not segments and audio_path is None:
         raise not_found("SESSION_DATA_NOT_FOUND", "音声と文字起こしデータが見つかりません")
 
     transcript: list[dict] = segments
-    if segments and wav_path is not None:
+    if segments and audio_path is not None:
         try:
             transcript = await asyncio.to_thread(
                 speaker_memory.rediarize_segments,
                 segments,
-                wav_path=str(wav_path),
+                wav_path=str(audio_path),
                 session_id=session_id,
             )
         except Exception as e:
             logger.warning("[recover] rediarize failed for %s, using raw segments: %s", session_id, e)
             transcript = segments
 
-    duration_sec = _wav_duration_sec(wav_path) if wav_path else 0
+    duration_sec = _audio_duration_sec(audio_path) if audio_path else 0
     if duration_sec <= 0 and transcript:
         try:
             duration_sec = int(max(float(seg.get("end", 0.0)) for seg in transcript))
@@ -1494,7 +1466,7 @@ async def _materialize_session_minutes(
 
     return minutes, {
         "created": True,
-        "used_audio": wav_path is not None,
+        "used_audio": audio_path is not None,
         "used_segments": bool(segments),
     }
 

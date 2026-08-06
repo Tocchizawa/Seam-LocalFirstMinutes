@@ -72,13 +72,82 @@ type PerfMode = "full" | "auto" | "eco";
 // モーダルを開き直しても直前のカテゴリを維持する (セッション内のみ)
 let lastCategory: Category = "appearance";
 
+function settingsFormSnapshot(data: Record<string, any>): string {
+  const whisper = data.whisper || {};
+  const perf = whisper.performance || {};
+  const speakerMemory = whisper.speaker_memory || {};
+  const ai = data.minutes_ai || {};
+  const reminder = data.recording?.stop_forget_reminder || {};
+  const appUpdate = data.app_update || {};
+  const provider = String(ai.provider || "ollama");
+  const validProvider = SUMMARIZE_PROVIDERS.includes(provider as SummarizeProvider)
+    ? provider
+    : "ollama";
+  const readNumber = (value: unknown, fallback: number) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  };
+  const optionalNumber = (value: unknown) => {
+    if (!value) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+
+  return JSON.stringify({
+    wm: String(whisper.model || "medium"),
+    perfMode: perf.mode === "full" || perf.mode === "eco" ? perf.mode : "auto",
+    perfCpuThreshold: Math.max(30, Math.min(95, Math.round(readNumber(perf.cpu_high_threshold, 75)))),
+    perfMemoryThreshold: Math.max(50, Math.min(98, Math.round(readNumber(perf.memory_high_threshold, 85)))),
+    perfThrottleRatio: Number(Math.max(0.1, Math.min(3, readNumber(perf.throttle_ratio, 0.5))).toFixed(2)),
+    perfMaxThrottleSec: Number(Math.max(0.5, Math.min(10, readNumber(perf.max_throttle_sec, 3))).toFixed(1)),
+    perfWorkerNice: Math.max(0, Math.min(19, Math.round(readNumber(perf.worker_nice, 3)))),
+    perfMlxMemoryRatio: Number(Math.max(0.2, Math.min(0.8, readNumber(perf.mlx_memory_ratio, 0.4))).toFixed(2)),
+    diarizationEnabled: Boolean(speakerMemory.diarization_enabled ?? true),
+    speakerMemoryEnabled: Boolean(speakerMemory.enabled ?? true),
+    speakerMatchThreshold: Number(readNumber(speakerMemory.match_threshold, 0.82).toFixed(2)),
+    speakerMinAudioSec: Number(readNumber(speakerMemory.min_audio_sec, 1).toFixed(1)),
+    diarProvider: speakerMemory.diarization_provider === "pyannote" ? "pyannote" : "legacy",
+    diarMinSpeakers: optionalNumber(speakerMemory.pyannote_min_speakers),
+    diarMaxSpeakers: optionalNumber(speakerMemory.pyannote_max_speakers),
+    diarDevice: speakerMemory.pyannote_device === "cpu" || speakerMemory.pyannote_device === "mps"
+      ? speakerMemory.pyannote_device
+      : "auto",
+    lm: String(data.ollama?.context_model || "qwen3:8b"),
+    aiProvider: validProvider,
+    aiAutoGenerate: Boolean(ai.auto_generate ?? true),
+    aiGenerateTitle: Boolean(ai.generate_title ?? true),
+    aiAutoDictionaryUpdate: Boolean(ai.auto_dictionary_update ?? ai.auto_correct_dictionary ?? true),
+    aiTimeoutSec: Math.max(30, Math.round(readNumber(ai.timeout_sec, 300))),
+    aiOllamaModel: String(ai.ollama?.model ?? "qwen3:8b"),
+    aiOllamaCtx: Math.max(2048, Math.round(readNumber(ai.ollama?.num_ctx, 8192))),
+    aiClaudeModel: String(ai.claude_api?.model ?? "claude-sonnet-4-6"),
+    aiOpenAIModel: String(ai.openai?.model ?? "gpt-4o-mini"),
+    aiGeminiModel: String(ai.gemini?.model ?? "gemini-2.0-flash"),
+    aiClaudeCodeModel: String(ai.claude_code?.model ?? "sonnet"),
+    aiCodexModel: String(ai.codex?.model ?? "").trim(),
+    aiClaudeCodeLauncher: String(ai.claude_code?.launcher_command ?? "").trim(),
+    aiCodexLauncher: String(ai.codex?.launcher_command ?? "").trim(),
+    aiCustomPrompt: String(ai.custom_system_prompt ?? ""),
+    stopForgetEnabled: Boolean(reminder.enabled ?? true),
+    stopForgetSilenceSec: Math.max(10, Math.round(readNumber(reminder.silence_sec, 300))),
+    stopForgetLevelThreshold: Number(readNumber(reminder.level_threshold, 0.02).toFixed(3)),
+    ll: String(data.logging?.level || "INFO"),
+    updateCheckOnStartup: Boolean(appUpdate.auto_install_on_startup ?? false)
+      || appUpdate.check_on_startup !== false,
+    updateAutoInstallOnStartup: Boolean(appUpdate.auto_install_on_startup ?? false),
+    debugEnabled: Boolean(data.debug?.enabled),
+  });
+}
+
 export function SettingsModal({ onClose }: Props) {
   const { recording } = useRecording();
   const recordingRef = useRef(recording);
   const [closing, setClosing] = useState(false);
   const [settings, setSettings] = useState<Record<string, any> | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [closePromptOpen, setClosePromptOpen] = useState(false);
   const [category, setCategory] = useState<Category>(lastCategory);
 
   const [wm, setWm] = useState("medium");
@@ -90,8 +159,11 @@ export function SettingsModal({ onClose }: Props) {
   // ─── 文字起こしパフォーマンス ───
   const [perfMode, setPerfMode] = useState<PerfMode>("auto");
   const [perfCpuThreshold, setPerfCpuThreshold] = useState(75);
+  const [perfMemoryThreshold, setPerfMemoryThreshold] = useState(85);
   const [perfThrottleRatio, setPerfThrottleRatio] = useState(0.5);
   const [perfMaxThrottleSec, setPerfMaxThrottleSec] = useState(3.0);
+  const [perfWorkerNice, setPerfWorkerNice] = useState(3);
+  const [perfMlxMemoryRatio, setPerfMlxMemoryRatio] = useState(0.4);
 
   const [lm, setLm] = useState("qwen3:8b");
   const [ll, setLl] = useState("INFO");
@@ -137,7 +209,7 @@ export function SettingsModal({ onClose }: Props) {
   const [stopForgetSilenceSec, setStopForgetSilenceSec] = useState(300);
   const [stopForgetLevelThreshold, setStopForgetLevelThreshold] = useState(0.02);
 
-  const [speakersLoading, setSpeakersLoading] = useState(true);
+  const [speakersLoading, setSpeakersLoading] = useState(false);
   const [speakers, setSpeakers] = useState<SpeakerProfile[]>([]);
   const [speakersError, setSpeakersError] = useState("");
   const [labelDrafts, setLabelDrafts] = useState<Record<string, string>>({});
@@ -158,6 +230,10 @@ export function SettingsModal({ onClose }: Props) {
   const [diarTesting, setDiarTesting] = useState(false);
   const [diarTestResult, setDiarTestResult] = useState<DiarizationTestResult | null>(null);
   const availableUpdateRef = useRef<AppUpdateInfo | null>(null);
+  const speakersLoadedRef = useRef(false);
+  const aiAuxLoadedRef = useRef(false);
+  const diarStatusLoadedRef = useRef(false);
+  const closeRef = useRef<() => void>(() => {});
 
   const refreshDiarStatus = async () => {
     try {
@@ -169,14 +245,14 @@ export function SettingsModal({ onClose }: Props) {
 
   const categories = useMemo(
     () => [
-      { key: "appearance" as const, label: "外観" },
-      { key: "app" as const, label: "アプリ" },
-      { key: "transcribe" as const, label: "文字起こし" },
-      { key: "speakers" as const, label: "話者分離" },
-      { key: "speaker-list" as const, label: "話者一覧" },
-      { key: "ai" as const, label: "要約" },
-      { key: "recording" as const, label: "録音" },
-      { key: "debug" as const, label: "デバッグ" },
+      { key: "appearance" as const, label: "外観", group: "基本" },
+      { key: "app" as const, label: "アプリ", group: "基本" },
+      { key: "recording" as const, label: "録音", group: "音声" },
+      { key: "transcribe" as const, label: "文字起こし", group: "音声" },
+      { key: "speakers" as const, label: "話者分離", group: "音声" },
+      { key: "speaker-list" as const, label: "話者一覧", group: "音声" },
+      { key: "ai" as const, label: "要約", group: "AI" },
+      { key: "debug" as const, label: "デバッグ", group: "開発" },
     ],
     [],
   );
@@ -215,7 +291,9 @@ export function SettingsModal({ onClose }: Props) {
   }, []);
 
   useEffect(() => {
-    Promise.all([getSettings(), listSpeakers().catch(() => ({ speakers: [] }))]).then(([s, sp]) => {
+    let cancelled = false;
+    getSettings().then((s) => {
+      if (cancelled) return;
       setSettings(s);
       setWm((s.whisper as any)?.model || "medium");
       setLm((s.ollama as any)?.context_model || "qwen3:8b");
@@ -230,8 +308,11 @@ export function SettingsModal({ onClose }: Props) {
       const mode = String(perf.mode ?? "auto");
       setPerfMode(mode === "full" || mode === "eco" ? mode : "auto");
       setPerfCpuThreshold(Number(perf.cpu_high_threshold ?? 75));
+      setPerfMemoryThreshold(Number(perf.memory_high_threshold ?? 85));
       setPerfThrottleRatio(Number(perf.throttle_ratio ?? 0.5));
       setPerfMaxThrottleSec(Number(perf.max_throttle_sec ?? 3.0));
+      setPerfWorkerNice(Number(perf.worker_nice ?? 3));
+      setPerfMlxMemoryRatio(Number(perf.mlx_memory_ratio ?? 0.4));
 
       const speakerMemory = (s.whisper as any)?.speaker_memory || {};
       setDiarizationEnabled(Boolean(speakerMemory.diarization_enabled ?? true));
@@ -243,7 +324,6 @@ export function SettingsModal({ onClose }: Props) {
       setDiarMaxSpeakers(speakerMemory.pyannote_max_speakers ? String(speakerMemory.pyannote_max_speakers) : "");
       const dev = String(speakerMemory.pyannote_device ?? "auto");
       setDiarDevice(dev === "cpu" || dev === "mps" ? dev : "auto");
-      void refreshDiarStatus();
 
       const reminder = (s.recording as any)?.stop_forget_reminder || {};
       setStopForgetEnabled(Boolean(reminder.enabled ?? true));
@@ -276,24 +356,30 @@ export function SettingsModal({ onClose }: Props) {
       setAiCustomPrompt(String(ai.custom_system_prompt ?? ""));
       setAiConsent(ai.consent || {});
 
-      // 並列取得 (失敗しても他処理は続行)
-      void listApiKeys().then((res) => setAiKeysPresent(res.providers || {})).catch(() => {});
-      void getRecommendedProvider().then(setAiRecommended).catch(() => {});
-
-      setSpeakers(sp.speakers || []);
-      const drafts: Record<string, string> = {};
-      (sp.speakers || []).forEach((speaker) => { drafts[speaker.id] = speaker.label; });
-      setLabelDrafts(drafts);
-      setSpeakersLoading(false);
+      setSettingsLoading(false);
     }).catch((e) => {
+      if (cancelled) return;
       setSettings({});
-      setSpeakersLoading(false);
+      setSettingsLoading(false);
       setSpeakersError(e instanceof Error ? e.message : "設定の取得に失敗しました");
     });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") handleClose(); };
+    if (category !== "speaker-list" || speakersLoadedRef.current) return;
+    speakersLoadedRef.current = true;
+    void refreshSpeakers();
+  }, [category]);
+
+  useEffect(() => {
+    if (category !== "speakers" || diarStatusLoadedRef.current) return;
+    diarStatusLoadedRef.current = true;
+    void refreshDiarStatus();
+  }, [category]);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") closeRef.current(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, []);
@@ -316,22 +402,35 @@ export function SettingsModal({ onClose }: Props) {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  // CLI provider のモデル一覧を取得 (Codex はキャッシュファイルから動的、Claude Code は alias 固定)
+  // 要約タブを開いた時だけ補助情報を取得する。設定モーダルの初期表示を塞がない。
   useEffect(() => {
     let cancelled = false;
-    getCodexModels()
-      .then((list) => { if (!cancelled) setCodexModelChoices(list); })
-      .catch(() => { /* キャッシュが無いだけなら無視 */ });
-    getClaudeCodeModels()
-      .then((list) => { if (!cancelled) setClaudeCodeChoices(list); })
-      .catch(() => { /* noop */ });
-    getDefaultSummaryPrompt()
-      .then((r) => { if (!cancelled) setDefaultPrompt(r.prompt); })
-      .catch(() => { /* noop */ });
-    return () => { cancelled = true; };
-  }, []);
+    let completed = false;
+    if (category !== "ai" || aiAuxLoadedRef.current) return () => {};
+    aiAuxLoadedRef.current = true;
+    Promise.all([
+      getCodexModels().catch(() => []),
+      getClaudeCodeModels().catch(() => []),
+      getDefaultSummaryPrompt().catch(() => null),
+      listApiKeys().catch(() => null),
+      getRecommendedProvider().catch(() => null),
+    ]).then(([codexModels, claudeModels, prompt, keys, recommended]) => {
+      completed = true;
+      if (cancelled) return;
+      setCodexModelChoices(codexModels);
+      setClaudeCodeChoices(claudeModels);
+      if (prompt) setDefaultPrompt(prompt.prompt);
+      if (keys) setAiKeysPresent(keys.providers || {});
+      if (recommended) setAiRecommended(recommended);
+    });
+    return () => {
+      cancelled = true;
+      if (!completed) aiAuxLoadedRef.current = false;
+    };
+  }, [category]);
 
-  const handleClose = () => {
+  const finishClose = () => {
+    if (closing) return;
     setClosing(true);
     setTimeout(onClose, 180);
   };
@@ -342,7 +441,89 @@ export function SettingsModal({ onClose }: Props) {
     promptValue.trim() !== ""
     && (!defaultPrompt || promptValue.trim() !== defaultPrompt.trim());
 
-  const save = async () => {
+  const currentSettingsSnapshot = useMemo(() => settingsFormSnapshot({
+    whisper: {
+      model: wm,
+      performance: {
+        mode: perfMode,
+        cpu_high_threshold: perfCpuThreshold,
+        memory_high_threshold: perfMemoryThreshold,
+        throttle_ratio: perfThrottleRatio,
+        max_throttle_sec: perfMaxThrottleSec,
+        worker_nice: perfWorkerNice,
+        mlx_memory_ratio: perfMlxMemoryRatio,
+      },
+      speaker_memory: {
+        diarization_enabled: diarizationEnabled,
+        enabled: speakerMemoryEnabled,
+        match_threshold: speakerMatchThreshold,
+        min_audio_sec: speakerMinAudioSec,
+        diarization_provider: diarProvider,
+        pyannote_device: diarDevice,
+        pyannote_min_speakers: diarMinSpeakers || null,
+        pyannote_max_speakers: diarMaxSpeakers || null,
+      },
+    },
+    ollama: { context_model: lm },
+    minutes_ai: {
+      provider: aiProvider,
+      auto_generate: aiAutoGenerate,
+      generate_title: aiGenerateTitle,
+      auto_dictionary_update: aiAutoDictionaryUpdate,
+      custom_system_prompt: promptIsCustom ? promptValue : "",
+      timeout_sec: aiTimeoutSec,
+      ollama: { model: aiOllamaModel, num_ctx: aiOllamaCtx },
+      claude_api: { model: aiClaudeModel },
+      openai: { model: aiOpenAIModel },
+      gemini: { model: aiGeminiModel },
+      claude_code: { model: aiClaudeCodeModel, launcher_command: aiClaudeCodeLauncher },
+      codex: { model: aiCodexModel, launcher_command: aiCodexLauncher },
+    },
+    recording: {
+      stop_forget_reminder: {
+        enabled: stopForgetEnabled,
+        silence_sec: stopForgetSilenceSec,
+        level_threshold: stopForgetLevelThreshold,
+      },
+    },
+    logging: { level: ll },
+    app_update: {
+      check_on_startup: updateCheckOnStartup,
+      auto_install_on_startup: updateAutoInstallOnStartup,
+    },
+    debug: { enabled: debugEnabled },
+  }), [
+    wm, perfMode, perfCpuThreshold, perfMemoryThreshold, perfThrottleRatio,
+    perfMaxThrottleSec, perfWorkerNice, perfMlxMemoryRatio, diarizationEnabled,
+    speakerMemoryEnabled, speakerMatchThreshold, speakerMinAudioSec, diarProvider,
+    diarDevice, diarMinSpeakers, diarMaxSpeakers, lm, aiProvider, aiAutoGenerate,
+    aiGenerateTitle, aiAutoDictionaryUpdate, promptIsCustom, promptValue, aiTimeoutSec,
+    aiOllamaModel, aiOllamaCtx, aiClaudeModel, aiOpenAIModel, aiGeminiModel,
+    aiClaudeCodeModel, aiCodexModel, aiClaudeCodeLauncher, aiCodexLauncher,
+    stopForgetEnabled, stopForgetSilenceSec, stopForgetLevelThreshold, ll,
+    updateCheckOnStartup, updateAutoInstallOnStartup, debugEnabled,
+  ]);
+  const savedSettingsSnapshot = useMemo(
+    () => (settings ? settingsFormSnapshot(settings) : ""),
+    [settings],
+  );
+  const isDirty = Boolean(settings) && currentSettingsSnapshot !== savedSettingsSnapshot;
+
+  const handleClose = () => {
+    if (closing) return;
+    if (closePromptOpen) {
+      setClosePromptOpen(false);
+      return;
+    }
+    if (isDirty) {
+      setClosePromptOpen(true);
+      return;
+    }
+    finishClose();
+  };
+  closeRef.current = handleClose;
+
+  const save = async (): Promise<boolean> => {
     setSaving(true);
     setSaved(false);
     // デフォルトと同一 (または空) なら "" を保存 = 既定プロンプト使用
@@ -354,8 +535,11 @@ export function SettingsModal({ onClose }: Props) {
           performance: {
             mode: perfMode,
             cpu_high_threshold: Math.max(30, Math.min(95, Math.round(perfCpuThreshold))),
+            memory_high_threshold: Math.max(50, Math.min(98, Math.round(perfMemoryThreshold))),
             throttle_ratio: Number(Math.max(0.1, Math.min(3, perfThrottleRatio)).toFixed(2)),
             max_throttle_sec: Number(Math.max(0.5, Math.min(10, perfMaxThrottleSec)).toFixed(1)),
+            worker_nice: Math.max(0, Math.min(19, Math.round(perfWorkerNice))),
+            mlx_memory_ratio: Number(Math.max(0.2, Math.min(0.8, perfMlxMemoryRatio)).toFixed(2)),
           },
           speaker_memory: {
             diarization_enabled: diarizationEnabled,
@@ -411,11 +595,18 @@ export function SettingsModal({ onClose }: Props) {
       window.dispatchEvent(new CustomEvent("settings-updated", { detail: u }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+      return true;
+    } catch (e) {
+      showToast({
+        kind: "err",
+        text: `設定の保存に失敗: ${e instanceof Error ? e.message : "不明なエラー"}`,
+      });
+      return false;
     } finally {
       setSaving(false);
     }
   };
-  saveRef.current = () => { if (!saving) void save(); };
+  saveRef.current = () => { if (!saving && isDirty) void save(); };
 
   const pickTheme = (m: ThemeMode) => {
     setTheme(m);
@@ -677,23 +868,34 @@ export function SettingsModal({ onClose }: Props) {
 
         <div className="flex flex-1 min-h-0 overflow-hidden">
           <aside className="w-[160px] border-r border-(--border) p-3 bg-(--surface) overflow-y-auto shrink-0">
-            <div className="flex flex-col gap-1">
-              {categories.map((c) => (
-                <button
-                  key={c.key}
-                  onClick={() => setCategory(c.key)}
-                  className={`settings-nav-item ${category === c.key ? "active" : ""}`}
-                >
-                  {c.label}
-                </button>
+            <div className="flex flex-col gap-3">
+              {Array.from(new Set(categories.map((c) => c.group))).map((group) => (
+                <div key={group}>
+                  <p className="settings-nav-group-title">{group}</p>
+                  <div className="flex flex-col gap-1">
+                    {categories.filter((c) => c.group === group).map((c) => (
+                      <button
+                        key={c.key}
+                        onClick={() => setCategory(c.key)}
+                        className={`settings-nav-item ${category === c.key ? "active" : ""}`}
+                      >
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </aside>
 
-          <div className="flex-1 overflow-y-auto px-7 py-6">
+          <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
+            <div className="flex-1 overflow-y-auto px-7 py-6">
             {!settings ? (
-              <div className="flex justify-center py-12">
+              <div className="flex h-full min-h-[240px] flex-col items-center justify-center gap-2">
                 <Spinner size={20} />
+                <span className="text-[11px] text-(--t3)">
+                  {settingsLoading ? "設定を読み込んでいます..." : "設定を表示できませんでした"}
+                </span>
               </div>
             ) : (
               <div className="anim-fade-in">
@@ -782,7 +984,7 @@ export function SettingsModal({ onClose }: Props) {
                           {
                             key: "auto",
                             label: "自動 (推奨)",
-                            hint: "CPU 使用率が高い間だけ処理を抑制して他アプリを優先。",
+                            hint: "CPU またはメモリ使用率が高い間だけ処理を抑制して他アプリを優先。",
                           },
                           {
                             key: "eco",
@@ -805,6 +1007,22 @@ export function SettingsModal({ onClose }: Props) {
                                 step={5}
                                 value={perfCpuThreshold}
                                 onChange={(e) => setPerfCpuThreshold(Number(e.target.value || 75))}
+                                className="input s-control"
+                              />
+                            </SRow>
+                          )}
+                          {perfMode === "auto" && (
+                            <SRow
+                              label="抑制を開始するメモリ使用率 (%)"
+                              hint="50〜98。システムメモリが逼迫したときも処理を抑制"
+                            >
+                              <input
+                                type="number"
+                                min={50}
+                                max={98}
+                                step={5}
+                                value={perfMemoryThreshold}
+                                onChange={(e) => setPerfMemoryThreshold(Number(e.target.value || 85))}
                                 className="input s-control"
                               />
                             </SRow>
@@ -839,6 +1057,34 @@ export function SettingsModal({ onClose }: Props) {
                           </SRow>
                         </>
                       )}
+                      <SRow
+                        label="Seam プロセスの優先度"
+                        hint="0〜19。大きいほど他アプリを優先。変更は次の文字起こしから適用"
+                      >
+                        <input
+                          type="number"
+                          min={0}
+                          max={19}
+                          step={1}
+                          value={perfWorkerNice}
+                          onChange={(e) => setPerfWorkerNice(Number(e.target.value || 3))}
+                          className="input s-control"
+                        />
+                      </SRow>
+                      <SRow
+                        label="Whisper Metal メモリ目安 (搭載 RAM 比)"
+                        hint="0.2〜0.8。relaxed 設定のためハード上限ではありません。反映はアプリ再起動後"
+                      >
+                        <input
+                          type="number"
+                          min={0.2}
+                          max={0.8}
+                          step={0.05}
+                          value={perfMlxMemoryRatio}
+                          onChange={(e) => setPerfMlxMemoryRatio(Number(e.target.value || 0.4))}
+                          className="input s-control"
+                        />
+                      </SRow>
                     </SGroup>
                   </>
                 )}
@@ -1466,24 +1712,35 @@ export function SettingsModal({ onClose }: Props) {
                 )}
               </div>
             )}
-          </div>
-        </div>
+            </div>
 
-        {settings && (
-          <footer className="flex items-center gap-3 p-4 px-5 border-t border-(--border) shrink-0">
-            <button onClick={save} disabled={saving} className="btn btn-primary h-8 px-4 text-[12px]">
-              {saving ? "保存中..." : "保存"}
-            </button>
-            {saved && (
-              <span className="anim-fade-in flex items-center gap-1 text-[11px] text-(--success)">
-                <CheckCircle size={12} weight="fill" />
-                保存しました
-              </span>
+            {settings && (
+              <footer className="settings-save-footer sticky bottom-0 flex items-center gap-3 px-5 py-3 shrink-0">
+                <button
+                  onClick={() => void save()}
+                  disabled={saving || !isDirty}
+                  className="btn btn-primary h-8 px-4 text-[12px]"
+                >
+                  {saving ? "保存中..." : "保存"}
+                </button>
+                {saved && (
+                  <span className="anim-fade-in flex items-center gap-1 text-[11px] text-(--success)">
+                    <CheckCircle size={12} weight="fill" />
+                    保存しました
+                  </span>
+                )}
+                {!saved && isDirty && (
+                  <span className="text-[11px] text-(--warning)">未保存の変更があります</span>
+                )}
+                {!saved && !isDirty && (
+                  <span className="text-[11px] text-(--t4)">変更はありません</span>
+                )}
+                <span className="flex-1" />
+                <span className="text-[10px] text-(--t4)">⌘S で保存</span>
+              </footer>
             )}
-            <span className="flex-1" />
-            <span className="text-[10px] text-(--t4)">⌘S で保存</span>
-          </footer>
-        )}
+          </main>
+        </div>
       </div>
 
       {mergeDialogOpen && (
@@ -1500,6 +1757,24 @@ export function SettingsModal({ onClose }: Props) {
           provider={aiConsentDialog}
           onCancel={() => setAiConsentDialog(null)}
           onAccept={() => acceptAiConsent(aiConsentDialog)}
+        />
+      )}
+
+      {closePromptOpen && (
+        <UnsavedChangesDialog
+          busy={saving}
+          onCancel={() => setClosePromptOpen(false)}
+          onDiscard={() => {
+            setClosePromptOpen(false);
+            finishClose();
+          }}
+          onSave={async () => {
+            const ok = await save();
+            if (ok) {
+              setClosePromptOpen(false);
+              finishClose();
+            }
+          }}
         />
       )}
     </div>
@@ -1782,6 +2057,53 @@ function ConsentDialog({
           </button>
           <button onClick={onAccept} className="btn btn-primary h-7 px-3 text-[11px]">
             理解した上で利用する
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function UnsavedChangesDialog({
+  busy, onCancel, onDiscard, onSave,
+}: {
+  busy: boolean;
+  onCancel: () => void;
+  onDiscard: () => void;
+  onSave: () => void | Promise<void>;
+}) {
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center anim-modal-overlay-in">
+      <div
+        className="absolute inset-0 cursor-pointer"
+        onClick={busy ? undefined : onCancel}
+        style={{ background: "rgba(0,0,0,0.4)" }}
+      />
+      <div
+        className="dialog-shell relative w-[420px] max-w-[92vw] flex flex-col anim-modal-in"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-settings-title"
+      >
+        <header className="px-5 py-4 border-b border-(--border)">
+          <h3 id="unsaved-settings-title" className="text-[14px] font-semibold text-(--t1)">
+            設定を閉じますか？
+          </h3>
+        </header>
+        <div className="px-5 py-4">
+          <p className="text-[12px] text-(--t2) leading-relaxed">
+            保存していない変更があります！保存せずに閉じると、変更内容は破棄されます。
+          </p>
+        </div>
+        <footer className="px-4 py-3 border-t border-(--border) flex items-center justify-end gap-2">
+          <button onClick={onCancel} disabled={busy} className="btn h-7 px-3 text-[11px]">
+            キャンセル
+          </button>
+          <button onClick={onDiscard} disabled={busy} className="btn h-7 px-3 text-[11px]">
+            保存せず閉じる
+          </button>
+          <button onClick={() => void onSave()} disabled={busy} className="btn btn-primary h-7 px-3 text-[11px]">
+            {busy ? <Spinner size={11} /> : "保存して閉じる"}
           </button>
         </footer>
       </div>

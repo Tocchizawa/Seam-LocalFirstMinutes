@@ -342,7 +342,7 @@ with tempfile.TemporaryDirectory() as tmp:
         )
         assert_eq(
             "codex connect_timeout_sec default",
-            12,
+            30,
             c.get("minutes_ai", "codex", "connect_timeout_sec"),
         )
         c.update({
@@ -367,6 +367,12 @@ with tempfile.TemporaryDirectory() as tmp:
         assert_eq(
             "codex connect_timeout_sec preserved",
             5,
+            c.get("minutes_ai", "codex", "connect_timeout_sec"),
+        )
+        c.update({"minutes_ai": {"codex": {"connect_timeout_sec": 12}}})
+        assert_eq(
+            "codex legacy default timeout migrated",
+            30,
             c.get("minutes_ai", "codex", "connect_timeout_sec"),
         )
         assert_eq("app update check_on_startup default", True, c.get("app_update", "check_on_startup"))

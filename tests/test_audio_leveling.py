@@ -88,6 +88,7 @@ class AudioLevelingTest(unittest.TestCase):
             self.assertIsNotNone(combined)
             self.assertEqual(Path(combined).name, "combined.flac")
             self.assertFalse((Path(td) / "combined.wav").exists())
+            self.assertFalse((Path(td) / "combined.play.wav").exists())
             audio = _read_audio(Path(combined))
             self.assertAlmostEqual(len(audio) / 16000, 2.0, delta=0.05)
             self.assertGreater(_rms(audio[:16000]), _rms(audio[16000:]) * 3.0)
