@@ -3,6 +3,36 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.12] - 2026-08-06
+
+This beta improves recording controls and keeps ScreenCaptureKit internal audio capture recoverable across display-idle sleep and OS-initiated stream stops.
+
+### Added
+
+- Add settings for speaker diarization, custom summary prompts, transcription throttling, quit confirmation, and native completion notifications.
+- Add structured ScreenCaptureKit diagnostics for stream errors, captured bytes, elapsed duration, restart reasons, and recovery state.
+
+### Fixed
+
+- Prevent display-idle sleep while internal audio recording is active.
+- Recreate the same ScreenCaptureKit capture path after stream stops, sidecar exits, raw-byte stalls, or a silent tail after valid audio.
+- Preserve every captured RAW segment and insert silence only for the measured recovery gap.
+- Wait for the display capture source to return without consuming the recovery budget, while limiting consecutive non-display restart failures.
+- Avoid repeated silent-tail restarts until the recreated stream has captured new non-silent audio.
+- Use `Seam Setup` as the DMG volume name to avoid macOS mount-path conflicts.
+
+### Tests
+
+- `./scripts/oss_preflight.sh`
+- `uv run python tests/test_system_capture_failures.py` (27 tests)
+- `uv run python tests/test_recorder_preflight.py` (11 tests)
+- `uv run python tests/test_recording_pipeline_failures.py` (6 tests)
+- `PYTHONPATH=. uv run python tests/test_audio_leveling.py` (3 tests)
+- `uv run python tests/test_streaming_generation.py` (3 tests)
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml -- --nocapture` (3 tests)
+- Objective-C sidecar compile with `-Wall -Wextra -Werror`
+- Target PR: [#82](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/82)
+
 ## [0.2.0-beta.11] - 2026-07-13
 
 This beta release replaces the internal system audio capture path with ScreenCaptureKit and removes the previous Core Audio Tap fallback paths.
