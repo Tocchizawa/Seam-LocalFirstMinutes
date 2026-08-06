@@ -3,6 +3,32 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.13] - 2026-08-06
+
+This beta reduces recording storage and local AI resource contention, and gives Codex CLI connection checks enough startup time on macOS.
+
+### Added
+
+- Add CPU, memory, process-priority, and local-model coordination controls for Whisper and summary processing.
+- Add a sticky settings save footer with unsaved-change confirmation.
+- Add runtime resource snapshots for diagnostics.
+
+### Changed
+
+- Save new mixed recordings as 16 kHz mono FLAC and stop generating a redundant playback WAV.
+- Prefer canonical FLAC for playback and recovery while retaining legacy WAV compatibility.
+- Load slower settings data only when its category is opened.
+- Increase the Codex CLI connection-test timeout from 12 to 30 seconds and migrate the previous default.
+
+### Tests
+
+- `./scripts/oss_preflight.sh`
+- `PYTHONPATH=. ./.venv/bin/python tests/test_summarize_foundation.py`
+- `PYTHONPATH=. ./.venv/bin/python tests/test_cli_providers.py`
+- `PYTHONPATH=. ./.venv/bin/python tests/test_recording_pipeline_failures.py`
+- `PYTHONPATH=. ./.venv/bin/python tests/test_resource_monitor.py`
+- Signed and notarized macOS `.app` / DMG build
+
 ## [0.2.0-beta.12] - 2026-08-06
 
 This beta improves recording controls and keeps ScreenCaptureKit internal audio capture recoverable across display-idle sleep and OS-initiated stream stops.
