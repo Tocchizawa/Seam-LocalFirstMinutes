@@ -85,7 +85,7 @@ class RealtimeMixedAudioWriter:
         cmd = [
             FFMPEG, "-y",
             "-i", str(self.wav_path),
-            "-ar", "24000", "-ac", "1",
+            "-ar", str(self.sample_rate), "-ac", "1",
             "-c:a", "flac", "-compression_level", "8",
             str(self.flac_path),
         ]

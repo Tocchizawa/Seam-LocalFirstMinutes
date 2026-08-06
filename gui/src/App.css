@@ -828,6 +828,23 @@ button { font-family: inherit; }
   border-color: var(--border);
   background: var(--surface-2);
 }
+.settings-nav-group-title {
+  margin: 0 10px 5px;
+  color: var(--t4);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.settings-save-footer {
+  background: color-mix(in srgb, var(--dialog-bg) 94%, transparent);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -10px 22px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(12px);
+}
+[data-theme="light"] .settings-save-footer {
+  box-shadow: 0 -10px 22px rgba(0, 0, 0, 0.06);
+}
 
 /* ─── Radio card (設定画面のプロバイダ選択など) ──────── */
 .provider-card {

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 import queue
@@ -20,6 +21,11 @@ from typing import Awaitable, Callable
 import numpy as np
 
 from src.config import config
+from src.audio.resource_monitor import (
+    ResourceBusyError,
+    ResourceMonitor,
+    model_resource_gate,
+)
 from src.speakers import speaker_memory
 from src.transcribe.hallucination_filter import HallucinationFilter
 
@@ -30,14 +36,14 @@ SAMPLE_RATE = 16000
 
 
 # ─── システム負荷を抑えるための初期設定 ──────────────────────────
-# MLX (Apple Metal) のメモリキャップを relaxed モードで設定。
-# 必要に応じてキャップを超えられるが、通常時は他アプリ用の余白を確保。
+# MLX (Apple Metal) のメモリ目安を設定。
+# MLXのバージョンに応じて、top-level APIまたは旧metal APIを使う。
 try:
     import mlx.core as _mx  # type: ignore
     import psutil as _psutil  # type: ignore
     _total_gb = _psutil.virtual_memory().total / (1024 ** 3)
     # 既定はシステム RAM の 40% を上限に (設定 whisper.performance.mlx_memory_ratio)。
-    # relaxed=True なので必要時は超えられる。16GB Mac → 約 6GB / 32GB → 約 13GB
+    # 16GB Mac → 約 6GB / 32GB → 約 13GB
     try:
         _mem_ratio = max(0.2, min(0.8, float(
             config.get("whisper", "performance", "mlx_memory_ratio", default=0.4)
@@ -47,11 +53,25 @@ try:
     _cap_gb = min(24, max(4, int(_total_gb * _mem_ratio)))
     _cap_bytes = _cap_gb * 1024 * 1024 * 1024
     try:
-        if hasattr(_mx, "metal") and hasattr(_mx.metal, "set_memory_limit"):
-            _mx.metal.set_memory_limit(_cap_bytes, relaxed=True)
-            logger.info("MLX Metal memory cap: %d GB (relaxed)", _cap_gb)
-        # キャッシュも緩めに
-        if hasattr(_mx, "metal") and hasattr(_mx.metal, "set_cache_limit"):
+        _memory_limit_mode: str | None = None
+        memory_limit = getattr(_mx, "set_memory_limit", None)
+        cache_limit = getattr(_mx, "set_cache_limit", None)
+        if callable(memory_limit):
+            memory_limit(_cap_bytes)
+            _memory_limit_mode = "limit"
+        elif hasattr(_mx, "metal") and hasattr(_mx.metal, "set_memory_limit"):
+            try:
+                _mx.metal.set_memory_limit(_cap_bytes, relaxed=True)
+                _memory_limit_mode = "relaxed"
+            except TypeError:
+                # MLX 0.31.x does not expose the relaxed keyword.
+                _mx.metal.set_memory_limit(_cap_bytes)
+                _memory_limit_mode = "limit"
+        if _memory_limit_mode is not None:
+            logger.info("MLX Metal memory cap: %d GB (%s)", _cap_gb, _memory_limit_mode)
+        if callable(cache_limit):
+            cache_limit(int(_cap_bytes * 0.5))
+        elif hasattr(_mx, "metal") and hasattr(_mx.metal, "set_cache_limit"):
             _mx.metal.set_cache_limit(int(_cap_bytes * 0.5))
     except Exception as _e:
         logger.debug("MLX memory cap not applied: %s", _e)
@@ -167,6 +187,42 @@ _loading_token: int = 0
 _load_error: str | None = None
 _loading_progress_bytes: int = 0
 _loading_progress_at: float | None = None
+_resource_monitor = ResourceMonitor()
+
+
+def unload_model() -> None:
+    """mlx-whisper のモデル参照と MLX キャッシュを解放する。"""
+    global _loaded_repo, _load_error, _loading_progress_bytes, _loading_progress_at
+
+    with _load_lock:
+        if _loading_repo is not None:
+            logger.warning("Skip Whisper unload while model loading is active")
+            return
+        _loaded_repo = None
+        _load_error = None
+        _loading_progress_bytes = 0
+        _loading_progress_at = None
+        _load_event.clear()
+
+    try:
+        from mlx_whisper.transcribe import ModelHolder
+
+        ModelHolder.model = None
+        ModelHolder.model_path = None
+    except Exception as exc:
+        logger.debug("mlx-whisper model holder could not be cleared: %s", exc)
+
+    try:
+        import mlx.core as mx
+
+        if hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+        elif hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+            mx.metal.clear_cache()
+    except Exception as exc:
+        logger.debug("MLX cache could not be cleared: %s", exc)
+    gc.collect()
+    logger.info("Whisper model unloaded")
 
 
 def get_or_load_model(
@@ -177,7 +233,7 @@ def get_or_load_model(
 ) -> str:
     """指定モデルを mlx-whisper にロードさせる(repo path を返す)。
 
-    mlx-whisper は load_model() に LRU キャッシュを持つので、同じ repo で
+    mlx-whisper は ModelHolder にモデル参照を保持するので、同じ repo で
     再度呼んでも実ロードは初回のみ。
 
     allow_stale_takeover=True は復旧用の明示モード。通常 caller は timeout_sec を
@@ -790,6 +846,7 @@ class StreamingTranscriber:
         self._model_load_timeout_sec = max(5.0, float(model_load_timeout_sec))
         self._flush_join_timeout_sec = max(5.0, float(flush_join_timeout_sec))
         self._worker: threading.Thread | None = None
+        self._worker_count = 0
         self._worker_lock = threading.Lock()
         self._active_generation = 0
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -818,6 +875,9 @@ class StreamingTranscriber:
         self._filtered_segments: int = 0
         # リソーススロットル (whisper.performance): 直近チャンクで挿入した休止秒数
         self._last_throttle_sec: float = 0.0
+        self._last_resource_pressure: str | None = None
+        self._resource_lease = False
+        self._resource_lease_lock = threading.Lock()
 
     @property
     def segments(self) -> list[dict]:
@@ -917,6 +977,9 @@ class StreamingTranscriber:
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         if self._running:
             return
+        if not model_resource_gate.try_acquire_whisper():
+            raise ResourceBusyError("Whisper resource is busy with a local LLM")
+        self._resource_lease = True
         self._loop = loop
         self._running = True
         with self._segments_lock:
@@ -951,7 +1014,13 @@ class StreamingTranscriber:
         self._transcribe_errors = 0
         self._filtered_segments = 0
         self._clear_queue()
-        self._spawn_worker(reason="start", force=True)
+        try:
+            if not self._spawn_worker(reason="start", force=True):
+                raise RuntimeError("Whisper worker could not be started")
+        except Exception:
+            self._running = False
+            self._release_resource_lease()
+            raise
 
     def feed(self, samples_f32: np.ndarray) -> None:
         """16kHz mono float32 サンプルを投入(任意のスレッドから)。"""
@@ -1024,6 +1093,25 @@ class StreamingTranscriber:
         # mlx-whisper のキャッシュは load_model 側で保持。参照だけクリア。
         self._repo = None
 
+    def _release_resource_lease(self) -> None:
+        with self._resource_lease_lock:
+            if not self._resource_lease:
+                return
+            self._resource_lease = False
+        # 最後の Whisper 利用者が解放する直前にモデルを落とす。
+        # ゲートの条件変数を保持したまま行うため、LLM の起動と競合しない。
+        model_resource_gate.release_whisper(before_release=unload_model)
+
+    def _run_worker_guarded(self, generation: int) -> None:
+        try:
+            self._run_worker(generation)
+        finally:
+            with self._worker_lock:
+                self._worker_count = max(0, self._worker_count - 1)
+                last_worker = self._worker_count == 0
+            if last_worker:
+                self._release_resource_lease()
+
     def restart_worker(self, reason: str, force: bool = False) -> bool:
         return self._spawn_worker(reason=reason, force=force)
 
@@ -1076,6 +1164,7 @@ class StreamingTranscriber:
                 config.get("whisper", "performance", "mode", default="auto")
             ),
             "last_throttle_sec": round(self._last_throttle_sec, 2),
+            "last_resource_pressure": self._last_resource_pressure,
         }
 
     def _clear_queue(self) -> None:
@@ -1156,13 +1245,18 @@ class StreamingTranscriber:
             self._active_generation += 1
             generation = self._active_generation
             worker = threading.Thread(
-                target=self._run_worker,
+                target=self._run_worker_guarded,
                 args=(generation,),
                 daemon=True,
                 name=f"streaming-transcriber-{generation}",
             )
             self._worker = worker
-            worker.start()
+            self._worker_count += 1
+            try:
+                worker.start()
+            except Exception:
+                self._worker_count = max(0, self._worker_count - 1)
+                raise
             if reason != "start":
                 self._worker_restarts += 1
                 self._last_restart_reason = reason
@@ -1175,7 +1269,7 @@ class StreamingTranscriber:
 
         - full: 常に 0 (全力)
         - eco : 常に processing_elapsed × throttle_ratio (上限 max_throttle_sec)
-        - auto: CPU 使用率が cpu_high_threshold 以上のときのみ eco と同じ休止
+        - auto: CPU またはシステムメモリが閾値以上のときのみ eco と同じ休止
         """
         perf = config.get("whisper", "performance", default={}) or {}
         mode = str(perf.get("mode", "auto")).lower()
@@ -1190,16 +1284,19 @@ class StreamingTranscriber:
             return 0.0
         if mode == "auto":
             try:
-                import psutil
-                cpu_pct = psutil.cpu_percent(interval=None)
+                cpu_threshold = float(perf.get("cpu_high_threshold", 75.0))
+                memory_threshold = float(perf.get("memory_high_threshold", 85.0))
             except Exception:
+                cpu_threshold, memory_threshold = 75.0, 85.0
+            throttled, pressures = _resource_monitor.pressure(
+                cpu_threshold=cpu_threshold,
+                memory_threshold=memory_threshold,
+            )
+            self._last_resource_pressure = ",".join(pressures) or None
+            if not throttled:
                 return 0.0
-            try:
-                threshold = float(perf.get("cpu_high_threshold", 75.0))
-            except Exception:
-                threshold = 75.0
-            if cpu_pct < threshold:
-                return 0.0
+        else:
+            self._last_resource_pressure = "eco"
         return min(max_pause, processing_elapsed * ratio)
 
     def _throttle_sleep(self, pause_sec: float, generation: int) -> None:
@@ -1211,13 +1308,13 @@ class StreamingTranscriber:
             time.sleep(0.1)
 
     def _run_worker(self, generation: int) -> None:
-        # 他アプリへの影響軽減のため priority を下げる (snappy 優先)
+        # 他アプリへの影響軽減のため Seam バックエンドの priority を下げる。
+        # os.nice() は加算式でプロセス全体に効くため、設定値を絶対値で適用する。
         try:
-            import os
             nice_val = int(
                 config.get("whisper", "performance", "worker_nice", default=3)
             )
-            os.nice(max(0, min(19, nice_val)))
+            _resource_monitor.apply_process_priority(nice_val)
         except (OSError, AttributeError, ValueError, TypeError):
             pass
 

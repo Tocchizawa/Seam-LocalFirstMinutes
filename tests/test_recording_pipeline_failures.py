@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import types
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -102,11 +103,13 @@ class FakeStartRecorder:
     def __init__(self) -> None:
         self.is_recording = False
         self.stopped = False
+        self.started_session_id: str | None = None
 
     def start(self, **_kwargs) -> dict:
         self.is_recording = True
+        self.started_session_id = _kwargs.get("session_id")
         return {
-            "session_id": _kwargs.get("session_id"),
+            "session_id": self.started_session_id,
             "has_system_audio": False,
             "system_error": "ScreenCaptureKit sidecar failed",
         }
@@ -332,6 +335,48 @@ async def _run_system_audio_start_failure_does_not_record() -> None:
             restore_state(saved)
 
 
+async def _run_existing_session_dir_is_not_reused() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ws = FakeWs()
+        saved = reset_state(Path(td), ws)
+        old_datetime = recording.datetime
+        old_streamer = recording.StreamingTranscriber
+        old_mixer = recording.RealtimeMixer
+        old_project_manager = recording.project_manager
+        try:
+            fixed_now = datetime(2026, 6, 22, 12, 30, 0)
+            existing_dir = Path(td) / "20260622_123000"
+            existing_dir.mkdir()
+            marker = existing_dir / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+
+            fake_recorder = FakeStartRecorder()
+            recording.datetime = types.SimpleNamespace(now=lambda *_args: fixed_now)  # type: ignore[assignment]
+            recording.recorder = fake_recorder  # type: ignore[assignment]
+            recording.StreamingTranscriber = FakeStartStreamer  # type: ignore[assignment]
+            recording.RealtimeMixer = FakeRealtimeMixer  # type: ignore[assignment]
+            recording.project_manager = types.SimpleNamespace(get=lambda _project_id: None)
+
+            try:
+                await recording.start_recording(
+                    recording.StartRequest(project_id="project-a", capture_system=True),
+                )
+            except Exception as e:
+                detail = getattr(e, "detail", {})
+                assert detail.get("code") == "SYSTEM_AUDIO_START_FAILED"
+            else:
+                raise AssertionError("system audio failure was expected")
+
+            assert fake_recorder.started_session_id == "20260622_123000_1"
+            assert marker.read_text(encoding="utf-8") == "keep"
+        finally:
+            recording.datetime = old_datetime
+            recording.StreamingTranscriber = old_streamer
+            recording.RealtimeMixer = old_mixer
+            recording.project_manager = old_project_manager
+            restore_state(saved)
+
+
 async def _run_combined_audio_does_not_auto_retranscribe() -> None:
     with tempfile.TemporaryDirectory() as td:
         ws = FakeWs()
@@ -435,6 +480,23 @@ def test_realtime_mixed_audio_replaces_raw_tracks() -> None:
             restore_state(saved)
 
 
+def test_playback_uses_canonical_flac_without_generating_legacy_wav() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        session_dir = Path(td)
+        flac = session_dir / "combined.flac"
+        legacy_wav = session_dir / "combined.play.wav"
+        flac.write_bytes(b"f" * 128)
+
+        selected = recording._pick_playback_audio(session_dir)
+
+        assert selected == flac
+        assert not legacy_wav.exists()
+
+        flac.unlink()
+        legacy_wav.write_bytes(b"w" * 128)
+        assert recording._pick_playback_audio(session_dir) == legacy_wav
+
+
 def test_db_save_failure_is_not_done() -> None:
     asyncio.run(_run_db_save_failure_is_not_done())
 
@@ -449,6 +511,10 @@ def test_system_audio_failure_is_not_done() -> None:
 
 def test_system_audio_start_failure_does_not_record() -> None:
     asyncio.run(_run_system_audio_start_failure_does_not_record())
+
+
+def test_existing_session_dir_is_not_reused() -> None:
+    asyncio.run(_run_existing_session_dir_is_not_reused())
 
 
 def test_combined_audio_does_not_auto_retranscribe() -> None:
@@ -473,9 +539,11 @@ def _run_as_script(tests: list[Callable[[], None]]) -> int:
 if __name__ == "__main__":
     sys.exit(_run_as_script([
         test_realtime_mixed_audio_replaces_raw_tracks,
+        test_playback_uses_canonical_flac_without_generating_legacy_wav,
         test_db_save_failure_is_not_done,
         test_mic_failure_releases_active_recording,
         test_system_audio_failure_is_not_done,
         test_system_audio_start_failure_does_not_record,
+        test_existing_session_dir_is_not_reused,
         test_combined_audio_does_not_auto_retranscribe,
     ]))

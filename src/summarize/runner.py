@@ -231,11 +231,31 @@ class SummaryRunner:
                 continue
 
             self._current = job
+            local_model_lease = False
             try:
+                provider_name = job.provider_name or str(
+                    (config.get("minutes_ai") or {}).get("provider", "ollama")
+                )
+                if provider_name in {"ollama", "claude_code", "codex"}:
+                    from src.audio.resource_monitor import model_resource_gate
+
+                    await model_resource_gate.acquire_llm_async()
+                    local_model_lease = True
+                    # CA-09: LLM を起動する前に Whisper の MLX モデルを解放する。
+                    try:
+                        from src.transcribe.streaming import unload_model
+
+                        unload_model()
+                    except Exception as exc:
+                        logger.warning("Whisper unload before local LLM failed: %s", exc)
                 await self._process_job(job)
             except Exception as e:
                 logger.exception("[summary] worker unhandled error: %s", e)
             finally:
+                if local_model_lease:
+                    from src.audio.resource_monitor import model_resource_gate
+
+                    model_resource_gate.release_llm()
                 self._current = None
                 self._current_provider = None
                 self._jobs.pop(job.minutes_id, None)

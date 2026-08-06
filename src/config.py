@@ -81,7 +81,7 @@ DEFAULTS: dict[str, Any] = {
             "launcher_command": "",
             "launcher_shell": "/bin/zsh",
             "launcher_interactive": True,
-            "connect_timeout_sec": 12,
+            "connect_timeout_sec": 30,
             "extra_args": [],
         },
     },
@@ -116,13 +116,15 @@ DEFAULTS: dict[str, Any] = {
             "mode": "auto",
             # auto モードで抑制を始める CPU 使用率 (%)
             "cpu_high_threshold": 75.0,
+            # auto モードで抑制を始めるシステムメモリ使用率 (%)
+            "memory_high_threshold": 85.0,
             # 抑制時: チャンク処理時間 × この係数だけ休止を挿入 (大きいほど遅く・軽く)
             "throttle_ratio": 0.5,
             # 1チャンクあたりの休止上限 (秒)
             "max_throttle_sec": 3.0,
             # 文字起こしワーカースレッドの nice 値 (0-19, 大きいほど低優先)
             "worker_nice": 3,
-            # MLX Metal のメモリ上限 (搭載RAM比, 0.2-0.8)。反映はアプリ再起動後。
+            # MLX Metal のメモリ目安 (搭載RAM比, 0.2-0.8)。relaxed のためハード上限ではない。
             "mlx_memory_ratio": 0.4,
         },
         # 話者記憶: 全プロジェクト共通で扱う。
@@ -487,11 +489,13 @@ class Config:
         ai_codex.setdefault("launcher_shell", "/bin/zsh")
         ai_codex.setdefault("launcher_interactive", True)
         try:
-            ai_codex["connect_timeout_sec"] = max(
-                3, min(60, int(ai_codex.get("connect_timeout_sec", 12)))
-            )
+            codex_timeout = int(ai_codex.get("connect_timeout_sec", 30))
+            # beta12 以前の既定値 12 秒は、ユーザーがUIから変更できない値なので移行する。
+            if codex_timeout == 12:
+                codex_timeout = 30
+            ai_codex["connect_timeout_sec"] = max(3, min(60, codex_timeout))
         except Exception:
-            ai_codex["connect_timeout_sec"] = 12
+            ai_codex["connect_timeout_sec"] = 30
         if not isinstance(ai_codex.get("extra_args"), list):
             ai_codex["extra_args"] = []
 
@@ -664,6 +668,12 @@ class Config:
             )
         except Exception:
             performance["cpu_high_threshold"] = 75.0
+        try:
+            performance["memory_high_threshold"] = max(
+                50.0, min(98.0, float(performance.get("memory_high_threshold", 85.0)))
+            )
+        except Exception:
+            performance["memory_high_threshold"] = 85.0
         try:
             performance["throttle_ratio"] = max(
                 0.1, min(3.0, float(performance.get("throttle_ratio", 0.5)))
