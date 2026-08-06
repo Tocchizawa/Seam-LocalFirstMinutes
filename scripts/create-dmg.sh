@@ -172,10 +172,9 @@ STAGE_DIR=$(mktemp -d)
 ditto "$APP_PATH" "$STAGE_DIR/Seam.app"
 ln -s /Applications "$STAGE_DIR/Applications"
 
-# 重要: volname を .app のベース名 "Seam" にすると macOS Sequoia が
-# /Volumes/Seam/Seam.app への書き込みを自己参照保護で拒否する
-# (= "Operation not permitted")。.app 名と被らない名前を必ず使う。
-hdiutil create -volname "Seam Installer" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH"
+# "Seam" や "Seam Installer" は macOS が /Volumes/<name>/Seam.app へのアクセスを
+# "Operation not permitted" で拒否することがあるため、衝突しない名前を使う。
+hdiutil create -volname "Seam Setup" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH"
 echo "[dmg] created: $DMG_PATH"
 
 # ─── DMG 自体を Developer ID で署名 ─────────────────────
