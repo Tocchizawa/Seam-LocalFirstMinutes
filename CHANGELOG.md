@@ -3,6 +3,27 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.14] - 2026-08-06
+
+This beta adds on-demand Whisper model management and download progress.
+
+### Added
+
+- Add settings controls to download and delete supported Whisper models.
+- Show byte-level model download progress in settings and while recording starts.
+- Add model catalog, download, and delete APIs.
+
+### Changed
+
+- Share the Hugging Face cache and download state between settings and recording.
+- Remove the unused log-based aggregate download-progress parser.
+
+### Tests
+
+- `./.venv/bin/python -m unittest tests.test_model_management tests.test_model_loader tests.test_streaming_model_loader`
+- `pnpm build`
+- Tauri smoke build without bundling
+
 ## [0.2.0-beta.13] - 2026-08-06
 
 This beta reduces recording storage and local AI resource contention, and gives Codex CLI connection checks enough startup time on macOS.
