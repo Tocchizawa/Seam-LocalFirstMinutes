@@ -77,6 +77,49 @@ export const updateSettings = (data: Record<string, unknown>) =>
     body: JSON.stringify(data),
   });
 
+// Whisper model management
+export type WhisperDownloadState = "idle" | "downloading" | "ready" | "error";
+
+export interface WhisperDownloadStatus {
+  state: WhisperDownloadState;
+  model: string | null;
+  repo: string | null;
+  current_bytes: number;
+  total_bytes: number;
+  percent: number | null;
+  error: string | null;
+}
+
+export interface WhisperModelInfo {
+  name: string;
+  label: string;
+  repo: string;
+  state: "not_downloaded" | "downloading" | "downloaded" | "loaded" | "error";
+  downloaded: boolean;
+  loaded: boolean;
+  size_bytes: number;
+}
+
+export interface WhisperModelCatalog {
+  models: WhisperModelInfo[];
+  download: WhisperDownloadStatus;
+}
+
+export const getWhisperModels = () =>
+  request<WhisperModelCatalog>("/api/models/whisper");
+
+export const downloadWhisperModel = (model: string) =>
+  request<{ status: string; download: WhisperDownloadStatus }>(
+    `/api/models/whisper/${encodeURIComponent(model)}/download`,
+    { method: "POST" },
+  );
+
+export const deleteWhisperModel = (model: string) =>
+  request<{ status: string; model: string }>(
+    `/api/models/whisper/${encodeURIComponent(model)}`,
+    { method: "DELETE" },
+  );
+
 export interface CliModelOption {
   slug: string;
   display_name: string;

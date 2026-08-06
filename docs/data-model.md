@@ -39,7 +39,7 @@ minutes_ai:
 
 # Whisper設定
 whisper:
-  model: "medium"               # tiny / base / small / medium / large-v3
+  model: "medium"               # tiny / base / small / medium / large-v1 / large-v2 / large-v3 / large-v3-turbo
   language: "ja"
   device: "auto"                # auto / cpu / mps
   streaming:
@@ -103,6 +103,8 @@ app_update:
   check_on_startup: true
   auto_install_on_startup: false
 ```
+
+Whisper のモデル本体は設定ファイルや SQLite には保存せず、Hugging Face Hub のローカルキャッシュで管理する。設定画面から既知モデルのダウンロード・削除ができ、ダウンロード中の状態（進捗、サイズ、エラー）は実行中メモリで管理する。
 
 **全フィールドにデフォルト値を持たせる**: 新バージョンでフィールドが追加された場合、欠落しているキーはコード側のデフォルト値で補完。`schema_version` でマイグレーション判定。
 

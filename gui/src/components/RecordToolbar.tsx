@@ -8,6 +8,7 @@ import {
 } from "../lib/api";
 import { useRecording } from "../lib/recording-context";
 import type { Project } from "../lib/api";
+import { ModelDownloadProgress } from "./ModelDownloadProgress";
 
 interface Props {
   project: Project;
@@ -29,7 +30,7 @@ export function RecordToolbar({
     recording, setRecording, paused, togglePaused,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed, level,
-    resetLive, micDevice, captureSystem, setActiveSessionId,
+    resetLive, micDevice, captureSystem, setActiveSessionId, modelDownload,
   } = useRecording();
   const [error, setError] = useState("");
 
@@ -101,6 +102,11 @@ export function RecordToolbar({
         <div className="flex-1 min-w-0">
           <Waveform level={recording && !paused ? level : 0} alive={recording && !paused} height={48} />
         </div>
+        {recording && modelDownload?.state === "downloading" && (
+          <div className="w-44 shrink-0">
+            <ModelDownloadProgress status={modelDownload} compact />
+          </div>
+        )}
       </div>
 
       {/* Right: mic mute + device + record/pause/stop */}

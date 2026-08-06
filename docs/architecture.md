@@ -178,9 +178,11 @@ GijirokuN.app/Contents/
 └── Info.plist
 ```
 
-モデルは .app に同梱しない（配布サイズ削減）。初回起動ウィザードでDL:
+モデルは .app に同梱しない（配布サイズ削減）。初回起動ウィザードまたは設定画面から Hugging Face Hub のキャッシュへDL:
 - Qwen3 8B: ~5GB (Ollama pull)
 - Whisper medium: ~1.5GB (HuggingFace)
+
+Whisper は設定画面で Tiny / Base / Small / Medium / Large v1 / Large v2 / Large v3 / Large v3 Turbo を選択できる。モデルのダウンロードは同時に1件だけ実行し、設定画面と録音開始後の画面が共通の進捗状態（取得済みバイト、総バイト、割合、エラー）を参照する。録音中のモデル削除・手動ダウンロードは受け付けない。
 
 **起動シーケンス**:
 ```
@@ -594,6 +596,9 @@ class PipelineStage(Enum):
 | GET | /api/minutes/search?q={query}&project={id} | 議事録検索 |
 | GET | /api/settings | 設定取得 |
 | PUT | /api/settings | 設定更新 |
+| GET | /api/models/whisper | Whisperモデル一覧・キャッシュ状態・ダウンロード進捗 |
+| POST | /api/models/whisper/{model_name}/download | Whisperモデルのダウンロード開始 |
+| DELETE | /api/models/whisper/{model_name} | Whisperモデルのキャッシュ削除 |
 | GET | /health | ヘルスチェック |
 
 ### 4.2 エラーレスポンス形式
@@ -626,6 +631,18 @@ ws://localhost:18900/ws
 
 // 録音状態 (Phase 1)
 { "type": "recording_status", "data": { "state": "recording", "elapsed_sec": 123 } }
+
+// Whisperモデル準備状態 (録音開始時)
+{ "type": "streaming_status", "data": {
+    "model_state": "loading",
+    "model_name": "medium",
+    "model_download": {
+      "state": "downloading",
+      "current_bytes": 524288000,
+      "total_bytes": 1572864000,
+      "percent": 33.3
+    }
+} }
 
 // パイプライン進捗 (Phase 2)
 { "type": "pipeline_progress", "data": {

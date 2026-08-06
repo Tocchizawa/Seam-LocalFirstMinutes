@@ -13,6 +13,7 @@ import gc
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -95,6 +96,27 @@ MLX_REPO_MAP = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
 
+WHISPER_MODEL_LABELS = {
+    "tiny": "Tiny",
+    "base": "Base",
+    "small": "Small",
+    "medium": "Medium",
+    "large-v1": "Large v1",
+    "large-v2": "Large v2",
+    "large-v3": "Large v3",
+    "large-v3-turbo": "Large v3 Turbo",
+}
+WHISPER_MODEL_NAMES = (
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large-v3-turbo",
+)
+
 
 def _resolve_repo(model_name: str) -> str:
     """ローカル名 → HF repo path。フルパス指定もそのまま通す。"""
@@ -176,6 +198,289 @@ def _resolve_cached_snapshot(repo: str) -> str | None:
     if not (snap / "config.json").exists():
         return None
     return str(snap)
+
+
+# ─── Whisper モデルのダウンロード/キャッシュ管理 ─────────────────────
+# HF Hub の snapshot_download を全 caller で共有し、設定画面と録音中の UI が
+# 同じ状態を参照できるようにする。ダウンロードは常に1件ずつ実行する。
+_download_condition = threading.Condition()
+_download_active_repo: str | None = None
+_download_token = 0
+_download_status: dict[str, object] = {
+    "state": "idle",  # idle | downloading | ready | error
+    "model": None,
+    "repo": None,
+    "current_bytes": 0,
+    "total_bytes": 0,
+    "percent": None,
+    "error": None,
+}
+
+
+def _known_whisper_model(model_name: str) -> tuple[str, str]:
+    name = str(model_name or "").strip()
+    repo = MLX_REPO_MAP.get(name)
+    if repo is None:
+        raise ValueError(f"未対応のWhisperモデルです: {name or '(empty)'}")
+    return name, repo
+
+
+def _set_download_status(**updates: object) -> None:
+    with _download_condition:
+        _download_status.update(updates)
+        _download_condition.notify_all()
+
+
+def get_whisper_download_status() -> dict[str, object]:
+    with _download_condition:
+        return dict(_download_status)
+
+
+def _update_download_progress(current_bytes: int, total_bytes: int) -> None:
+    total = max(0, int(total_bytes))
+    current = max(0, int(current_bytes))
+    percent = (current / total * 100.0) if total > 0 else None
+    _set_download_status(
+        current_bytes=current,
+        total_bytes=total,
+        percent=round(min(100.0, percent), 1) if percent is not None else None,
+    )
+
+
+try:
+    from tqdm.auto import tqdm as _BaseTqdm
+except Exception:  # pragma: no cover - tqdm is an mlx-whisper dependency
+    _BaseTqdm = object  # type: ignore[assignment,misc]
+
+
+class _ProgressSink:
+    """tqdm の表示を捨てる。StringIO と違ってDL中にログを蓄積しない。"""
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+
+class _DownloadTqdm(_BaseTqdm):
+    """Hugging Face の集約バイト進捗をアプリ状態へ転送する。"""
+
+    def __init__(self, *args, **kwargs):
+        self._is_byte_bar = kwargs.get("unit") == "B"
+        # HF Hub 1.x は name を独自に渡す。画面/標準エラーには出さない。
+        kwargs.pop("name", None)
+        kwargs["disable"] = False
+        kwargs["file"] = _ProgressSink()
+        super().__init__(*args, **kwargs)
+        self._publish()
+
+    def _publish(self) -> None:
+        if self._is_byte_bar:
+            _update_download_progress(self.n, self.total or 0)
+
+    def update(self, n=1):
+        result = super().update(n)
+        self._publish()
+        return result
+
+    def refresh(self, *args, **kwargs):
+        result = super().refresh(*args, **kwargs)
+        self._publish()
+        return result
+
+
+def _claim_download(model_name: str, repo: str) -> int:
+    global _download_active_repo, _download_token
+    _download_token += 1
+    _download_active_repo = repo
+    _download_status.update({
+        "state": "downloading",
+        "model": model_name,
+        "repo": repo,
+        "current_bytes": 0,
+        "total_bytes": 0,
+        "percent": None,
+        "error": None,
+    })
+    return _download_token
+
+
+def _run_download(model_name: str, repo: str, token: int) -> str:
+    global _download_active_repo
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=repo,
+            cache_dir=_hf_cache_root(),
+            tqdm_class=_DownloadTqdm,
+        )
+        snapshot = _resolve_cached_snapshot(repo)
+        if snapshot is None:
+            raise RuntimeError("モデルの必須ファイル(weights.npz/config.json)が見つかりません")
+        with _download_condition:
+            total_progress = int(_download_status.get("total_bytes") or 0)
+        total = max(total_progress, _estimate_repo_cache_bytes(repo))
+        with _download_condition:
+            if token == _download_token and _download_active_repo == repo:
+                _download_status.update({
+                    "state": "ready",
+                    "current_bytes": total,
+                    "total_bytes": total,
+                    "percent": 100.0,
+                    "error": None,
+                })
+                _download_condition.notify_all()
+        return snapshot
+    except Exception as exc:
+        with _download_condition:
+            if token == _download_token and _download_active_repo == repo:
+                _download_status.update({
+                    "state": "error",
+                    "error": str(exc),
+                })
+                _download_condition.notify_all()
+        raise
+    finally:
+        with _download_condition:
+            if token == _download_token and _download_active_repo == repo:
+                _download_active_repo = None
+                _download_condition.notify_all()
+
+
+def ensure_model_downloaded(model_name: str) -> str:
+    """モデルをキャッシュへ配置し、ロード対象の snapshot path を返す。"""
+    raw_name = str(model_name or "").strip()
+    if "/" in raw_name:
+        name, repo = raw_name, _resolve_repo(raw_name)
+    else:
+        name, repo = _known_whisper_model(raw_name)
+    while True:
+        with _download_condition:
+            cached = _resolve_cached_snapshot(repo)
+            if cached is not None and _download_active_repo != repo:
+                if _download_active_repo is None:
+                    total = _estimate_repo_cache_bytes(repo)
+                    _download_status.update({
+                        "state": "ready",
+                        "model": name,
+                        "repo": repo,
+                        "current_bytes": total,
+                        "total_bytes": total,
+                        "percent": 100.0,
+                        "error": None,
+                    })
+                    _download_condition.notify_all()
+                return cached
+
+            active_repo = _download_active_repo
+            active_token = _download_token
+            if active_repo is not None:
+                _download_condition.wait(timeout=1.0)
+                if (
+                    active_repo == repo
+                    and _download_active_repo is None
+                    and _download_token == active_token
+                    and _download_status.get("state") == "error"
+                ):
+                    raise RuntimeError(str(_download_status.get("error") or "モデルのダウンロードに失敗しました"))
+                continue
+
+            token = _claim_download(name, repo)
+        return _run_download(name, repo, token)
+
+
+def start_whisper_model_download(model_name: str) -> dict[str, object]:
+    """API 用の非同期モデルダウンロード開始。"""
+    name, repo = _known_whisper_model(model_name)
+    with _download_condition:
+        if _download_active_repo is not None:
+            if _download_active_repo == repo:
+                return dict(_download_status)
+            raise RuntimeError("別のWhisperモデルをダウンロード中です")
+
+        cached = _resolve_cached_snapshot(repo)
+        if cached is not None:
+            _download_status.update({
+                "state": "ready",
+                "model": name,
+                "repo": repo,
+                "current_bytes": _estimate_repo_cache_bytes(repo),
+                "total_bytes": _estimate_repo_cache_bytes(repo),
+                "percent": 100.0,
+                "error": None,
+            })
+            return dict(_download_status)
+        token = _claim_download(name, repo)
+
+    threading.Thread(
+        target=_download_worker,
+        args=(name, repo, token),
+        daemon=True,
+        name=f"whisper-download-{name}",
+    ).start()
+    return get_whisper_download_status()
+
+
+def _download_worker(model_name: str, repo: str, token: int) -> None:
+    try:
+        _run_download(model_name, repo, token)
+    except Exception:
+        logger.exception("Whisper model download failed: %s", repo)
+
+
+def delete_whisper_model(model_name: str) -> None:
+    """既知モデルの HF キャッシュを削除する。録音中は削除しない。"""
+    _name, repo = _known_whisper_model(model_name)
+    with _download_condition:
+        if _download_active_repo == repo:
+            raise RuntimeError("ダウンロード中のモデルは削除できません")
+    if model_resource_gate.snapshot().get("whisper_users", 0):
+        raise RuntimeError("録音中はWhisperモデルを削除できません")
+    with _load_lock:
+        loaded = _loaded_repo == repo
+    if loaded:
+        unload_model()
+    shutil.rmtree(_repo_cache_dir(repo), ignore_errors=False)
+    with _download_condition:
+        if _download_status.get("repo") == repo:
+            _download_status.update({
+                "state": "idle",
+                "model": None,
+                "repo": None,
+                "current_bytes": 0,
+                "total_bytes": 0,
+                "percent": None,
+                "error": None,
+            })
+        _download_condition.notify_all()
+
+
+def get_whisper_model_catalog() -> dict[str, object]:
+    download = get_whisper_download_status()
+    with _load_lock:
+        loaded_repo = _loaded_repo
+    models: list[dict[str, object]] = []
+    for name in WHISPER_MODEL_NAMES:
+        repo = MLX_REPO_MAP[name]
+        snapshot = _resolve_cached_snapshot(repo)
+        downloaded = snapshot is not None
+        state = "downloaded" if downloaded else "not_downloaded"
+        if loaded_repo == repo:
+            state = "loaded"
+        if download.get("model") == name and download.get("state") in {"downloading", "error"}:
+            state = str(download["state"])
+        models.append({
+            "name": name,
+            "label": WHISPER_MODEL_LABELS.get(name, name),
+            "repo": repo,
+            "state": state,
+            "downloaded": downloaded,
+            "loaded": loaded_repo == repo,
+            "size_bytes": _estimate_repo_cache_bytes(repo),
+        })
+    return {"models": models, "download": download}
 
 
 _loaded_repo: str | None = None
@@ -265,7 +570,7 @@ def get_or_load_model(
         if should_load:
             try:
                 from mlx_whisper.load_models import load_model
-                load_target = _resolve_cached_snapshot(repo) or repo
+                load_target = ensure_model_downloaded(model_name)
                 t0 = time.time()
                 logger.info(
                     "Loading mlx-whisper model: %s (target=%s, token=%d)",
@@ -1140,6 +1445,7 @@ class StreamingTranscriber:
             "model_error": self.model_error,
             "model_state": model_state,
             "model_name": self.model_name,
+            "model_download": get_whisper_download_status(),
             "queue_size": self.queue_size,
             "queue_maxsize": self._queue_maxsize,
             "total_segments": self.total_segments,

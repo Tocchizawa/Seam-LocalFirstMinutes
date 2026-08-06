@@ -14,6 +14,8 @@ from src.transcribe import streaming
 
 class StreamingModelLoaderTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._old_ensure_model_downloaded = streaming.ensure_model_downloaded
+        streaming.ensure_model_downloaded = lambda model_name: streaming._resolve_repo(model_name)
         streaming._loaded_repo = None
         streaming._loading_repo = None
         streaming._loading_started_at = None
@@ -25,6 +27,7 @@ class StreamingModelLoaderTest(unittest.TestCase):
         self._old_mlx_load = sys.modules.get("mlx_whisper.load_models")
 
     def tearDown(self) -> None:
+        streaming.ensure_model_downloaded = self._old_ensure_model_downloaded
         if self._old_mlx_pkg is not None:
             sys.modules["mlx_whisper"] = self._old_mlx_pkg
         else:

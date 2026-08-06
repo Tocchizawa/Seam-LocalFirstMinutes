@@ -14,6 +14,8 @@ from src.transcribe import streaming
 
 class ModelLoaderCoordinationTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._old_ensure_model_downloaded = streaming.ensure_model_downloaded
+        streaming.ensure_model_downloaded = lambda model_name: streaming._resolve_repo(model_name)
         streaming._loaded_repo = None
         streaming._loading_repo = None
         streaming._loading_started_at = None
@@ -26,6 +28,7 @@ class ModelLoaderCoordinationTest(unittest.TestCase):
         sys.modules.pop("mlx_whisper.load_models", None)
 
     def tearDown(self) -> None:
+        streaming.ensure_model_downloaded = self._old_ensure_model_downloaded
         sys.modules.pop("mlx_whisper", None)
         sys.modules.pop("mlx_whisper.load_models", None)
 
