@@ -193,7 +193,7 @@ def _resolve_cached_snapshot(repo: str) -> str | None:
     snap = model_dir / "snapshots" / revision
     if not snap.exists():
         return None
-    if not (snap / "weights.npz").exists():
+    if not any((snap / name).exists() for name in ("weights.safetensors", "weights.npz")):
         return None
     if not (snap / "config.json").exists():
         return None
@@ -318,7 +318,9 @@ def _run_download(model_name: str, repo: str, token: int) -> str:
         )
         snapshot = _resolve_cached_snapshot(repo)
         if snapshot is None:
-            raise RuntimeError("モデルの必須ファイル(weights.npz/config.json)が見つかりません")
+            raise RuntimeError(
+                "モデルの必須ファイル(weights.safetensors/weights.npz/config.json)が見つかりません"
+            )
         with _download_condition:
             total_progress = int(_download_status.get("total_bytes") or 0)
         total = max(total_progress, _estimate_repo_cache_bytes(repo))

@@ -44,7 +44,9 @@ class WhisperModelManagementTest(unittest.TestCase):
             })
             streaming._download_condition.notify_all()
 
-    def _seed_cache(self, model_name: str) -> tuple[str, Path]:
+    def _seed_cache(
+        self, model_name: str, weights_name: str = "weights.npz"
+    ) -> tuple[str, Path]:
         repo = streaming.MLX_REPO_MAP[model_name]
         model_dir = Path(self.cache.name) / f"models--{repo.replace('/', '--')}"
         revision = "test-revision"
@@ -52,7 +54,7 @@ class WhisperModelManagementTest(unittest.TestCase):
         snapshot.mkdir(parents=True)
         (model_dir / "refs").mkdir()
         (model_dir / "refs" / "main").write_text(revision, encoding="utf-8")
-        (snapshot / "weights.npz").write_bytes(b"weights")
+        (snapshot / weights_name).write_bytes(b"weights")
         (snapshot / "config.json").write_text("{}", encoding="utf-8")
         return repo, snapshot
 
@@ -76,6 +78,17 @@ class WhisperModelManagementTest(unittest.TestCase):
         self.assertGreater(model["size_bytes"], 0)
         self.assertEqual(streaming.get_whisper_download_status()["state"], "ready")
         self.assertEqual(streaming.get_whisper_download_status()["model"], "medium")
+
+    def test_safetensors_model_is_catalogued_and_load_target_is_local(self) -> None:
+        repo, snapshot = self._seed_cache("small", "weights.safetensors")
+
+        result = streaming.get_whisper_model_catalog()
+        model = next(item for item in result["models"] if item["name"] == "small")
+
+        self.assertTrue(model["downloaded"])
+        self.assertEqual(model["state"], "downloaded")
+        self.assertEqual(streaming.ensure_model_downloaded("small"), str(snapshot))
+        self.assertEqual(model["repo"], repo)
 
     def test_download_progress_is_published_from_byte_bar(self) -> None:
         repo = streaming.MLX_REPO_MAP["tiny"]
