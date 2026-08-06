@@ -158,6 +158,40 @@ def test_start_uses_screencapturekit_sidecar_mode() -> None:
             system_capture.subprocess.Popen = old_popen  # type: ignore[assignment]
 
 
+def test_metadata_failure_keeps_nonempty_raw_segment() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sidecar = root / "audio-capture"
+        sidecar.write_text("#!/usr/bin/env sh\n")
+        sidecar.chmod(0o755)
+
+        cap = system_capture.SystemAudioCapture()
+        cap._sidecar_path = sidecar
+        cap._wav_path = root / "system.wav"
+
+        def fail_after_raw_write() -> None:
+            assert cap._raw_path is not None
+            cap._raw_path.write_bytes(array("f", [0.25] * 16).tobytes())
+            raise RuntimeError("metadata failed")
+
+        cap._wait_for_metadata = fail_after_raw_write  # type: ignore[method-assign]
+        old_popen = system_capture.subprocess.Popen
+        system_capture.subprocess.Popen = lambda *_args, **_kwargs: FakeSidecarProcess()  # type: ignore[assignment]
+        try:
+            try:
+                cap._start_segment(0)
+                raised = False
+            except RuntimeError:
+                raised = True
+
+            assert raised is True
+            assert cap._segment_paths == [root / "system.raw"]
+            assert cap._segment_paths[0].stat().st_size == 64
+        finally:
+            cap._stop_active_segment()
+            system_capture.subprocess.Popen = old_popen  # type: ignore[assignment]
+
+
 def test_ffmpeg_conversion_failure_keeps_raw_audio() -> None:
     with tempfile.TemporaryDirectory() as td:
         old_run = system_capture.subprocess.run
@@ -291,6 +325,297 @@ def test_silent_tail_restart_keeps_same_capture_path() -> None:
     assert cap.recovery_reasons == ["silent_tail_sec=22.0"]
 
 
+def test_stream_stopped_error_requests_immediate_restart() -> None:
+    cap = system_capture.SystemAudioCapture()
+    process = FakeSidecarProcess()
+    process.stderr = [
+        "SCREEN_CAPTURE_KIT_AUDIO_ERROR stream stopped "
+        "domain=com.apple.ScreenCaptureKit.SCStreamErrorDomain code=-3821 "
+        "description=system stopped bytes=24435200 duration=381.800s\n"
+    ]
+    cap._running = True
+    cap._process = process  # type: ignore[assignment]
+
+    cap._drain_sidecar_stderr(process)
+
+    assert cap._pending_restart_reason == "stream_stopped code=-3821"
+    assert cap._next_restart_at == 0.0
+    assert cap._last_stream_error is not None
+    assert "code=-3821" in cap._last_stream_error
+    assert cap._watchdog_wakeup.is_set()
+
+
+def test_late_stream_error_from_old_sidecar_is_logged_without_restarting_new_sidecar() -> None:
+    cap = system_capture.SystemAudioCapture()
+    old_process = FakeSidecarProcess()
+    old_process.stderr = [
+        "SCREEN_CAPTURE_KIT_AUDIO_ERROR stream stopped "
+        "domain=com.apple.ScreenCaptureKit.SCStreamErrorDomain code=-3821\n"
+    ]
+    cap._running = True
+    cap._process = FakeSidecarProcess()  # type: ignore[assignment]
+
+    cap._drain_sidecar_stderr(old_process)
+
+    assert cap._last_stream_error is not None
+    assert "code=-3821" in cap._last_stream_error
+    assert cap._pending_restart_reason is None
+
+
+def test_health_check_detects_byte_stall_using_wall_clock() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._process = FakeSidecarProcess()  # type: ignore[assignment]
+    cap._has_bytes = True
+    cap._last_byte_at = 10.0
+    cap._segment_started_at = 5.0
+
+    reason = cap._health_restart_reason(
+        now=15.1,
+        min_active_sec=30.0,
+        silent_restart_sec=20.0,
+        byte_stall_restart_sec=5.0,
+        restart_cooldown_sec=10.0,
+    )
+
+    assert reason == "byte_stall_sec=5.1"
+
+
+def test_health_check_detects_initial_zero_byte_stall() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._process = FakeSidecarProcess()  # type: ignore[assignment]
+    cap._segment_started_at = 10.0
+
+    reason = cap._health_restart_reason(
+        now=15.1,
+        min_active_sec=30.0,
+        silent_restart_sec=20.0,
+        byte_stall_restart_sec=5.0,
+        restart_cooldown_sec=10.0,
+    )
+
+    assert reason == "byte_stall_sec=5.1"
+
+
+def test_health_check_does_not_repeat_silent_restart_before_new_audio() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._process = FakeSidecarProcess()  # type: ignore[assignment]
+    cap._has_bytes = True
+    cap._has_nonzero_audio = True
+    cap._segment_has_nonzero_audio = False
+    cap._sample_rate = 10
+    cap._raw_bytes_seen = 400 * 4
+    cap._last_nonzero_audio_offset = 100 * 4
+    cap._last_byte_at = 100.0
+    cap._segment_started_at = 90.0
+
+    reason = cap._health_restart_reason(
+        now=100.0,
+        min_active_sec=30.0,
+        silent_restart_sec=20.0,
+        byte_stall_restart_sec=5.0,
+        restart_cooldown_sec=10.0,
+    )
+
+    assert reason is None
+
+
+def test_health_check_detects_sidecar_exit_without_audio_growth() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._process = FakeSidecarProcess(poll_result=75)  # type: ignore[assignment]
+
+    reason = cap._health_restart_reason(
+        now=1.0,
+        min_active_sec=30.0,
+        silent_restart_sec=20.0,
+        byte_stall_restart_sec=5.0,
+        restart_cooldown_sec=10.0,
+    )
+
+    assert reason == "sidecar_exit_code=75"
+
+
+def test_health_check_does_not_restart_after_user_stop() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = False
+    cap._pending_restart_reason = "stream_stopped code=-3821"
+    cap._process = FakeSidecarProcess(poll_result=75)  # type: ignore[assignment]
+
+    reason = cap._health_restart_reason(
+        now=100.0,
+        min_active_sec=30.0,
+        silent_restart_sec=20.0,
+        byte_stall_restart_sec=5.0,
+        restart_cooldown_sec=10.0,
+    )
+
+    assert reason is None
+
+
+def test_stream_stop_restart_preserves_gap_from_last_byte() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._segment_index = 0
+    cap._last_byte_at = 50.0
+    stopped: list[bool] = []
+    started: list[tuple[int, float | None]] = []
+
+    cap._stop_active_segment = lambda: stopped.append(True)  # type: ignore[method-assign]
+    cap._start_segment = (  # type: ignore[method-assign]
+        lambda index, gap_started_at=None: started.append((index, gap_started_at))
+    )
+
+    restarted = cap._restart_capture("stream_stopped code=-3821", 5, 0.5)
+
+    assert restarted is True
+    assert stopped == [True]
+    assert started == [(1, 50.0)]
+    assert cap.restart_count == 1
+    assert cap.recovery_reasons == ["stream_stopped code=-3821"]
+
+
+def test_failed_restart_is_scheduled_with_short_backoff() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._segment_index = 0
+    stop_count = 0
+
+    def fake_stop() -> None:
+        nonlocal stop_count
+        stop_count += 1
+
+    cap._stop_active_segment = fake_stop  # type: ignore[method-assign]
+    cap._start_segment = (  # type: ignore[method-assign]
+        lambda _index, gap_started_at=None: (_ for _ in ()).throw(RuntimeError("start failed"))
+    )
+
+    restarted = cap._restart_capture("stream_stopped code=-3821", 5, 0.5)
+
+    assert restarted is False
+    assert stop_count == 2
+    assert cap.restart_count == 0
+    assert cap._pending_restart_reason == "stream_stopped code=-3821"
+    assert cap._next_restart_at > 0
+    assert cap._recovery_exhausted is False
+    assert "start failed" in (cap.error or "")
+
+
+def test_failed_restarts_wait_for_display_without_consuming_success_budget() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._start_segment = (  # type: ignore[method-assign]
+        lambda _index, gap_started_at=None: (_ for _ in ()).throw(RuntimeError("no display"))
+    )
+    cap._stop_active_segment = lambda: None  # type: ignore[method-assign]
+
+    for _ in range(8):
+        assert cap._restart_capture("stream_stopped code=-3815", 5, 0.5) is False
+
+    assert cap.restart_count == 0
+    assert cap._restart_failure_count == 8
+    assert cap._pending_restart_reason == "stream_stopped code=-3815"
+    assert cap._recovery_exhausted is False
+
+
+def test_restart_succeeds_after_display_returns() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    attempts = 0
+
+    def start_after_wake(_index: int, gap_started_at=None) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("no display")
+
+    cap._start_segment = start_after_wake  # type: ignore[method-assign]
+    cap._stop_active_segment = lambda: None  # type: ignore[method-assign]
+
+    assert cap._restart_capture("stream_stopped code=-3815", 5, 0.5) is False
+    assert cap._restart_capture("stream_stopped code=-3815", 5, 0.5) is False
+    assert cap._restart_capture("stream_stopped code=-3815", 5, 0.5) is True
+
+    assert cap.restart_count == 1
+    assert cap.recovery_reasons == ["stream_stopped code=-3815"]
+    assert cap._restart_failure_count == 0
+    assert cap._pending_restart_reason is None
+    assert cap.error is None
+
+
+def test_non_display_restart_failures_exhaust_after_limit() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._start_segment = (  # type: ignore[method-assign]
+        lambda _index, gap_started_at=None: (_ for _ in ()).throw(RuntimeError("permission denied"))
+    )
+    cap._stop_active_segment = lambda: None  # type: ignore[method-assign]
+
+    for _ in range(5):
+        assert cap._restart_capture("sidecar_exit_code=1", 5, 0.5) is False
+
+    assert cap.restart_count == 0
+    assert cap._restart_failure_count == 5
+    assert cap._pending_restart_reason is None
+    assert cap._recovery_exhausted is True
+
+
+def test_successful_restarts_do_not_exhaust_future_recovery() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._restart_count = 5
+    cap._segment_index = 5
+    cap._stop_active_segment = lambda: None  # type: ignore[method-assign]
+    cap._start_segment = lambda _index, gap_started_at=None: None  # type: ignore[method-assign]
+
+    assert cap._restart_capture("stream_stopped code=-3821", 5, 0.5) is True
+    assert cap.restart_count == 6
+    assert cap._recovery_exhausted is False
+
+
+def test_watchdog_restarts_immediately_for_pending_stream_error() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._process = FakeSidecarProcess()  # type: ignore[assignment]
+    cap._pending_restart_reason = "stream_stopped code=-3821"
+    calls: list[tuple[str, int, float]] = []
+
+    cap._watchdog_settings = lambda: (True, 30.0, 20.0, 5.0, 10.0, 0.5, 5)  # type: ignore[method-assign]
+
+    def fake_restart(reason: str, max_restarts: int, backoff: float) -> bool:
+        calls.append((reason, max_restarts, backoff))
+        cap._watchdog_stop.set()
+        return True
+
+    cap._restart_capture = fake_restart  # type: ignore[method-assign]
+    cap._watchdog_wakeup.set()
+
+    cap._watchdog_loop()
+
+    assert calls == [("stream_stopped code=-3821", 5, 0.5)]
+
+
+def test_watchdog_does_not_exhaust_restart_budget_while_healthy() -> None:
+    cap = system_capture.SystemAudioCapture()
+    cap._running = True
+    cap._process = FakeSidecarProcess()  # type: ignore[assignment]
+    cap._restart_count = 5
+    cap._watchdog_settings = lambda: (True, 30.0, 20.0, 5.0, 10.0, 0.5, 5)  # type: ignore[method-assign]
+
+    thread = system_capture.threading.Thread(target=cap._watchdog_loop)
+    thread.start()
+    system_capture.time.sleep(0.35)
+    cap._watchdog_stop.set()
+    cap._watchdog_wakeup.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert cap._recovery_exhausted is False
+    assert cap.error is None
+
+
 def _run_as_script(tests: list[Callable[[], None]]) -> int:
     failed = 0
     for test in tests:
@@ -313,10 +638,26 @@ if __name__ == "__main__":
         test_removed_backends_are_not_normalized_to_screencapturekit,
         test_removed_backend_start_fails_before_sidecar_launch,
         test_start_uses_screencapturekit_sidecar_mode,
+        test_metadata_failure_keeps_nonempty_raw_segment,
         test_ffmpeg_conversion_failure_keeps_raw_audio,
         test_placeholder_sidecar_is_not_available,
         test_raw_conversion_creates_wav_and_removes_intermediates,
         test_audio_diagnostics_track_silent_tail_after_audio,
         test_segmented_raw_conversion_preserves_all_segments,
         test_silent_tail_restart_keeps_same_capture_path,
+        test_stream_stopped_error_requests_immediate_restart,
+        test_late_stream_error_from_old_sidecar_is_logged_without_restarting_new_sidecar,
+        test_health_check_detects_byte_stall_using_wall_clock,
+        test_health_check_detects_initial_zero_byte_stall,
+        test_health_check_does_not_repeat_silent_restart_before_new_audio,
+        test_health_check_detects_sidecar_exit_without_audio_growth,
+        test_health_check_does_not_restart_after_user_stop,
+        test_stream_stop_restart_preserves_gap_from_last_byte,
+        test_failed_restart_is_scheduled_with_short_backoff,
+        test_failed_restarts_wait_for_display_without_consuming_success_budget,
+        test_restart_succeeds_after_display_returns,
+        test_non_display_restart_failures_exhaust_after_limit,
+        test_successful_restarts_do_not_exhaust_future_recovery,
+        test_watchdog_restarts_immediately_for_pending_stream_error,
+        test_watchdog_does_not_exhaust_restart_budget_while_healthy,
     ]))

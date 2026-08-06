@@ -59,6 +59,13 @@ recording:
     min_duration_sec: 60
     min_coverage_ratio: 0.85
     max_missing_sec: 20
+    min_active_sec_before_restart: 30 # 有音取得後の無音化を判定する最低取得時間
+    silent_restart_sec: 20       # PCMは継続しているが波形が無音の場合に再生成
+    byte_stall_restart_sec: 5    # PCM byte増加停止時に再生成
+    restart_cooldown_sec: 10
+    restart_failure_backoff_sec: 0.5
+    max_restarts: 5              # capture source消失以外の連続再生成失敗の上限
+    max_silent_tail_sec: 60
   audio_leveling:
     enabled: true               # 録音中の自動ゲイン補正
     realtime_enabled: true      # Whisper投入前のリアルタイム補正

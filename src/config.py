@@ -176,7 +176,9 @@ DEFAULTS: dict[str, Any] = {
             "max_missing_sec": 20,
             "min_active_sec_before_restart": 30,
             "silent_restart_sec": 20,
+            "byte_stall_restart_sec": 5,
             "restart_cooldown_sec": 10,
+            "restart_failure_backoff_sec": 0.5,
             "max_restarts": 5,
             "max_silent_tail_sec": 60,
         },
@@ -619,11 +621,23 @@ class Config:
         except Exception:
             watchdog["silent_restart_sec"] = 20.0
         try:
+            watchdog["byte_stall_restart_sec"] = max(
+                1, min(60, float(watchdog.get("byte_stall_restart_sec", 5)))
+            )
+        except Exception:
+            watchdog["byte_stall_restart_sec"] = 5.0
+        try:
             watchdog["restart_cooldown_sec"] = max(
                 1, min(600, float(watchdog.get("restart_cooldown_sec", 10)))
             )
         except Exception:
             watchdog["restart_cooldown_sec"] = 10.0
+        try:
+            watchdog["restart_failure_backoff_sec"] = max(
+                0.1, min(10, float(watchdog.get("restart_failure_backoff_sec", 0.5)))
+            )
+        except Exception:
+            watchdog["restart_failure_backoff_sec"] = 0.5
         try:
             watchdog["max_restarts"] = max(0, min(20, int(watchdog.get("max_restarts", 5))))
         except Exception:

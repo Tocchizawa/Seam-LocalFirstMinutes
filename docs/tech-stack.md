@@ -48,6 +48,7 @@
 - 内部音声は **ScreenCaptureKit audio stream** を使う。`SCStreamOutputTypeAudio` を Objective-C sidecar で受け取り、mono `float32` RAW PCM と metadata JSON を書き出す。
 - **Objective-C sidecar バイナリ**として実装し、Tauri の resources に同梱する。
 - sidecar は `system.raw` (`float32`, mono, requested sample rate) と `system.meta.json` を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。
+- 内部音声録音中は sidecar が表示アイドルスリープを抑止する。SCStream停止時は取得済みRAWを保持し、Python側が同じScreenCaptureKit経路を再生成する。
 - 内部音声の取得経路は ScreenCaptureKit のみ。macOS 13.0 未満、sidecar 起動失敗、ScreenCaptureKit 権限/初期化失敗時は内部音声録音を開始失敗として扱う。
 - システム音声取得用に `NSAudioCaptureUsageDescription` を Info.plist に含める。
 
@@ -193,7 +194,7 @@ Seam/
 |--------|------|------|
 | PyInstaller バンドル ~3GB | 初回DLが大きい | UPX圧縮 + 不要依存除外 |
 | ScreenCaptureKit macOS 13.0+ 限定 | 古い macOS 非対応 | 内部音声を要求した録音は開始失敗にし、OS/権限の確認を促す |
-| システム音声 sidecar 停止/無音化 | 相手音声が途中から消える | 開始失敗・空ファイル・coverage 不足を正常完了扱いにしない |
+| システム音声 sidecar 停止/無音化 | 相手音声が途中から消える | 録音中の表示アイドルスリープを抑止し、停止・RAW byte停止・途中無音化を検知して同じScreenCaptureKit経路を再生成する |
 | native sidecar 停止 | 音声データロス | RAW PCM を常にファイル書き込みし、Python 側で coverage を検証 |
 | ストリーミング Whisper 遅延蓄積 | 文字起こしが遅れる | チャンク長動的調整 + 1秒オーバーラップ + run_in_executor |
 | 3時間会議で Qwen3 コンテキスト超え | 議事録品質低下 | 話題ベースチャンク分割 + 段階的要約 |

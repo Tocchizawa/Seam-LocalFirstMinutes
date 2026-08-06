@@ -35,6 +35,15 @@ static NSError *MakeError(NSString *message) {
     return [NSError errorWithDomain:@"SeamAudioCapture" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
+static NSString *SingleLine(NSString *value) {
+    if (value == nil) {
+        return @"";
+    }
+    NSString *result = [value stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    result = [result stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    return [result stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
+}
+
 static BOOL CheckStatus(OSStatus status, NSString *label, NSError **error) {
     if (status == noErr) {
         return YES;
@@ -214,11 +223,13 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
     int _fd;
     SCStream *_stream;
     dispatch_queue_t _sampleQueue;
-    UInt64 _bytesWritten;
+    id<NSObject> _displaySleepActivity;
+    atomic_uint_fast64_t _bytesWritten;
     NSInteger _sampleRate;
     NSInteger _sourceChannels;
     atomic_bool _stopped;
     atomic_bool _loggedUnsupportedFormat;
+    atomic_bool _streamFailureHandled;
 }
 
 - (instancetype)initWithOutputPath:(NSString *)outputPath metaPath:(NSString *)metaPath sampleRate:(double)sampleRate {
@@ -230,11 +241,13 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
         _fd = -1;
         _stream = nil;
         _sampleQueue = nil;
-        _bytesWritten = 0;
+        _displaySleepActivity = nil;
+        atomic_init(&_bytesWritten, 0);
         _sampleRate = (NSInteger)MAX(8000.0, MIN(192000.0, _requestedSampleRate));
         _sourceChannels = 2;
         atomic_init(&_stopped, false);
         atomic_init(&_loggedUnsupportedFormat, false);
+        atomic_init(&_streamFailureHandled, false);
     }
     return self;
 }
@@ -252,6 +265,18 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
             }
             return NO;
         }
+
+        _displaySleepActivity = [[NSProcessInfo processInfo]
+            beginActivityWithOptions:NSActivityIdleDisplaySleepDisabled
+                              reason:@"Seam is recording system audio"];
+        if (_displaySleepActivity == nil) {
+            if (error != NULL) {
+                *error = MakeError(@"Failed to prevent display idle sleep while recording system audio");
+            }
+            [self stop];
+            return NO;
+        }
+        fprintf(stderr, "SCREEN_CAPTURE_KIT_DISPLAY_SLEEP_PREVENTION_STARTED\n");
 
         __block SCShareableContent *shareableContent = nil;
         __block NSError *shareableError = nil;
@@ -387,14 +412,42 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
         close(_fd);
         _fd = -1;
     }
+    if (_displaySleepActivity != nil) {
+        [[NSProcessInfo processInfo] endActivity:_displaySleepActivity];
+        _displaySleepActivity = nil;
+        fprintf(stderr, "SCREEN_CAPTURE_KIT_DISPLAY_SLEEP_PREVENTION_STOPPED\n");
+    }
 
-    double duration = _sampleRate > 0 ? (double)_bytesWritten / ((double)_sampleRate * sizeof(float)) : 0;
-    fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_STOPPED bytes=%llu duration=%.1fs\n", _bytesWritten, duration);
+    uint_fast64_t bytesWritten = atomic_load(&_bytesWritten);
+    double duration = _sampleRate > 0 ? (double)bytesWritten / ((double)_sampleRate * sizeof(float)) : 0;
+    fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_STOPPED bytes=%llu duration=%.1fs\n", (unsigned long long)bytesWritten, duration);
 }
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
     (void)stream;
-    fprintf(stderr, "SCREEN_CAPTURE_KIT_AUDIO_ERROR stream stopped: %s\n", error.localizedDescription.UTF8String);
+    if (atomic_load(&_stopped) || atomic_exchange(&_streamFailureHandled, true)) {
+        return;
+    }
+
+    NSString *domain = SingleLine(error.domain);
+    NSString *description = SingleLine(error.localizedDescription);
+    NSString *userInfo = SingleLine(error.userInfo.description);
+    uint_fast64_t bytesWritten = atomic_load(&_bytesWritten);
+    double duration = _sampleRate > 0 ? (double)bytesWritten / ((double)_sampleRate * sizeof(float)) : 0;
+    fprintf(stderr,
+            "SCREEN_CAPTURE_KIT_AUDIO_ERROR stream stopped domain=%s code=%ld description=%s user_info=%s bytes=%llu duration=%.3fs\n",
+            domain.UTF8String,
+            (long)error.code,
+            description.UTF8String,
+            userInfo.UTF8String,
+            (unsigned long long)bytesWritten,
+            duration);
+    fflush(stderr);
+
+    // A stopped SCStream cannot resume itself. Exit so the parent can replace the full session.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        _Exit(75);
+    });
 }
 
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
@@ -571,7 +624,7 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
         }
         cursor += written;
         remaining -= (UInt32)written;
-        _bytesWritten += (UInt64)written;
+        atomic_fetch_add(&_bytesWritten, (uint_fast64_t)written);
     }
 }
 
@@ -880,7 +933,13 @@ int main(int argc, const char *argv[]) {
 
         NSError *error = nil;
         if (![capture startWithError:&error]) {
-            fprintf(stderr, "%s %s\n", errorPrefix.UTF8String, error.localizedDescription.UTF8String);
+            fprintf(stderr,
+                    "%s start failed domain=%s code=%ld description=%s user_info=%s\n",
+                    errorPrefix.UTF8String,
+                    SingleLine(error.domain).UTF8String,
+                    (long)error.code,
+                    SingleLine(error.localizedDescription).UTF8String,
+                    SingleLine(error.userInfo.description).UTF8String);
             return 1;
         }
 
