@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.2.0-beta.14"
+version = "0.2.0-beta.15"
 dependencies = [
  "libc",
  "serde",

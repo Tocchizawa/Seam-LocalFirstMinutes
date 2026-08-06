@@ -3,6 +3,21 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.15] - 2026-08-06
+
+This beta fixes downloading and loading the `large-v3-turbo` Whisper model.
+
+### Fixed
+
+- Accept Hugging Face Whisper snapshots that use `weights.safetensors` as well as `weights.npz`.
+- Report both supported weight formats when a model snapshot is invalid.
+
+### Tests
+
+- `PYTHONPATH=. ./.venv/bin/python -m unittest tests.test_model_management tests.test_model_loader tests.test_streaming_model_loader`
+- `bash scripts/oss_preflight.sh`
+- Tauri smoke build without bundling
+
 ## [0.2.0-beta.14] - 2026-08-06
 
 This beta adds on-demand Whisper model management and download progress.
