@@ -25,6 +25,7 @@ import {
   getRecommendedProvider,
   getCodexModels,
   getClaudeCodeModels,
+  getDefaultSummaryPrompt,
   PROVIDER_LABELS,
   SUMMARIZE_PROVIDERS,
   CLOUD_PROVIDERS,
@@ -66,6 +67,11 @@ const WHISPER_MODELS = [
 
 type Category = "appearance" | "app" | "transcribe" | "speakers" | "speaker-list" | "ai" | "recording" | "debug";
 
+type PerfMode = "full" | "auto" | "eco";
+
+// モーダルを開き直しても直前のカテゴリを維持する (セッション内のみ)
+let lastCategory: Category = "appearance";
+
 export function SettingsModal({ onClose }: Props) {
   const { recording } = useRecording();
   const recordingRef = useRef(recording);
@@ -73,12 +79,19 @@ export function SettingsModal({ onClose }: Props) {
   const [settings, setSettings] = useState<Record<string, any> | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [category, setCategory] = useState<Category>("appearance");
+  const [category, setCategory] = useState<Category>(lastCategory);
 
   const [wm, setWm] = useState("medium");
+  const [diarizationEnabled, setDiarizationEnabled] = useState(true);
   const [speakerMemoryEnabled, setSpeakerMemoryEnabled] = useState(true);
   const [speakerMatchThreshold, setSpeakerMatchThreshold] = useState(0.82);
   const [speakerMinAudioSec, setSpeakerMinAudioSec] = useState(1.0);
+
+  // ─── 文字起こしパフォーマンス ───
+  const [perfMode, setPerfMode] = useState<PerfMode>("auto");
+  const [perfCpuThreshold, setPerfCpuThreshold] = useState(75);
+  const [perfThrottleRatio, setPerfThrottleRatio] = useState(0.5);
+  const [perfMaxThrottleSec, setPerfMaxThrottleSec] = useState(3.0);
 
   const [lm, setLm] = useState("qwen3:8b");
   const [ll, setLl] = useState("INFO");
@@ -101,6 +114,10 @@ export function SettingsModal({ onClose }: Props) {
   const [codexModelChoices, setCodexModelChoices] = useState<CliModelOption[]>([]);
   const [claudeCodeChoices, setClaudeCodeChoices] = useState<CliModelOption[]>([]);
   const [aiConsent, setAiConsent] = useState<Record<string, boolean>>({});
+  // ─── 要約 system prompt ───
+  const [defaultPrompt, setDefaultPrompt] = useState("");
+  const [aiCustomPrompt, setAiCustomPrompt] = useState(""); // 保存済み ("" = デフォルト使用)
+  const [aiPromptDraft, setAiPromptDraft] = useState<string | null>(null); // null = 未編集
   const [aiKeysPresent, setAiKeysPresent] = useState<Partial<Record<SummarizeProvider, boolean>>>({});
   const [aiKeyDraft, setAiKeyDraft] = useState<Partial<Record<SummarizeProvider, string>>>({});
   const [aiKeyBusy, setAiKeyBusy] = useState<Partial<Record<SummarizeProvider, boolean>>>({});
@@ -209,7 +226,15 @@ export function SettingsModal({ onClose }: Props) {
       setUpdateAutoInstallOnStartup(autoInstall);
       setUpdateCheckOnStartup(autoInstall || appUpdate.check_on_startup !== false);
 
+      const perf = (s.whisper as any)?.performance || {};
+      const mode = String(perf.mode ?? "auto");
+      setPerfMode(mode === "full" || mode === "eco" ? mode : "auto");
+      setPerfCpuThreshold(Number(perf.cpu_high_threshold ?? 75));
+      setPerfThrottleRatio(Number(perf.throttle_ratio ?? 0.5));
+      setPerfMaxThrottleSec(Number(perf.max_throttle_sec ?? 3.0));
+
       const speakerMemory = (s.whisper as any)?.speaker_memory || {};
+      setDiarizationEnabled(Boolean(speakerMemory.diarization_enabled ?? true));
       setSpeakerMemoryEnabled(Boolean(speakerMemory.enabled ?? true));
       setSpeakerMatchThreshold(Number(speakerMemory.match_threshold ?? 0.82));
       setSpeakerMinAudioSec(Number(speakerMemory.min_audio_sec ?? 1.0));
@@ -248,6 +273,7 @@ export function SettingsModal({ onClose }: Props) {
       setAiCodexModel(String(ai.codex?.model ?? ""));
       setAiClaudeCodeLauncher(String(ai.claude_code?.launcher_command ?? ""));
       setAiCodexLauncher(String(ai.codex?.launcher_command ?? ""));
+      setAiCustomPrompt(String(ai.custom_system_prompt ?? ""));
       setAiConsent(ai.consent || {});
 
       // 並列取得 (失敗しても他処理は続行)
@@ -272,6 +298,24 @@ export function SettingsModal({ onClose }: Props) {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
+  // 開いていたカテゴリを次回オープン時に復元する
+  useEffect(() => {
+    lastCategory = category;
+  }, [category]);
+
+  // Cmd+S で保存 (macOS 標準の操作感)
+  const saveRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveRef.current();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
   // CLI provider のモデル一覧を取得 (Codex はキャッシュファイルから動的、Claude Code は alias 固定)
   useEffect(() => {
     let cancelled = false;
@@ -281,6 +325,9 @@ export function SettingsModal({ onClose }: Props) {
     getClaudeCodeModels()
       .then((list) => { if (!cancelled) setClaudeCodeChoices(list); })
       .catch(() => { /* noop */ });
+    getDefaultSummaryPrompt()
+      .then((r) => { if (!cancelled) setDefaultPrompt(r.prompt); })
+      .catch(() => { /* noop */ });
     return () => { cancelled = true; };
   }, []);
 
@@ -289,14 +336,29 @@ export function SettingsModal({ onClose }: Props) {
     setTimeout(onClose, 180);
   };
 
+  // textarea に表示する実効プロンプト (編集中 > 保存済みカスタム > デフォルト)
+  const promptValue = aiPromptDraft ?? (aiCustomPrompt || defaultPrompt);
+  const promptIsCustom =
+    promptValue.trim() !== ""
+    && (!defaultPrompt || promptValue.trim() !== defaultPrompt.trim());
+
   const save = async () => {
     setSaving(true);
     setSaved(false);
+    // デフォルトと同一 (または空) なら "" を保存 = 既定プロンプト使用
+    const customPromptToSave = promptIsCustom ? promptValue : "";
     try {
       const u = await updateSettings({
         whisper: {
           model: wm,
+          performance: {
+            mode: perfMode,
+            cpu_high_threshold: Math.max(30, Math.min(95, Math.round(perfCpuThreshold))),
+            throttle_ratio: Number(Math.max(0.1, Math.min(3, perfThrottleRatio)).toFixed(2)),
+            max_throttle_sec: Number(Math.max(0.5, Math.min(10, perfMaxThrottleSec)).toFixed(1)),
+          },
           speaker_memory: {
+            diarization_enabled: diarizationEnabled,
             enabled: speakerMemoryEnabled,
             match_threshold: Number(speakerMatchThreshold.toFixed(2)),
             min_audio_sec: Number(speakerMinAudioSec.toFixed(1)),
@@ -312,6 +374,7 @@ export function SettingsModal({ onClose }: Props) {
           auto_generate: aiAutoGenerate,
           generate_title: aiGenerateTitle,
           auto_dictionary_update: aiAutoDictionaryUpdate,
+          custom_system_prompt: customPromptToSave,
           timeout_sec: Math.max(30, Math.round(aiTimeoutSec)),
           ollama: {
             model: aiOllamaModel,
@@ -344,6 +407,7 @@ export function SettingsModal({ onClose }: Props) {
         debug: { enabled: debugEnabled },
       });
       setSettings(u);
+      setAiCustomPrompt(customPromptToSave);
       window.dispatchEvent(new CustomEvent("settings-updated", { detail: u }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -351,6 +415,7 @@ export function SettingsModal({ onClose }: Props) {
       setSaving(false);
     }
   };
+  saveRef.current = () => { if (!saving) void save(); };
 
   const pickTheme = (m: ThemeMode) => {
     setTheme(m);
@@ -686,23 +751,110 @@ export function SettingsModal({ onClose }: Props) {
                 )}
 
                 {category === "transcribe" && (
-                  <SGroup
-                    title="Whisper モデル"
-                    hint="Apple MLX (mlx-whisper) で実行。初回選択時に HuggingFace からモデルをダウンロード (Tiny ≈75MB, Large v3 ≈3GB)"
-                  >
-                    <SRow label="モデルサイズ" hint="精度と速度のトレードオフ">
-                      <Select
-                        value={wm}
-                        onChange={setWm}
-                        options={WHISPER_MODELS.map((m) => ({ value: m.value, label: m.label }))}
-                        size="md"
+                  <>
+                    <SGroup
+                      title="Whisper モデル"
+                      hint="Apple MLX (mlx-whisper) で実行。初回選択時に HuggingFace からモデルをダウンロード (Tiny ≈75MB, Large v3 ≈3GB)"
+                    >
+                      <SRow label="モデルサイズ" hint="精度と速度のトレードオフ">
+                        <Select
+                          value={wm}
+                          onChange={setWm}
+                          options={WHISPER_MODELS.map((m) => ({ value: m.value, label: m.label }))}
+                          size="md"
+                        />
+                      </SRow>
+                    </SGroup>
+
+                    <SGroup
+                      title="パフォーマンス"
+                      hint="文字起こし中に Mac が重くなる場合の調整。抑制するほど文字起こしの反映は遅れますが、他のアプリの動作が軽くなります"
+                    >
+                      <SRadioList
+                        value={perfMode}
+                        onChange={setPerfMode}
+                        options={[
+                          {
+                            key: "full",
+                            label: "全力",
+                            hint: "常に最速で処理。負荷は最大。",
+                          },
+                          {
+                            key: "auto",
+                            label: "自動 (推奨)",
+                            hint: "CPU 使用率が高い間だけ処理を抑制して他アプリを優先。",
+                          },
+                          {
+                            key: "eco",
+                            label: "省電力",
+                            hint: "常に処理を抑えめにする。バッテリー駆動や低スペック環境向け。",
+                          },
+                        ]}
                       />
-                    </SRow>
-                  </SGroup>
+                      {perfMode !== "full" && (
+                        <>
+                          {perfMode === "auto" && (
+                            <SRow
+                              label="抑制を開始する CPU 使用率 (%)"
+                              hint="30〜95。これを超えている間だけ処理を抑制"
+                            >
+                              <input
+                                type="number"
+                                min={30}
+                                max={95}
+                                step={5}
+                                value={perfCpuThreshold}
+                                onChange={(e) => setPerfCpuThreshold(Number(e.target.value || 75))}
+                                className="input s-control"
+                              />
+                            </SRow>
+                          )}
+                          <SRow
+                            label="抑制の強さ"
+                            hint="0.1〜3.0。処理時間 × この係数だけ休止 (大きいほど軽く・遅く)"
+                          >
+                            <input
+                              type="number"
+                              min={0.1}
+                              max={3}
+                              step={0.1}
+                              value={perfThrottleRatio}
+                              onChange={(e) => setPerfThrottleRatio(Number(e.target.value || 0.5))}
+                              className="input s-control"
+                            />
+                          </SRow>
+                          <SRow
+                            label="休止の上限 (秒)"
+                            hint="0.5〜10。1チャンクあたりの最大休止時間"
+                          >
+                            <input
+                              type="number"
+                              min={0.5}
+                              max={10}
+                              step={0.5}
+                              value={perfMaxThrottleSec}
+                              onChange={(e) => setPerfMaxThrottleSec(Number(e.target.value || 3))}
+                              className="input s-control"
+                            />
+                          </SRow>
+                        </>
+                      )}
+                    </SGroup>
+                  </>
                 )}
 
                 {category === "speakers" && (
                   <>
+                    <SGroup
+                      title="話者分離"
+                      hint="OFF にすると話者ラベルを一切付与しません。文字起こしの負荷が下がり、処理も速くなります"
+                    >
+                      <SRow label="話者分離を有効にする">
+                        <SToggle value={diarizationEnabled} onChange={setDiarizationEnabled} />
+                      </SRow>
+                    </SGroup>
+
+                    {diarizationEnabled && (<>
                     <SGroup title="話者分離エンジン" hint="録音終了後にどのアルゴリズムで話者を判定するか">
                       <SRadioList
                         value={diarProvider}
@@ -908,6 +1060,7 @@ export function SettingsModal({ onClose }: Props) {
                         />
                       </SRow>
                     </SGroup>
+                    </>)}
 
                   </>
                 )}
@@ -1221,6 +1374,45 @@ export function SettingsModal({ onClose }: Props) {
                         />
                       </SRow>
                     </SGroup>
+
+                    <SGroup
+                      title="要約プロンプト"
+                      hint="要約生成に使う指示文 (system prompt)。編集するとカスタムとして保存され、すべてのプロバイダに適用されます"
+                    >
+                      <div className="flex items-center gap-2 mt-3 mb-2">
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold ${
+                            promptIsCustom
+                              ? "bg-(--accent-soft) text-(--accent)"
+                              : "bg-(--surface-2) text-(--t3)"
+                          }`}
+                        >
+                          {promptIsCustom ? "カスタム" : "デフォルト"}
+                        </span>
+                        <span className="flex-1" />
+                        <button
+                          type="button"
+                          className="btn h-7 px-2.5 text-[11px]"
+                          disabled={!defaultPrompt || !promptIsCustom}
+                          onClick={() => setAiPromptDraft(defaultPrompt)}
+                          title="既定のプロンプトに戻す (保存で確定)"
+                        >
+                          デフォルトに戻す
+                        </button>
+                      </div>
+                      <textarea
+                        className="textarea prompt-editor"
+                        value={promptValue}
+                        onChange={(e) => setAiPromptDraft(e.target.value)}
+                        rows={14}
+                        spellCheck={false}
+                        placeholder={defaultPrompt ? "" : "既定プロンプトを読み込み中..."}
+                      />
+                      <p className="text-[11px] text-(--t3) leading-relaxed mt-1.5">
+                        デフォルトと同じ内容にすると自動的に「デフォルト」扱いに戻ります。
+                        タイトル生成のプロンプトは変更されません。
+                      </p>
+                    </SGroup>
                   </>
                 )}
 
@@ -1288,6 +1480,8 @@ export function SettingsModal({ onClose }: Props) {
                 保存しました
               </span>
             )}
+            <span className="flex-1" />
+            <span className="text-[10px] text-(--t4)">⌘S で保存</span>
           </footer>
         )}
       </div>

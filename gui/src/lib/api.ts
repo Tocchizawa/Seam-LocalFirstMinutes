@@ -83,6 +83,10 @@ export interface CliModelOption {
   description?: string;
 }
 
+/** 要約の既定 system prompt (UI の「デフォルトに戻す」用) */
+export const getDefaultSummaryPrompt = () =>
+  request<{ prompt: string }>("/api/settings/summary/default-prompt");
+
 export const getCodexModels = () =>
   request<CliModelOption[]>("/api/settings/cli/codex/models");
 

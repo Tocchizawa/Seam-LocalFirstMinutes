@@ -18,6 +18,7 @@
       "allow": [{ "path": "**" }, { "path": "/**" }]
     },
     "dialog:default",
+    "notification:default",
     "clipboard-manager:default",
     "updater:allow-check",
     "updater:allow-download",

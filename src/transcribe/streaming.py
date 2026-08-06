@@ -19,6 +19,7 @@ from typing import Awaitable, Callable
 
 import numpy as np
 
+from src.config import config
 from src.speakers import speaker_memory
 from src.transcribe.hallucination_filter import HallucinationFilter
 
@@ -35,9 +36,15 @@ try:
     import mlx.core as _mx  # type: ignore
     import psutil as _psutil  # type: ignore
     _total_gb = _psutil.virtual_memory().total / (1024 ** 3)
-    # システム RAM の 40% を上限に。relaxed=True なので必要時は超えられる
-    # 16GB Mac → 約 6GB / 32GB → 約 13GB
-    _cap_gb = min(20, max(4, int(_total_gb * 0.4)))
+    # 既定はシステム RAM の 40% を上限に (設定 whisper.performance.mlx_memory_ratio)。
+    # relaxed=True なので必要時は超えられる。16GB Mac → 約 6GB / 32GB → 約 13GB
+    try:
+        _mem_ratio = max(0.2, min(0.8, float(
+            config.get("whisper", "performance", "mlx_memory_ratio", default=0.4)
+        )))
+    except Exception:
+        _mem_ratio = 0.4
+    _cap_gb = min(24, max(4, int(_total_gb * _mem_ratio)))
     _cap_bytes = _cap_gb * 1024 * 1024 * 1024
     try:
         if hasattr(_mx, "metal") and hasattr(_mx.metal, "set_memory_limit"):
@@ -809,6 +816,8 @@ class StreamingTranscriber:
         self._dropped_audio_sec: float = 0.0
         self._transcribe_errors: int = 0
         self._filtered_segments: int = 0
+        # リソーススロットル (whisper.performance): 直近チャンクで挿入した休止秒数
+        self._last_throttle_sec: float = 0.0
 
     @property
     def segments(self) -> list[dict]:
@@ -1063,6 +1072,10 @@ class StreamingTranscriber:
             "dropped_audio_sec": round(self.dropped_audio_sec, 2),
             "transcribe_errors": self._transcribe_errors,
             "filtered_segments": self._filtered_segments,
+            "perf_mode": str(
+                config.get("whisper", "performance", "mode", default="auto")
+            ),
+            "last_throttle_sec": round(self._last_throttle_sec, 2),
         }
 
     def _clear_queue(self) -> None:
@@ -1157,12 +1170,55 @@ class StreamingTranscriber:
                 logger.warning("Streaming worker restarted (reason=%s, gen=%d)", reason, generation)
             return True
 
+    def _throttle_pause_sec(self, processing_elapsed: float) -> float:
+        """whisper.performance 設定に基づき、チャンク処理後に挿入する休止秒数を返す。
+
+        - full: 常に 0 (全力)
+        - eco : 常に processing_elapsed × throttle_ratio (上限 max_throttle_sec)
+        - auto: CPU 使用率が cpu_high_threshold 以上のときのみ eco と同じ休止
+        """
+        perf = config.get("whisper", "performance", default={}) or {}
+        mode = str(perf.get("mode", "auto")).lower()
+        if mode not in ("auto", "eco"):
+            return 0.0
+        try:
+            ratio = max(0.0, min(3.0, float(perf.get("throttle_ratio", 0.5))))
+            max_pause = max(0.0, min(10.0, float(perf.get("max_throttle_sec", 3.0))))
+        except Exception:
+            ratio, max_pause = 0.5, 3.0
+        if ratio <= 0.0 or max_pause <= 0.0 or processing_elapsed <= 0.0:
+            return 0.0
+        if mode == "auto":
+            try:
+                import psutil
+                cpu_pct = psutil.cpu_percent(interval=None)
+            except Exception:
+                return 0.0
+            try:
+                threshold = float(perf.get("cpu_high_threshold", 75.0))
+            except Exception:
+                threshold = 75.0
+            if cpu_pct < threshold:
+                return 0.0
+        return min(max_pause, processing_elapsed * ratio)
+
+    def _throttle_sleep(self, pause_sec: float, generation: int) -> None:
+        """スロットル休止。世代交代 (worker restart) 時は即座に抜ける。"""
+        deadline = time.monotonic() + pause_sec
+        while time.monotonic() < deadline:
+            if generation != self._active_generation:
+                return
+            time.sleep(0.1)
+
     def _run_worker(self, generation: int) -> None:
-        # 他アプリへの影響軽減のため少しだけ priority 下げる(snappy 優先)
+        # 他アプリへの影響軽減のため priority を下げる (snappy 優先)
         try:
             import os
-            os.nice(3)
-        except (OSError, AttributeError):
+            nice_val = int(
+                config.get("whisper", "performance", "worker_nice", default=3)
+            )
+            os.nice(max(0, min(19, nice_val)))
+        except (OSError, AttributeError, ValueError, TypeError):
             pass
 
         try:
@@ -1207,8 +1263,16 @@ class StreamingTranscriber:
                 if item is None:
                     break
                 chunk_audio, chunk_start = item
+                t_chunk_start = time.monotonic()
                 self._transcribe(chunk_audio, chunk_start, generation)
                 self._last_processed_at = time.monotonic()
+                # リソーススロットル: 設定に応じてチャンク間に休止を挿入し、
+                # CPU/GPU の占有率を下げる (レイテンシと引き換え)。
+                pause = self._throttle_pause_sec(time.monotonic() - t_chunk_start)
+                self._last_throttle_sec = pause
+                if pause > 0:
+                    logger.debug("Streaming throttle: pausing %.2fs", pause)
+                    self._throttle_sleep(pause, generation)
             except KeyboardInterrupt:
                 raise
             except Exception as e:

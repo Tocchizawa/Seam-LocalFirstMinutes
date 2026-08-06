@@ -269,6 +269,20 @@ def build_user_prompt(transcript: str, project: ProjectContext | None = None) ->
     return "\n\n".join(sections) + "\n"
 
 
+def get_system_prompt() -> str:
+    """有効な要約 system prompt を返す。
+
+    設定 (minutes_ai.custom_system_prompt) に非空のカスタムプロンプトがあれば
+    それを、無ければ既定の SYSTEM_PROMPT を返す。
+    """
+    from src.config import config
+
+    custom = config.get("minutes_ai", "custom_system_prompt", default="")
+    if isinstance(custom, str) and custom.strip():
+        return custom
+    return SYSTEM_PROMPT
+
+
 def build_messages(
     transcript: str,
     project: ProjectContext | None = None,
@@ -278,7 +292,7 @@ def build_messages(
     タイトル生成は別リクエスト (build_title_messages) で行うため、
     ここでは要約本体のみ生成する prompt を返す。
     """
-    return SYSTEM_PROMPT, build_user_prompt(transcript, project)
+    return get_system_prompt(), build_user_prompt(transcript, project)
 
 
 # ─── Token見積り ────────────────────────────────────────────

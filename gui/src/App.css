@@ -219,6 +219,35 @@ button { font-family: inherit; }
 
 .input::placeholder { color: var(--t3); }
 
+.textarea {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+  line-height: 1.6;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.textarea:hover { border-color: var(--border-hover); }
+.textarea:focus { border-color: var(--blue); background: var(--surface-2); }
+.textarea::placeholder { color: var(--t3); }
+
+/* 要約 system prompt 編集用 */
+.prompt-editor {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  min-height: 240px;
+  white-space: pre-wrap;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

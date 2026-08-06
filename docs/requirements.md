@@ -148,6 +148,7 @@ Zoom等のオンライン会議中にバックグラウンドで PC 内部音声
 | RC-02 | パイプライン状態保存 | current_stage + 各ステップの完了状態を state.json に保持 | 必須 |
 | RC-03 | クラッシュ耐性録音 | 録音中は RAW PCM で書き込み、正常停止時に WAV 変換 | 必須 |
 | RC-04 | 内部音声欠落の検知 | ScreenCaptureKit sidecar の開始失敗、空ファイル、録音時間に対する内部音声 coverage 不足、全時間無音を正常完了扱いしない | 必須 |
+| RC-05 | 内部音声ライブ復旧 | 内部音声録音中は表示アイドルスリープを抑止し、SCStream停止・sidecar終了・RAW byte停止・途中無音化を検知した場合は取得済みRAWを保持して同じScreenCaptureKit経路を再生成する | 必須 |
 
 ---
 

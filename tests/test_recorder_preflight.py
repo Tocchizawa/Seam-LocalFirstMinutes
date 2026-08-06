@@ -144,6 +144,52 @@ def test_short_system_audio_silence_is_not_reported() -> None:
     assert msg is None
 
 
+def test_system_audio_silent_tail_after_audio_is_reported() -> None:
+    rec = Recorder()
+    rec._capture_system_requested = True
+    rec._system_capture_started = True
+    rec._system_coverage_settings = lambda: (True, 60.0, 0.85, 20.0)  # type: ignore[method-assign]
+
+    msg = rec._validate_system_audio_coverage(
+        mic_duration=600.0,
+        system_duration=600.0,
+        elapsed=600.0,
+        sys_ok=True,
+        system_diagnostics={
+            "has_bytes": True,
+            "has_audio": True,
+            "last_nonzero_audio_sec": 120.0,
+            "silent_tail_sec": 480.0,
+        },
+    )
+
+    assert msg is not None
+    assert "became silent" in msg
+    assert "途中から無音化" in msg
+
+
+def test_short_system_audio_silent_tail_after_audio_is_not_reported() -> None:
+    rec = Recorder()
+    rec._capture_system_requested = True
+    rec._system_capture_started = True
+    rec._system_coverage_settings = lambda: (True, 60.0, 0.85, 20.0)  # type: ignore[method-assign]
+
+    msg = rec._validate_system_audio_coverage(
+        mic_duration=600.0,
+        system_duration=600.0,
+        elapsed=600.0,
+        sys_ok=True,
+        system_diagnostics={
+            "has_bytes": True,
+            "has_audio": True,
+            "last_nonzero_audio_sec": 565.0,
+            "silent_tail_sec": 35.0,
+        },
+    )
+
+    assert msg is None
+
+
 def test_system_capture_failure_prevents_mic_only_start() -> None:
     with tempfile.TemporaryDirectory() as td:
         old_sessions_dir = recorder_module.SESSIONS_DIR
@@ -199,5 +245,7 @@ if __name__ == "__main__":
         test_system_audio_near_full_length_is_ok,
         test_system_audio_full_length_silence_is_reported,
         test_short_system_audio_silence_is_not_reported,
+        test_system_audio_silent_tail_after_audio_is_reported,
+        test_short_system_audio_silent_tail_after_audio_is_not_reported,
         test_system_capture_failure_prevents_mic_only_start,
     ]))

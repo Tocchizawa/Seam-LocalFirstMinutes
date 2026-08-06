@@ -828,6 +828,12 @@ class SpeakerMemory:
             except Exception:
                 pass
 
+        diarization_enabled = bool(
+            config.get("whisper", "speaker_memory", "diarization_enabled", default=True)
+        )
+        if not diarization_enabled:
+            return segments
+
         enabled = bool(
             config.get("whisper", "speaker_memory", "enabled", default=True)
         )
@@ -1285,6 +1291,12 @@ class SpeakerMemory:
         start_sec: float,
         end_sec: float,
     ) -> dict[str, Any] | None:
+        diarization_enabled = bool(
+            config.get("whisper", "speaker_memory", "diarization_enabled", default=True)
+        )
+        if not diarization_enabled:
+            return None
+
         enabled = bool(
             config.get("whisper", "speaker_memory", "enabled", default=True)
         )

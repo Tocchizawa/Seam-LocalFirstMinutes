@@ -25,6 +25,8 @@ DEFAULTS: dict[str, Any] = {
         "correction_confidence": 0.85,   # Phase B での誤転写ペア採用 confidence 閾値
         "timeout_sec": 300,
         "pull_timeout_sec": 1800,
+        # 要約 system prompt のカスタム上書き。空文字なら既定プロンプトを使用。
+        "custom_system_prompt": "",
         # provider 初使用時の同意フラグ (cloud のみ意味あり)
         "consent": {
             "claude_api": False,
@@ -108,8 +110,25 @@ DEFAULTS: dict[str, Any] = {
             "max_direct_match_len": 64,
             "blocked_phrases": [],
         },
+        # 文字起こしの計算資源の使い方。
+        #   full = 常に全力 / auto = システム高負荷時のみ抑制 / eco = 常に抑えめ
+        "performance": {
+            "mode": "auto",
+            # auto モードで抑制を始める CPU 使用率 (%)
+            "cpu_high_threshold": 75.0,
+            # 抑制時: チャンク処理時間 × この係数だけ休止を挿入 (大きいほど遅く・軽く)
+            "throttle_ratio": 0.5,
+            # 1チャンクあたりの休止上限 (秒)
+            "max_throttle_sec": 3.0,
+            # 文字起こしワーカースレッドの nice 値 (0-19, 大きいほど低優先)
+            "worker_nice": 3,
+            # MLX Metal のメモリ上限 (搭載RAM比, 0.2-0.8)。反映はアプリ再起動後。
+            "mlx_memory_ratio": 0.4,
+        },
         # 話者記憶: 全プロジェクト共通で扱う。
         "speaker_memory": {
+            # 話者分離そのものの ON/OFF (OFF なら話者ラベルを一切付与しない)
+            "diarization_enabled": True,
             "enabled": True,
             "match_threshold": 0.82,
             "min_audio_sec": 1.0,
@@ -155,6 +174,13 @@ DEFAULTS: dict[str, Any] = {
             "min_duration_sec": 60,
             "min_coverage_ratio": 0.85,
             "max_missing_sec": 20,
+            "min_active_sec_before_restart": 30,
+            "silent_restart_sec": 20,
+            "byte_stall_restart_sec": 5,
+            "restart_cooldown_sec": 10,
+            "restart_failure_backoff_sec": 0.5,
+            "max_restarts": 5,
+            "max_silent_tail_sec": 60,
         },
         # macOS 側の入力ゲイン変化やシステム音声側の音量低下を吸収する。
         "audio_leveling": {
@@ -336,6 +362,8 @@ class Config:
             ai["timeout_sec"] = max(30, min(1800, int(ai.get("timeout_sec", 300))))
         except Exception:
             ai["timeout_sec"] = 300
+        prompt = ai.get("custom_system_prompt", "")
+        ai["custom_system_prompt"] = prompt if isinstance(prompt, str) else ""
         # 旧 keys 削除 (v1 設計レビューで除外した legacy provider)
         ai.pop("claude", None)
 
@@ -580,14 +608,93 @@ class Config:
             )
         except Exception:
             watchdog["max_missing_sec"] = 20.0
+        try:
+            watchdog["min_active_sec_before_restart"] = max(
+                5, min(600, float(watchdog.get("min_active_sec_before_restart", 30)))
+            )
+        except Exception:
+            watchdog["min_active_sec_before_restart"] = 30.0
+        try:
+            watchdog["silent_restart_sec"] = max(
+                5, min(600, float(watchdog.get("silent_restart_sec", 20)))
+            )
+        except Exception:
+            watchdog["silent_restart_sec"] = 20.0
+        try:
+            watchdog["byte_stall_restart_sec"] = max(
+                1, min(60, float(watchdog.get("byte_stall_restart_sec", 5)))
+            )
+        except Exception:
+            watchdog["byte_stall_restart_sec"] = 5.0
+        try:
+            watchdog["restart_cooldown_sec"] = max(
+                1, min(600, float(watchdog.get("restart_cooldown_sec", 10)))
+            )
+        except Exception:
+            watchdog["restart_cooldown_sec"] = 10.0
+        try:
+            watchdog["restart_failure_backoff_sec"] = max(
+                0.1, min(10, float(watchdog.get("restart_failure_backoff_sec", 0.5)))
+            )
+        except Exception:
+            watchdog["restart_failure_backoff_sec"] = 0.5
+        try:
+            watchdog["max_restarts"] = max(0, min(20, int(watchdog.get("max_restarts", 5))))
+        except Exception:
+            watchdog["max_restarts"] = 5
+        try:
+            watchdog["max_silent_tail_sec"] = max(
+                10, min(1800, float(watchdog.get("max_silent_tail_sec", 60)))
+            )
+        except Exception:
+            watchdog["max_silent_tail_sec"] = 60.0
         whisper = self._data.setdefault("whisper", {})
         if not isinstance(whisper, dict):
             whisper = {}
             self._data["whisper"] = whisper
+        performance = whisper.setdefault("performance", {})
+        if not isinstance(performance, dict):
+            performance = {}
+            whisper["performance"] = performance
+        perf_mode = str(performance.get("mode", "auto")).strip().lower()
+        performance["mode"] = perf_mode if perf_mode in {"full", "auto", "eco"} else "auto"
+        try:
+            performance["cpu_high_threshold"] = max(
+                30.0, min(95.0, float(performance.get("cpu_high_threshold", 75.0)))
+            )
+        except Exception:
+            performance["cpu_high_threshold"] = 75.0
+        try:
+            performance["throttle_ratio"] = max(
+                0.1, min(3.0, float(performance.get("throttle_ratio", 0.5)))
+            )
+        except Exception:
+            performance["throttle_ratio"] = 0.5
+        try:
+            performance["max_throttle_sec"] = max(
+                0.5, min(10.0, float(performance.get("max_throttle_sec", 3.0)))
+            )
+        except Exception:
+            performance["max_throttle_sec"] = 3.0
+        try:
+            performance["worker_nice"] = max(
+                0, min(19, int(performance.get("worker_nice", 3)))
+            )
+        except Exception:
+            performance["worker_nice"] = 3
+        try:
+            performance["mlx_memory_ratio"] = max(
+                0.2, min(0.8, float(performance.get("mlx_memory_ratio", 0.4)))
+            )
+        except Exception:
+            performance["mlx_memory_ratio"] = 0.4
         speaker_memory = whisper.setdefault("speaker_memory", {})
         if not isinstance(speaker_memory, dict):
             speaker_memory = {}
             whisper["speaker_memory"] = speaker_memory
+        speaker_memory["diarization_enabled"] = bool(
+            speaker_memory.get("diarization_enabled", True)
+        )
         speaker_memory["enabled"] = bool(speaker_memory.get("enabled", True))
         try:
             speaker_memory["match_threshold"] = max(
