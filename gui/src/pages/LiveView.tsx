@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowsIn } from "@phosphor-icons/react";
 import { useRecording, type StreamStatus } from "../lib/recording-context";
 import { Spinner } from "../components/Spinner";
+import { ModelDownloadProgress } from "../components/ModelDownloadProgress";
 
 function fmtTs(s: number) {
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
@@ -23,7 +24,7 @@ interface Props {
  */
 export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
   const {
-    liveSegments, streamStatus, recording, modelLoadLog,
+    liveSegments, streamStatus, recording, modelLoadLog, modelDownload,
   } = useRecording();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -90,6 +91,7 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
               <LiveWaitingState
                 streamStatus={streamStatus}
                 modelLoadLog={modelLoadLog}
+                modelDownload={modelDownload}
               />
             ) : (
               <p className="text-[11px] text-(--t3)">録音されていません</p>
@@ -153,12 +155,31 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
 function LiveWaitingState({
   streamStatus,
   modelLoadLog,
+  modelDownload,
 }: {
   streamStatus: StreamStatus | null;
   modelLoadLog: string | null;
+  modelDownload: import("../lib/api").WhisperDownloadStatus | null;
 }) {
   const modelState = streamStatus?.model_state;
   const modelError = streamStatus?.model_error;
+
+  if (modelDownload?.state === "downloading") {
+    return (
+      <div className="w-full max-w-xs">
+        <ModelDownloadProgress status={modelDownload} />
+      </div>
+    );
+  }
+
+  if (modelDownload?.state === "error") {
+    return (
+      <div className="w-full max-w-xs">
+        <ModelDownloadProgress status={modelDownload} />
+        {modelError && <p className="mt-1 text-[10px] text-(--t4) truncate">{modelError}</p>}
+      </div>
+    );
+  }
 
   if (modelState === "loading") {
     return (

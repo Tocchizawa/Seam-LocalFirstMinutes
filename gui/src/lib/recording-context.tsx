@@ -4,11 +4,11 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  WS_URL, getRecordingStatus, type TranscriptSegment,
+  WS_URL, getRecordingStatus, getWhisperModels, type TranscriptSegment,
+  type WhisperDownloadStatus,
 } from "./api";
 import { showToast } from "./toast";
 import { notifyNative } from "./notify";
-import { isByteSizeToken, parseHFProgress, parseSize } from "./parse-hf-progress";
 
 export interface LiveSegment extends TranscriptSegment {
   session_id?: string;
@@ -36,6 +36,7 @@ export interface StreamStatus {
   model_name?: string;
   /** model load 失敗時のメッセージ */
   model_error?: string | null;
+  model_download?: WhisperDownloadStatus | null;
 }
 
 interface Ctx {
@@ -57,13 +58,8 @@ interface Ctx {
   streamStatus: StreamStatus | null;
   /** モデル DL / 読込進捗の直近ログ行 (HF tqdm 等を抜粋) */
   modelLoadLog: string | null;
-  /** 全 DL ファイル合算の進捗 (HF tqdm 行ベース) */
-  modelDownloadAggregate: {
-    percent: number;
-    currentBytes: number;
-    totalBytes: number;
-    filesCount: number;
-  } | null;
+  /** Whisperモデルの正式なダウンロード状態 */
+  modelDownload: WhisperDownloadStatus | null;
   // device preferences shared between toolbar & banner
   micDevice: number | null;
   setMicDevice: (n: number | null) => void;
@@ -93,11 +89,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [captureSystem, setCaptureSystem] = useState(true);
   const [modelLoadLog, setModelLoadLog] = useState<string | null>(null);
   const [micMuted, setMicMutedLocal] = useState(false);
-  /** filename → { current, total } (バイト) */
-  const downloadFilesRef = useRef<Map<string, { current: number; total: number }>>(new Map());
-  const [modelDownloadAggregate, setModelDownloadAggregate] = useState<
-    { percent: number; currentBytes: number; totalBytes: number; filesCount: number } | null
-  >(null);
+  const [modelDownload, setModelDownload] = useState<WhisperDownloadStatus | null>(null);
 
   const startRef = useRef(0);
   const recordingRef = useRef(recording);
@@ -199,6 +191,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       }
       if (t === "streaming_status" && m.data) {
         setStreamStatus(m.data);
+        if (m.data.model_download) setModelDownload(m.data.model_download);
         return;
       }
       if (t === "mic_mute_changed" && m.data) {
@@ -259,6 +252,30 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // 録音開始直後から、モデルの正式なダウンロード状態を取得する。
+  // ログ解析は互換用に残し、画面表示はこのAPI状態を正本にする。
+  useEffect(() => {
+    if (!recording) {
+      setModelDownload(null);
+      return;
+    }
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const catalog = await getWhisperModels();
+        if (!stopped) setModelDownload(catalog.download);
+      } catch {
+        // WebSocket/バックエンド再起動中は次回のポーリングで復旧する。
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 700);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [recording]);
+
   // elapsed の細かい tick はクライアントで補完(無音時のみ backend からの recording_status が来ない可能性)
   useEffect(() => {
     if (!recording || paused) return;
@@ -292,46 +309,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       if (!isModelLog) return;
 
       setModelLoadLog(text);
-
-      // 個別ファイルの DL 進捗を集計用に保持
-      const prog = parseHFProgress(text);
-      if (prog && prog.current && prog.total) {
-        const byteBased = isByteSizeToken(prog.current) && isByteSizeToken(prog.total);
-        if (byteBased && prog.filename) {
-          const cur = parseSize(prog.current);
-          const tot = parseSize(prog.total);
-          if (tot > 0) {
-            downloadFilesRef.current.set(prog.filename, { current: cur, total: tot });
-            let totalBytes = 0;
-            let currentBytes = 0;
-            for (const v of downloadFilesRef.current.values()) {
-              totalBytes += v.total;
-              currentBytes += v.current;
-            }
-            setModelDownloadAggregate({
-              percent: totalBytes > 0 ? (currentBytes / totalBytes) * 100 : 0,
-              currentBytes,
-              totalBytes,
-              filesCount: downloadFilesRef.current.size,
-            });
-          }
-          return;
-        }
-
-        // "Fetching 4 files: 50%|...| 2/4 [...]" のような件数ベース進捗。
-        // バイト総量は不明なので % のみ UI に反映する。
-        const curNum = Number.parseFloat(prog.current);
-        const totNum = Number.parseFloat(prog.total);
-        if (Number.isFinite(curNum) && Number.isFinite(totNum) && totNum > 0) {
-          const percent = Number.isFinite(prog.percent) ? prog.percent : ((curNum / totNum) * 100);
-          setModelDownloadAggregate({
-            percent: Math.max(0, Math.min(100, percent)),
-            currentBytes: 0,
-            totalBytes: 0,
-            filesCount: Math.round(totNum),
-          });
-        }
-      }
     });
     return () => {
       stop.then((un) => un()).catch(() => { /* noop */ });
@@ -348,7 +325,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     liveSegments, resetLive,
     streamStatus,
     modelLoadLog,
-    modelDownloadAggregate,
+    modelDownload,
     micDevice, setMicDevice,
     captureSystem, setCaptureSystem,
   };

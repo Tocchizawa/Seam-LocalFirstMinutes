@@ -190,6 +190,7 @@ from src.api.debug import router as debug_router
 from src.api.speakers import router as speakers_router
 from src.api.summarize import router as summarize_router
 from src.api.dictionary import router as dictionary_router
+from src.api.models import router as models_router
 from src.api.util import router as util_router
 
 app.include_router(projects_router)
@@ -202,6 +203,7 @@ app.include_router(debug_router)
 app.include_router(speakers_router)
 app.include_router(summarize_router)
 app.include_router(dictionary_router)
+app.include_router(models_router)
 app.include_router(util_router)
 
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   X, MoonStars, Sun, Monitor, CheckCircle, ArrowsClockwise,
-  Play, Pause, MagnifyingGlass, Trash, Check, UsersThree,
+  Play, Pause, MagnifyingGlass, Trash, Check, UsersThree, DownloadSimple,
 } from "@phosphor-icons/react";
 import { Select } from "../components/Select";
 import { useImeSafeEnter } from "../lib/ime";
@@ -26,6 +26,9 @@ import {
   getCodexModels,
   getClaudeCodeModels,
   getDefaultSummaryPrompt,
+  getWhisperModels,
+  downloadWhisperModel,
+  deleteWhisperModel,
   PROVIDER_LABELS,
   SUMMARIZE_PROVIDERS,
   CLOUD_PROVIDERS,
@@ -37,12 +40,16 @@ import {
   type DiarizationTestResult,
   type SpeakerProfile,
   type CliModelOption,
+  type WhisperModelInfo,
+  type WhisperDownloadStatus,
 } from "../lib/api";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { showToast } from "../lib/toast";
 import { getThemeMode, setThemeMode, type ThemeMode } from "../lib/theme";
 import { Spinner } from "../components/Spinner";
+import { ModelDownloadProgress } from "../components/ModelDownloadProgress";
 import { useRecording } from "../lib/recording-context";
+import { formatSize } from "../lib/parse-hf-progress";
 import {
   checkForAppUpdate,
   closeAppUpdate,
@@ -61,6 +68,8 @@ const WHISPER_MODELS = [
   { value: "base", label: "Base (高速)" },
   { value: "small", label: "Small" },
   { value: "medium", label: "Medium (バランス)" },
+  { value: "large-v1", label: "Large v1 (高精度・低速)" },
+  { value: "large-v2", label: "Large v2 (高精度・低速)" },
   { value: "large-v3", label: "Large v3 (最高精度・低速)" },
   { value: "large-v3-turbo", label: "Large v3 Turbo (高精度・高速 / 推奨)" },
 ];
@@ -229,6 +238,10 @@ export function SettingsModal({ onClose }: Props) {
   const [hfTokenError, setHfTokenError] = useState("");
   const [diarTesting, setDiarTesting] = useState(false);
   const [diarTestResult, setDiarTestResult] = useState<DiarizationTestResult | null>(null);
+  const [whisperModels, setWhisperModels] = useState<WhisperModelInfo[]>([]);
+  const [whisperDownload, setWhisperDownload] = useState<WhisperDownloadStatus | null>(null);
+  const [whisperModelBusy, setWhisperModelBusy] = useState<Record<string, boolean>>({});
+  const [whisperModelError, setWhisperModelError] = useState("");
   const availableUpdateRef = useRef<AppUpdateInfo | null>(null);
   const speakersLoadedRef = useRef(false);
   const aiAuxLoadedRef = useRef(false);
@@ -240,6 +253,16 @@ export function SettingsModal({ onClose }: Props) {
       setDiarStatus(await getDiarizationStatus());
     } catch {
       setDiarStatus(null);
+    }
+  };
+
+  const refreshWhisperModels = async () => {
+    try {
+      const result = await getWhisperModels();
+      setWhisperModels(result.models);
+      setWhisperDownload(result.download);
+    } catch (e) {
+      setWhisperModelError(e instanceof Error ? e.message : "Whisperモデルの状態取得に失敗しました");
     }
   };
 
@@ -376,6 +399,30 @@ export function SettingsModal({ onClose }: Props) {
     if (category !== "speakers" || diarStatusLoadedRef.current) return;
     diarStatusLoadedRef.current = true;
     void refreshDiarStatus();
+  }, [category]);
+
+  useEffect(() => {
+    if (category !== "transcribe") return () => {};
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await getWhisperModels();
+        if (cancelled) return;
+        setWhisperModels(result.models);
+        setWhisperDownload(result.download);
+        setWhisperModelError("");
+      } catch (e) {
+        if (!cancelled) {
+          setWhisperModelError(e instanceof Error ? e.message : "Whisperモデルの状態取得に失敗しました");
+        }
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 700);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [category]);
 
   useEffect(() => {
@@ -616,6 +663,46 @@ export function SettingsModal({ onClose }: Props) {
   const setAutoInstallOnStartup = (enabled: boolean) => {
     setUpdateAutoInstallOnStartup(enabled);
     if (enabled) setUpdateCheckOnStartup(true);
+  };
+
+  const handleDownloadWhisperModel = async (model: WhisperModelInfo) => {
+    if (recordingRef.current) {
+      showToast({ kind: "info", text: "録音中はモデルをダウンロードできません" });
+      return;
+    }
+    setWhisperModelBusy((prev) => ({ ...prev, [model.name]: true }));
+    setWhisperModelError("");
+    try {
+      const result = await downloadWhisperModel(model.name);
+      setWhisperDownload(result.download);
+      await refreshWhisperModels();
+    } catch (e) {
+      setWhisperModelError(e instanceof Error ? e.message : "モデルのダウンロード開始に失敗しました");
+    } finally {
+      setWhisperModelBusy((prev) => ({ ...prev, [model.name]: false }));
+    }
+  };
+
+  const handleDeleteWhisperModel = async (model: WhisperModelInfo) => {
+    if (recordingRef.current) {
+      showToast({ kind: "info", text: "録音中はモデルを削除できません" });
+      return;
+    }
+    const ok = await ask(
+      `${model.label} を削除します。次回使用時に再ダウンロードが必要になります。続行しますか?`,
+      { title: "Whisperモデルの削除", kind: "warning", okLabel: "削除", cancelLabel: "キャンセル" },
+    );
+    if (!ok) return;
+    setWhisperModelBusy((prev) => ({ ...prev, [model.name]: true }));
+    setWhisperModelError("");
+    try {
+      await deleteWhisperModel(model.name);
+      await refreshWhisperModels();
+    } catch (e) {
+      setWhisperModelError(e instanceof Error ? e.message : "モデルの削除に失敗しました");
+    } finally {
+      setWhisperModelBusy((prev) => ({ ...prev, [model.name]: false }));
+    }
   };
 
   const installUpdate = async (info: AppUpdateInfo) => {
@@ -966,6 +1053,98 @@ export function SettingsModal({ onClose }: Props) {
                           size="md"
                         />
                       </SRow>
+                    </SGroup>
+
+                    <SGroup
+                      title="モデル管理"
+                      hint="録音前に任意のWhisperモデルをダウンロードできます。不要になったモデルはキャッシュから削除できます。"
+                    >
+                      {whisperModelError && (
+                        <p className="mb-2 text-[11px] text-(--danger)">{whisperModelError}</p>
+                      )}
+                      {whisperModels.length === 0 ? (
+                        <div className="flex items-center gap-2 py-3 text-[11px] text-(--t3)">
+                          <Spinner size={12} />
+                          モデル一覧を確認しています...
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {whisperModels.map((model) => {
+                            const busy = Boolean(whisperModelBusy[model.name]);
+                            const isCurrentDownload = whisperDownload?.model === model.name;
+                            const anotherDownload = whisperDownload?.state === "downloading"
+                              && !isCurrentDownload;
+                            const stateLabel = model.state === "loaded"
+                              ? "メモリ上にロード済み"
+                              : model.state === "downloaded"
+                                ? "ダウンロード済み"
+                                : model.state === "downloading"
+                                  ? "ダウンロード中"
+                                  : model.state === "error"
+                                    ? "ダウンロード失敗"
+                                    : "未ダウンロード";
+                            return (
+                              <div
+                                key={model.name}
+                                className={`rounded-lg border px-3 py-2.5 ${model.name === wm
+                                  ? "border-(--accent) bg-(--accent-soft)"
+                                  : "border-(--border) bg-(--surface-1)"}`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <p className="text-[12px] text-(--t1)">{model.label}</p>
+                                      {model.name === wm && (
+                                        <span className="rounded bg-(--accent-soft) px-1.5 py-0.5 text-[9px] text-(--accent)">
+                                          選択中
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="mt-0.5 text-[10px] text-(--t3)">
+                                      {stateLabel}
+                                      {model.size_bytes > 0
+                                        ? ` · ${formatSize(model.size_bytes)}`
+                                        : ""}
+                                    </p>
+                                  </div>
+                                  {model.downloaded ? (
+                                    <button
+                                      type="button"
+                                      className="btn h-7 px-2.5 text-[11px]"
+                                      onClick={() => void handleDeleteWhisperModel(model)}
+                                      disabled={busy || recording || anotherDownload || model.state === "downloading"}
+                                      title="モデルを削除"
+                                    >
+                                      {busy ? <Spinner size={12} /> : <Trash size={12} />}
+                                      削除
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="btn h-7 px-2.5 text-[11px]"
+                                      onClick={() => void handleDownloadWhisperModel(model)}
+                                      disabled={busy || recording || anotherDownload || model.state === "downloading"}
+                                    >
+                                      {busy || model.state === "downloading"
+                                        ? <Spinner size={12} />
+                                        : <DownloadSimple size={12} />}
+                                      {model.state === "error" ? "再試行" : "ダウンロード"}
+                                    </button>
+                                  )}
+                                </div>
+                                {isCurrentDownload && (
+                                  <div className="mt-2">
+                                    <ModelDownloadProgress
+                                      status={whisperDownload}
+                                      modelLabel={model.label}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </SGroup>
 
                     <SGroup
