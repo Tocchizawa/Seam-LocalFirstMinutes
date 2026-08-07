@@ -3,6 +3,27 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0-beta.16] - 2026-08-07
+
+This beta improves Whisper model management and makes model preparation visible during recording start.
+
+### Changed
+
+- Replace the separate Whisper model selector with a compact selectable model list.
+- Show download spinner, percentage, and speed in the settings and recording views.
+
+### Fixed
+
+- Reuse valid cached Whisper snapshots even when the Hugging Face `refs/main` file is missing.
+- Keep the model download status visible while recording startup is still in progress.
+- Avoid showing a fresh download state when the selected model is already cached.
+
+### Tests
+
+- `uv run python -m unittest tests.test_model_management tests.test_streaming_model_loader tests.test_model_loader`
+- `pnpm --dir gui build`
+- `python3 -m py_compile src/transcribe/streaming.py`
+
 ## [0.2.0-beta.15] - 2026-08-06
 
 This beta fixes downloading and loading the `large-v3-turbo` Whisper model.
