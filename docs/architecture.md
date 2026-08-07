@@ -182,7 +182,7 @@ GijirokuN.app/Contents/
 - Qwen3 8B: ~5GB (Ollama pull)
 - Whisper medium: ~1.5GB (HuggingFace)
 
-Whisper は設定画面で Tiny / Base / Small / Medium / Large v1 / Large v2 / Large v3 / Large v3 Turbo を選択できる。モデルのダウンロードは同時に1件だけ実行し、設定画面と録音開始後の画面が共通の進捗状態（取得済みバイト、総バイト、割合、エラー）を参照する。録音中のモデル削除・手動ダウンロードは受け付けない。
+Whisper は設定画面で Tiny / Base / Small / Medium / Large v1 / Large v2 / Large v3 / Large v3 Turbo をリストから選択できる。モデルのダウンロードは同時に1件だけ実行し、設定画面と録音開始中・録音開始後の画面が共通の進捗状態（取得済みバイト、総バイト、割合、速度、エラー）を参照する。録音中のモデル削除・手動ダウンロードは受け付けない。
 
 **起動シーケンス**:
 ```
@@ -640,7 +640,8 @@ ws://localhost:18900/ws
       "state": "downloading",
       "current_bytes": 524288000,
       "total_bytes": 1572864000,
-      "percent": 33.3
+      "percent": 33.3,
+      "speed_bytes_per_sec": 18432000
     }
 } }
 

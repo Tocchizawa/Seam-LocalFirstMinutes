@@ -186,9 +186,11 @@ function LiveWaitingState({
       <div className="flex items-center gap-3">
         <Spinner size={12} />
         <div className="flex flex-col items-start gap-0.5">
-          <p className="text-[11px] text-(--t2)">Whisper モデルを準備中</p>
+          <p className="text-[11px] text-(--t2)">Whisper モデルを読み込み中</p>
           <p className="text-[10px] text-(--t4)" title={modelLoadLog ?? undefined}>
-            初回のみダウンロードされます
+            {modelDownload?.state === "ready"
+              ? "キャッシュ済みモデルをメモリに展開しています"
+              : "モデルのキャッシュを確認しています"}
           </p>
         </div>
       </div>

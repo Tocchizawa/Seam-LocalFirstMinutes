@@ -87,6 +87,7 @@ export interface WhisperDownloadStatus {
   current_bytes: number;
   total_bytes: number;
   percent: number | null;
+  speed_bytes_per_sec: number | null;
   error: string | null;
 }
 
