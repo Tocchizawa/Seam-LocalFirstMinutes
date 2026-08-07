@@ -40,6 +40,7 @@ class WhisperModelManagementTest(unittest.TestCase):
                 "current_bytes": 0,
                 "total_bytes": 0,
                 "percent": None,
+                "speed_bytes_per_sec": None,
                 "error": None,
             })
             streaming._download_condition.notify_all()
@@ -90,6 +91,16 @@ class WhisperModelManagementTest(unittest.TestCase):
         self.assertEqual(streaming.ensure_model_downloaded("small"), str(snapshot))
         self.assertEqual(model["repo"], repo)
 
+    def test_valid_snapshot_is_reused_when_main_ref_is_missing(self) -> None:
+        _repo, snapshot = self._seed_cache("base")
+        (snapshot.parent.parent / "refs" / "main").unlink()
+
+        with patch(
+            "huggingface_hub.snapshot_download",
+            side_effect=AssertionError("cached model must not be downloaded again"),
+        ):
+            self.assertEqual(streaming.ensure_model_downloaded("base"), str(snapshot))
+
     def test_download_progress_is_published_from_byte_bar(self) -> None:
         repo = streaming.MLX_REPO_MAP["tiny"]
         with streaming._download_condition:
@@ -104,7 +115,19 @@ class WhisperModelManagementTest(unittest.TestCase):
         self.assertEqual(status["current_bytes"], 25)
         self.assertEqual(status["total_bytes"], 100)
         self.assertEqual(status["percent"], 25.0)
+        self.assertIn("speed_bytes_per_sec", status)
         self.assertEqual(token, streaming._download_token)
+
+    def test_download_speed_is_published(self) -> None:
+        with streaming._download_condition:
+            streaming._claim_download("tiny", streaming.MLX_REPO_MAP["tiny"])
+
+        streaming._update_download_progress(50, 100, 12_345.6)
+
+        self.assertEqual(
+            streaming.get_whisper_download_status()["speed_bytes_per_sec"],
+            12_345.6,
+        )
 
     def test_delete_removes_cached_model(self) -> None:
         _repo, snapshot = self._seed_cache("base")

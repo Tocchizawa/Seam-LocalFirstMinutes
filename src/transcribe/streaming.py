@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import math
 import os
 import queue
 import shutil
@@ -180,24 +181,34 @@ def _resolve_cached_snapshot(repo: str) -> str | None:
         return None
 
     model_dir = _repo_cache_dir(repo)
-    ref_main = model_dir / "refs" / "main"
-    if not ref_main.exists():
-        return None
-    try:
-        revision = ref_main.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    if not revision:
-        return None
 
-    snap = model_dir / "snapshots" / revision
-    if not snap.exists():
+    def is_valid_snapshot(snap: Path) -> bool:
+        return (
+            snap.is_dir()
+            and any((snap / name).exists() for name in ("weights.safetensors", "weights.npz"))
+            and (snap / "config.json").exists()
+        )
+
+    ref_main = model_dir / "refs" / "main"
+    if ref_main.exists():
+        try:
+            revision = ref_main.read_text(encoding="utf-8").strip()
+        except OSError:
+            revision = ""
+        if revision:
+            snap = model_dir / "snapshots" / revision
+            if is_valid_snapshot(snap):
+                return str(snap)
+
+    # HF Hub の途中更新や古いキャッシュでは refs/main が無いことがある。
+    # 必須ファイルが揃った snapshot は再ダウンロードせず、そのまま利用する。
+    snapshots_dir = model_dir / "snapshots"
+    try:
+        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+        snapshots.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
         return None
-    if not any((snap / name).exists() for name in ("weights.safetensors", "weights.npz")):
-        return None
-    if not (snap / "config.json").exists():
-        return None
-    return str(snap)
+    return next((str(path) for path in snapshots if is_valid_snapshot(path)), None)
 
 
 # ─── Whisper モデルのダウンロード/キャッシュ管理 ─────────────────────
@@ -213,6 +224,7 @@ _download_status: dict[str, object] = {
     "current_bytes": 0,
     "total_bytes": 0,
     "percent": None,
+    "speed_bytes_per_sec": None,
     "error": None,
 }
 
@@ -236,15 +248,27 @@ def get_whisper_download_status() -> dict[str, object]:
         return dict(_download_status)
 
 
-def _update_download_progress(current_bytes: int, total_bytes: int) -> None:
+def _update_download_progress(
+    current_bytes: int,
+    total_bytes: int,
+    speed_bytes_per_sec: float | None = None,
+) -> None:
     total = max(0, int(total_bytes))
     current = max(0, int(current_bytes))
     percent = (current / total * 100.0) if total > 0 else None
-    _set_download_status(
-        current_bytes=current,
-        total_bytes=total,
-        percent=round(min(100.0, percent), 1) if percent is not None else None,
-    )
+    updates: dict[str, object] = {
+        "current_bytes": current,
+        "total_bytes": total,
+        "percent": round(min(100.0, percent), 1) if percent is not None else None,
+    }
+    if speed_bytes_per_sec is not None:
+        try:
+            speed = float(speed_bytes_per_sec)
+        except (TypeError, ValueError):
+            speed = 0.0
+        if math.isfinite(speed) and speed > 0:
+            updates["speed_bytes_per_sec"] = round(speed, 1)
+    _set_download_status(**updates)
 
 
 try:
@@ -277,7 +301,8 @@ class _DownloadTqdm(_BaseTqdm):
 
     def _publish(self) -> None:
         if self._is_byte_bar:
-            _update_download_progress(self.n, self.total or 0)
+            rate = self.format_dict.get("rate")
+            _update_download_progress(self.n, self.total or 0, rate)
 
     def update(self, n=1):
         result = super().update(n)
@@ -301,6 +326,7 @@ def _claim_download(model_name: str, repo: str) -> int:
         "current_bytes": 0,
         "total_bytes": 0,
         "percent": None,
+        "speed_bytes_per_sec": None,
         "error": None,
     })
     return _download_token
@@ -331,6 +357,7 @@ def _run_download(model_name: str, repo: str, token: int) -> str:
                     "current_bytes": total,
                     "total_bytes": total,
                     "percent": 100.0,
+                    "speed_bytes_per_sec": None,
                     "error": None,
                 })
                 _download_condition.notify_all()
@@ -371,6 +398,7 @@ def ensure_model_downloaded(model_name: str) -> str:
                         "current_bytes": total,
                         "total_bytes": total,
                         "percent": 100.0,
+                        "speed_bytes_per_sec": None,
                         "error": None,
                     })
                     _download_condition.notify_all()
@@ -411,6 +439,7 @@ def start_whisper_model_download(model_name: str) -> dict[str, object]:
                 "current_bytes": _estimate_repo_cache_bytes(repo),
                 "total_bytes": _estimate_repo_cache_bytes(repo),
                 "percent": 100.0,
+                "speed_bytes_per_sec": None,
                 "error": None,
             })
             return dict(_download_status)
@@ -454,6 +483,7 @@ def delete_whisper_model(model_name: str) -> None:
                 "current_bytes": 0,
                 "total_bytes": 0,
                 "percent": None,
+                "speed_bytes_per_sec": None,
                 "error": None,
             })
         _download_condition.notify_all()

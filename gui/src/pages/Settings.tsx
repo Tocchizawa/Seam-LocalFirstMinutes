@@ -63,17 +63,6 @@ interface Props {
   onClose: () => void;
 }
 
-const WHISPER_MODELS = [
-  { value: "tiny", label: "Tiny (最速・粗い)" },
-  { value: "base", label: "Base (高速)" },
-  { value: "small", label: "Small" },
-  { value: "medium", label: "Medium (バランス)" },
-  { value: "large-v1", label: "Large v1 (高精度・低速)" },
-  { value: "large-v2", label: "Large v2 (高精度・低速)" },
-  { value: "large-v3", label: "Large v3 (最高精度・低速)" },
-  { value: "large-v3-turbo", label: "Large v3 Turbo (高精度・高速 / 推奨)" },
-];
-
 type Category = "appearance" | "app" | "transcribe" | "speakers" | "speaker-list" | "ai" | "recording" | "debug";
 
 type PerfMode = "full" | "auto" | "eco";
@@ -1043,35 +1032,22 @@ export function SettingsModal({ onClose }: Props) {
                   <>
                     <SGroup
                       title="Whisper モデル"
-                      hint="Apple MLX (mlx-whisper) で実行。初回選択時に HuggingFace からモデルをダウンロード (Tiny ≈75MB, Large v3 ≈3GB)"
-                    >
-                      <SRow label="モデルサイズ" hint="精度と速度のトレードオフ">
-                        <Select
-                          value={wm}
-                          onChange={setWm}
-                          options={WHISPER_MODELS.map((m) => ({ value: m.value, label: m.label }))}
-                          size="md"
-                        />
-                      </SRow>
-                    </SGroup>
-
-                    <SGroup
-                      title="モデル管理"
-                      hint="録音前に任意のWhisperモデルをダウンロードできます。不要になったモデルはキャッシュから削除できます。"
+                      hint="行を選ぶと録音に使うモデルになります。未取得のモデルは録音開始時または右側のボタンからダウンロードします。"
                     >
                       {whisperModelError && (
-                        <p className="mb-2 text-[11px] text-(--danger)">{whisperModelError}</p>
+                        <p className="mb-1.5 text-[11px] text-(--danger)">{whisperModelError}</p>
                       )}
                       {whisperModels.length === 0 ? (
-                        <div className="flex items-center gap-2 py-3 text-[11px] text-(--t3)">
+                        <div className="flex items-center gap-2 py-2 text-[11px] text-(--t3)">
                           <Spinner size={12} />
                           モデル一覧を確認しています...
                         </div>
                       ) : (
-                        <div className="flex flex-col gap-2">
+                        <div className="flex flex-col gap-1">
                           {whisperModels.map((model) => {
                             const busy = Boolean(whisperModelBusy[model.name]);
-                            const isCurrentDownload = whisperDownload?.model === model.name;
+                            const isCurrentDownload = whisperDownload?.model === model.name
+                              && whisperDownload.state === "downloading";
                             const anotherDownload = whisperDownload?.state === "downloading"
                               && !isCurrentDownload;
                             const stateLabel = model.state === "loaded"
@@ -1086,57 +1062,69 @@ export function SettingsModal({ onClose }: Props) {
                             return (
                               <div
                                 key={model.name}
-                                className={`rounded-lg border px-3 py-2.5 ${model.name === wm
+                                className={`overflow-hidden rounded-md border ${model.name === wm
                                   ? "border-(--accent) bg-(--accent-soft)"
                                   : "border-(--border) bg-(--surface-1)"}`}
                               >
-                                <div className="flex items-center gap-3">
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-1.5">
-                                      <p className="text-[12px] text-(--t1)">{model.label}</p>
-                                      {model.name === wm && (
-                                        <span className="rounded bg-(--accent-soft) px-1.5 py-0.5 text-[9px] text-(--accent)">
-                                          選択中
-                                        </span>
-                                      )}
-                                    </div>
-                                    <p className="mt-0.5 text-[10px] text-(--t3)">
-                                      {stateLabel}
-                                      {model.size_bytes > 0
-                                        ? ` · ${formatSize(model.size_bytes)}`
-                                        : ""}
-                                    </p>
-                                  </div>
+                                <div className="flex items-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => setWm(model.name)}
+                                    aria-pressed={model.name === wm}
+                                    className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left cursor-pointer"
+                                  >
+                                    <span
+                                      className={`h-2 w-2 shrink-0 rounded-full border ${model.name === wm
+                                        ? "border-(--accent) bg-(--accent)"
+                                        : "border-(--t4)"}`}
+                                      aria-hidden="true"
+                                    />
+                                    <span className="min-w-0 flex-1">
+                                      <span className="flex items-center gap-1.5">
+                                        <span className="truncate text-[11px] text-(--t1)">{model.label}</span>
+                                        {model.name === wm && (
+                                          <span className="shrink-0 text-[9px] text-(--accent)">選択中</span>
+                                        )}
+                                      </span>
+                                      <span className="mt-0.5 block truncate text-[9px] text-(--t3)">
+                                        {stateLabel}
+                                        {model.size_bytes > 0
+                                          ? ` · ${formatSize(model.size_bytes)}`
+                                          : ""}
+                                      </span>
+                                    </span>
+                                  </button>
                                   {model.downloaded ? (
                                     <button
                                       type="button"
-                                      className="btn h-7 px-2.5 text-[11px]"
+                                      className="btn mr-1.5 h-6 shrink-0 px-2 text-[10px]"
                                       onClick={() => void handleDeleteWhisperModel(model)}
                                       disabled={busy || recording || anotherDownload || model.state === "downloading"}
                                       title="モデルを削除"
                                     >
-                                      {busy ? <Spinner size={12} /> : <Trash size={12} />}
+                                      {busy ? <Spinner size={11} /> : <Trash size={11} />}
                                       削除
                                     </button>
                                   ) : (
                                     <button
                                       type="button"
-                                      className="btn h-7 px-2.5 text-[11px]"
+                                      className="btn mr-1.5 h-6 shrink-0 px-2 text-[10px]"
                                       onClick={() => void handleDownloadWhisperModel(model)}
                                       disabled={busy || recording || anotherDownload || model.state === "downloading"}
                                     >
                                       {busy || model.state === "downloading"
-                                        ? <Spinner size={12} />
-                                        : <DownloadSimple size={12} />}
-                                      {model.state === "error" ? "再試行" : "ダウンロード"}
+                                        ? <Spinner size={11} />
+                                        : <DownloadSimple size={11} />}
+                                      {model.state === "error" ? "再試行" : "DL"}
                                     </button>
                                   )}
                                 </div>
                                 {isCurrentDownload && (
-                                  <div className="mt-2">
+                                  <div className="px-2.5 pb-1.5">
                                     <ModelDownloadProgress
                                       status={whisperDownload}
                                       modelLabel={model.label}
+                                      compact
                                     />
                                   </div>
                                 )}

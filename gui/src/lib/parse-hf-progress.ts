@@ -6,3 +6,8 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
+
+export function formatRate(bytesPerSec: number | null | undefined): string | null {
+  if (typeof bytesPerSec !== "number" || !isFinite(bytesPerSec) || bytesPerSec <= 0) return null;
+  return `${formatSize(bytesPerSec)}/s`;
+}

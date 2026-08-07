@@ -42,6 +42,8 @@ export interface StreamStatus {
 interface Ctx {
   recording: boolean;
   setRecording: (b: boolean) => void;
+  recordingStarting: boolean;
+  setRecordingStarting: (b: boolean) => void;
   paused: boolean;
   togglePaused: () => void;
   setPaused: (b: boolean) => void;
@@ -79,6 +81,7 @@ export function useRecording(): Ctx {
 
 export function RecordingProvider({ children }: { children: ReactNode }) {
   const [recording, setRecording] = useState(false);
+  const [recordingStarting, setRecordingStarting] = useState(false);
   const [paused, setPaused] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [level, setLevel] = useState(0);
@@ -255,7 +258,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   // 録音開始直後から、モデルの正式なダウンロード状態を取得する。
   // ログ解析は互換用に残し、画面表示はこのAPI状態を正本にする。
   useEffect(() => {
-    if (!recording) {
+    if (!recording && !recordingStarting) {
       setModelDownload(null);
       return;
     }
@@ -274,7 +277,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [recording]);
+  }, [recording, recordingStarting]);
 
   // elapsed の細かい tick はクライアントで補完(無音時のみ backend からの recording_status が来ない可能性)
   useEffect(() => {
@@ -317,6 +320,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
   const value: Ctx = {
     recording, setRecording,
+    recordingStarting, setRecordingStarting,
     paused, togglePaused, setPaused,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed,

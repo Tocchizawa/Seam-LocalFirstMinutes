@@ -3,6 +3,7 @@ import {
   Microphone, MicrophoneSlash, Stop, Pause, Play, SlidersHorizontal,
 } from "@phosphor-icons/react";
 import { Waveform } from "./Waveform";
+import { Spinner } from "./Spinner";
 import {
   startRecording, stopRecording, updateSettings, setMicMuted,
 } from "../lib/api";
@@ -27,10 +28,10 @@ export function RecordToolbar({
   project, onStopped, onOpenDeviceSettings,
 }: Props) {
   const {
-    recording, setRecording, paused, togglePaused,
+    recording, setRecording, recordingStarting, setRecordingStarting, paused, togglePaused,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed, level,
-    resetLive, micDevice, captureSystem, setActiveSessionId, modelDownload,
+    resetLive, micDevice, captureSystem, setActiveSessionId, streamStatus, modelDownload,
   } = useRecording();
   const [error, setError] = useState("");
 
@@ -46,7 +47,9 @@ export function RecordToolbar({
   }, [micMuted, setMicMutedLocal]);
 
   const handleStart = async () => {
+    if (recordingStarting) return;
     setError("");
+    setRecordingStarting(true);
     try {
       const started = await startRecording(project.id, micDevice, captureSystem);
       void updateSettings({
@@ -62,6 +65,8 @@ export function RecordToolbar({
       setRecording(true);
     } catch (e: any) {
       setError(e.message || "録音の開始に失敗しました");
+    } finally {
+      setRecordingStarting(false);
     }
   };
 
@@ -74,6 +79,8 @@ export function RecordToolbar({
   }, [setRecording, setActiveSessionId, onStopped]);
 
   const handleMainClick = recording ? handleStop : handleStart;
+  const modelPreparing = recordingStarting || (recording && streamStatus?.model_state === "loading");
+  const modelDownloadVisible = modelDownload?.state === "downloading" || modelDownload?.state === "error";
 
   const display = useMemo(() => fmt(elapsedSec), [elapsedSec]);
 
@@ -102,9 +109,16 @@ export function RecordToolbar({
         <div className="flex-1 min-w-0">
           <Waveform level={recording && !paused ? level : 0} alive={recording && !paused} height={48} />
         </div>
-        {recording && modelDownload?.state === "downloading" && (
+        {(modelPreparing || modelDownloadVisible) && (
           <div className="w-44 shrink-0">
-            <ModelDownloadProgress status={modelDownload} compact />
+            {modelDownloadVisible ? (
+              <ModelDownloadProgress status={modelDownload} compact />
+            ) : (
+              <div className="flex items-center gap-1.5 text-[10px] text-(--t2)">
+                <Spinner size={11} />
+                <span className="truncate">Whisperモデルを読み込み中</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -141,6 +155,7 @@ export function RecordToolbar({
 
           <button
             onClick={handleMainClick}
+            disabled={recordingStarting}
             className="rec-main"
             title={recording ? "停止" : "録音開始"}>
             <span className="rec-main-icon rec-main-icon-mic">

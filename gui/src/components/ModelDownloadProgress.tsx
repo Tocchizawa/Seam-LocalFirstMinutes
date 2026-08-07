@@ -1,6 +1,6 @@
 import { CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import { Spinner } from "./Spinner";
-import { formatSize } from "../lib/parse-hf-progress";
+import { formatRate, formatSize } from "../lib/parse-hf-progress";
 import type { WhisperDownloadStatus } from "../lib/api";
 
 interface Props {
@@ -37,20 +37,20 @@ export function ModelDownloadProgress({ status, modelLabel, compact = false }: P
     : null;
   const current = status.current_bytes > 0 ? formatSize(status.current_bytes) : null;
   const total = status.total_bytes > 0 ? formatSize(status.total_bytes) : null;
+  const speed = formatRate(status.speed_bytes_per_sec);
+  const label = modelLabel ?? status.model ?? "モデル";
 
   return (
-    <div className={`flex flex-col gap-1.5 ${compact ? "text-[10px]" : "text-[11px]"}`}>
+    <div className={`flex flex-col ${compact ? "gap-1" : "gap-1.5"} ${compact ? "text-[10px]" : "text-[11px]"}`}>
       <div className="flex items-center gap-1.5 text-(--accent)">
         <Spinner size={compact ? 11 : 13} color="var(--accent)" />
-        <span className="truncate">
-          {modelLabel ?? status.model ?? "モデル"} をダウンロード中
-        </span>
-        {percent !== null && <span className="ml-auto num shrink-0">{Math.round(percent)}%</span>}
+        <span className="truncate">{label} をダウンロード中</span>
+        <span className="ml-auto num shrink-0">{percent === null ? "—" : `${Math.round(percent)}%`}</span>
       </div>
       <div
         className="h-1.5 w-full overflow-hidden rounded-full bg-(--surface-2)"
         role="progressbar"
-        aria-label={`${modelLabel ?? status.model ?? "モデル"} のダウンロード進捗`}
+        aria-label={`${label} のダウンロード進捗`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent ?? undefined}
@@ -60,11 +60,12 @@ export function ModelDownloadProgress({ status, modelLabel, compact = false }: P
           style={{ width: `${percent ?? 8}%` }}
         />
       </div>
-      {(current || total) && (
-        <span className="text-(--t3) num">
-          {current ?? "0 B"}{total ? ` / ${total}` : ""}
-        </span>
-      )}
+      <div className="flex items-center gap-2 text-(--t3) num" title={current || total ? `${current ?? "0 B"}${total ? ` / ${total}` : ""}` : undefined}>
+        <span className="shrink-0">{speed ?? "—/s"}</span>
+        {!compact && (current || total) && (
+          <span className="truncate">{current ?? "0 B"}{total ? ` / ${total}` : ""}</span>
+        )}
+      </div>
     </div>
   );
 }

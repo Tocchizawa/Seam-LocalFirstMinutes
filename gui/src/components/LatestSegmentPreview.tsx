@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowsOut } from "@phosphor-icons/react";
 import { useRecording } from "../lib/recording-context";
+import { ModelDownloadProgress } from "./ModelDownloadProgress";
 
 interface Props {
   onExpand: () => void;
@@ -18,7 +19,7 @@ function fmtTs(s: number) {
  */
 export function LatestSegmentPreview({ onExpand }: Props) {
   const {
-    liveSegments, recording, streamStatus,
+    liveSegments, recording, streamStatus, modelDownload,
   } = useRecording();
 
   const latest = liveSegments.length > 0
@@ -55,10 +56,12 @@ export function LatestSegmentPreview({ onExpand }: Props) {
               {displayed.text}
             </span>
           </div>
+        ) : modelDownload?.state === "downloading" ? (
+          <ModelDownloadProgress status={modelDownload} compact />
         ) : streamStatus?.model_state === "loading" ? (
           <span className="text-[11px] text-(--t2) truncate min-w-0 flex-1">
-            Whisperモデルを準備中
-            <span className="text-(--t4)"> · 初回のみダウンロード</span>
+            Whisperモデルを読み込み中
+            <span className="text-(--t4)"> · キャッシュを確認しています</span>
           </span>
         ) : streamStatus?.model_state === "error" ? (
           <span className="text-[11px] text-(--danger) truncate min-w-0 flex-1">
