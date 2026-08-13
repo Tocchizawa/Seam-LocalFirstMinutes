@@ -1043,7 +1043,7 @@ export function SettingsModal({ onClose }: Props) {
                           モデル一覧を確認しています...
                         </div>
                       ) : (
-                        <div className="flex flex-col gap-1">
+                        <div className="s-rows whisper-model-rows flex flex-col gap-1">
                           {whisperModels.map((model) => {
                             const busy = Boolean(whisperModelBusy[model.name]);
                             const isCurrentDownload = whisperDownload?.model === model.name

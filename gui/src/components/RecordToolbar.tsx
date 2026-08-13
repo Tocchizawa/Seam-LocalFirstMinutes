@@ -3,13 +3,11 @@ import {
   Microphone, MicrophoneSlash, Stop, Pause, Play, SlidersHorizontal,
 } from "@phosphor-icons/react";
 import { Waveform } from "./Waveform";
-import { Spinner } from "./Spinner";
 import {
   startRecording, stopRecording, updateSettings, setMicMuted,
 } from "../lib/api";
 import { useRecording } from "../lib/recording-context";
 import type { Project } from "../lib/api";
-import { ModelDownloadProgress } from "./ModelDownloadProgress";
 
 interface Props {
   project: Project;
@@ -31,7 +29,7 @@ export function RecordToolbar({
     recording, setRecording, recordingStarting, setRecordingStarting, paused, togglePaused,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed, level,
-    resetLive, micDevice, captureSystem, setActiveSessionId, streamStatus, modelDownload,
+    resetLive, micDevice, captureSystem, setActiveSessionId,
   } = useRecording();
   const [error, setError] = useState("");
 
@@ -79,8 +77,6 @@ export function RecordToolbar({
   }, [setRecording, setActiveSessionId, onStopped]);
 
   const handleMainClick = recording ? handleStop : handleStart;
-  const modelPreparing = recordingStarting || (recording && streamStatus?.model_state === "loading");
-  const modelDownloadVisible = modelDownload?.state === "downloading" || modelDownload?.state === "error";
 
   const display = useMemo(() => fmt(elapsedSec), [elapsedSec]);
 
@@ -109,18 +105,6 @@ export function RecordToolbar({
         <div className="flex-1 min-w-0">
           <Waveform level={recording && !paused ? level : 0} alive={recording && !paused} height={48} />
         </div>
-        {(modelPreparing || modelDownloadVisible) && (
-          <div className="w-44 shrink-0">
-            {modelDownloadVisible ? (
-              <ModelDownloadProgress status={modelDownload} compact />
-            ) : (
-              <div className="flex items-center gap-1.5 text-[10px] text-(--t2)">
-                <Spinner size={11} />
-                <span className="truncate">Whisperモデルを読み込み中</span>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Right: mic mute + device + record/pause/stop */}

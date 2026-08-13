@@ -1423,12 +1423,16 @@ class StreamingTranscriber:
                 if current_progress > last_progress:
                     last_progress = current_progress
                     deadline = time.monotonic() + wait_sec
+        if self._worker_count == 0:
+            self._release_resource_lease()
         return self.segments
 
     def cleanup(self) -> None:
         self._running = False
         # mlx-whisper のキャッシュは load_model 側で保持。参照だけクリア。
         self._repo = None
+        if self._worker_count == 0:
+            self._release_resource_lease()
 
     def _release_resource_lease(self) -> None:
         with self._resource_lease_lock:
@@ -1442,11 +1446,16 @@ class StreamingTranscriber:
     def _run_worker_guarded(self, generation: int) -> None:
         try:
             self._run_worker(generation)
+        except BaseException:
+            logger.exception("Streaming worker crashed (gen=%d)", generation)
+            raise
         finally:
             with self._worker_lock:
                 self._worker_count = max(0, self._worker_count - 1)
-                last_worker = self._worker_count == 0
-            if last_worker:
+                should_release = self._worker_count == 0 and not self._running
+            # 録音中の異常終了は watchdog が次世代 worker を起動するため、
+            # 再起動前に共有モデルのリースを解放しない。
+            if should_release:
                 self._release_resource_lease()
 
     def restart_worker(self, reason: str, force: bool = False) -> bool:
