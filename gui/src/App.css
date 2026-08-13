@@ -964,6 +964,9 @@ button { font-family: inherit; }
 .s-rows {
   border-top: 1px solid var(--border);
 }
+.whisper-model-rows {
+  border-top: 0;
+}
 .s-row {
   display: flex;
   align-items: center;

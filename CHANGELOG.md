@@ -3,6 +3,25 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1] - 2026-08-13
+
+This release stabilizes recording startup and keeps the Whisper model controls compact.
+
+### Changed
+
+- Keep the settings model list compact and remove duplicate download status from the recording toolbar.
+
+### Fixed
+
+- Keep the Whisper resource lease until recording cleanup when a streaming worker is restarted unexpectedly.
+- Prevent recording startup from getting stuck while the Whisper worker is being recovered.
+
+### Tests
+
+- `uv run python -m unittest tests.test_streaming_generation tests.test_resource_monitor`
+- `pnpm build`
+- Signed and notarized macOS `.app` / DMG build
+
 ## [0.2.0-beta.16] - 2026-08-07
 
 This beta improves Whisper model management and makes model preparation visible during recording start.

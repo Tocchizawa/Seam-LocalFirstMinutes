@@ -195,6 +195,26 @@ class StreamingGenerationTest(unittest.TestCase):
         self.assertEqual(1, len(transcriber.segments))
         self.assertEqual(1, len(emitted))
 
+    def test_worker_exit_keeps_whisper_lease_until_cleanup(self) -> None:
+        transcriber = self._transcriber([])
+        transcriber._running = True
+        transcriber._worker_count = 1
+        transcriber._resource_lease = True
+        self.assertTrue(streaming.model_resource_gate.try_acquire_whisper())
+
+        transcriber._run_worker = lambda _generation: None  # type: ignore[method-assign]
+        try:
+            transcriber._run_worker_guarded(1)
+            self.assertTrue(transcriber._resource_lease)
+            self.assertEqual(1, streaming.model_resource_gate.snapshot()["whisper_users"])
+
+            transcriber.cleanup()
+            self.assertFalse(transcriber._resource_lease)
+            self.assertEqual(0, streaming.model_resource_gate.snapshot()["whisper_users"])
+        finally:
+            if transcriber._resource_lease:
+                transcriber.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()
