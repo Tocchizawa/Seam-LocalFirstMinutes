@@ -1,0 +1,33 @@
+name: Main PR Source
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - ready_for_review
+
+permissions: {}
+
+jobs:
+  main-pr-source:
+    name: Main PR Source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          case "$HEAD_REF" in
+            release/v*|hotfix/*|dependabot/*)
+              echo "Allowed main PR source: $HEAD_REF"
+              ;;
+            *)
+              echo "::error::Pull requests into main must come from release/v*, hotfix/*, or dependabot/* branches. Regular work should target develop."
+              exit 1
+              ;;
+          esac
