@@ -5,7 +5,9 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -44,6 +46,14 @@ class ResourceMonitorTest(unittest.TestCase):
         self.assertFalse(
             monitor.should_throttle(cpu_threshold=75.0, memory_threshold=85.0)
         )
+
+    def test_priority_access_denied_does_not_break_transcription(self) -> None:
+        monitor = ResourceMonitor()
+        monitor._process = SimpleNamespace(
+            nice=Mock(side_effect=psutil.AccessDenied(pid=1234))
+        )
+
+        self.assertFalse(monitor.apply_process_priority(3))
 
 
 class ModelResourceGateTest(unittest.TestCase):
