@@ -192,13 +192,14 @@ class ResourceMonitor:
         """Seam バックエンドの優先度を設定する。
 
         macOS の Python ではスレッド単位の nice 設定ができないため、これは
-        Whisper 専用ではなくバックエンドプロセス全体に適用する。
+        Whisper 専用ではなくバックエンドプロセス全体に適用する。OS が
+        優先度変更を拒否しても、文字起こし自体は継続する。
         """
         try:
             value = max(0, min(19, int(nice_value)))
             process = self._process or psutil.Process()
             process.nice(value)
             return True
-        except (OSError, AttributeError, TypeError, ValueError) as exc:
+        except (psutil.Error, OSError, AttributeError, TypeError, ValueError) as exc:
             logger.debug("Process priority could not be set to %s: %s", nice_value, exc)
             return False

@@ -89,7 +89,11 @@ class HallucinationFilter:
         for blocked in self._blocked:
             if len(blocked) < 6:
                 continue
-            if blocked in normalized and normalized.count(blocked) >= 2:
+            repetitions = normalized.count(blocked)
+            if (
+                repetitions >= 2
+                and repetitions * len(blocked) / len(normalized) >= 0.6
+            ):
                 return True
 
         # 文字/短い語幹の異常反復 (例: がんがんがん..., ああああああ...)
@@ -146,7 +150,7 @@ class HallucinationFilter:
             j = i + unit_len
             while j + unit_len <= n and text[j:j + unit_len] == unit:
                 repeats += 1
-                if repeats >= min_repeat:
+                if repeats >= min_repeat and unit_len * repeats / n >= 0.6:
                     return True
                 j += unit_len
         return False
