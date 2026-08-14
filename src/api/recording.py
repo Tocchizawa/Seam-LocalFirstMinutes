@@ -22,9 +22,10 @@ from pydantic import BaseModel
 
 from src.api.errors import bad_request, conflict, not_found
 from src.api.ws import ws_manager
+from src.audio.converter import convert_audio_to_mp3
 from src.audio.mixer import RealtimeMixer
 from src.audio.mixed_writer import RealtimeMixedAudioWriter
-from src.audio.recorder import SESSIONS_DIR, recorder
+from src.audio.recorder import FFMPEG, SESSIONS_DIR, recorder
 from src.audio.resource_monitor import (
     ResourceBusyError,
     ResourceMonitor,
@@ -41,9 +42,9 @@ logger = logging.getLogger(__name__)
 SESSION_META_FILENAME = "session_meta.json"
 TRANSCRIPT_JSONL_FILENAME = "transcript.jsonl"
 _RECOVERABLE_STATES = {"stopping", "transcribing", "rediarizing", "saving"}
-AUDIO_FILE_PRIORITY = ("combined.flac", "combined.wav", "system.wav", "mic.wav")
-# 正本を優先し、旧セッションに残る再生用WAVだけ最後の互換 fallback にする。
-PLAYBACK_AUDIO_FILE_PRIORITY = AUDIO_FILE_PRIORITY + ("combined.play.wav",)
+AUDIO_FILE_PRIORITY = ("combined.mp3", "combined.flac", "combined.wav", "system.wav", "mic.wav")
+# 新規録音のMP3を優先し、既存FLACは再生時にseekable MP3へ変換する。
+PLAYBACK_AUDIO_FILE_PRIORITY = ("combined.mp3", "combined.play.mp3")
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
 
@@ -237,7 +238,29 @@ def _remove_intermediate_track_wavs(result: dict, *, keep: Path) -> None:
 
 
 def _pick_playback_audio(session_dir: Path) -> Path | None:
-    return _pick_audio_file(session_dir, PLAYBACK_AUDIO_FILE_PRIORITY)
+    direct = _pick_audio_file(session_dir, PLAYBACK_AUDIO_FILE_PRIORITY)
+    if direct is not None:
+        return direct
+
+    flac = session_dir / "combined.flac"
+    if _is_valid_audio_file(flac):
+        playback = session_dir / "combined.play.mp3"
+        try:
+            if (
+                not _is_valid_audio_file(playback)
+                or playback.stat().st_mtime_ns < flac.stat().st_mtime_ns
+            ):
+                convert_audio_to_mp3(flac, playback, ffmpeg_bin=FFMPEG)
+            if _is_valid_audio_file(playback):
+                return playback
+        except Exception as e:
+            logger.warning("Failed to prepare seekable playback audio %s: %s", flac, e)
+        return flac
+
+    return _pick_audio_file(
+        session_dir,
+        ("combined.wav", "system.wav", "mic.wav", "combined.play.wav"),
+    )
 
 
 def build_pipeline_transcript_payload(segments: list[dict]) -> dict:
@@ -1234,7 +1257,11 @@ async def play_audio(session_id: str) -> FileResponse:
     session_dir = APP_DIR / "sessions" / sid
     audio = _pick_playback_audio(session_dir)
     if audio is not None:
-        media_type = "audio/flac" if audio.suffix.lower() == ".flac" else "audio/wav"
+        media_type = {
+            ".mp3": "audio/mpeg",
+            ".flac": "audio/flac",
+            ".wav": "audio/wav",
+        }.get(audio.suffix.lower(), "application/octet-stream")
         return FileResponse(str(audio), media_type=media_type)
     raise not_found("FILE_NOT_FOUND", f"音声ファイルが見つかりません: {sid}")
 
@@ -1253,8 +1280,7 @@ async def get_session_segments(session_id: str) -> list[dict]:
 @router.get("/sessions/{session_id}/audio_info")
 async def get_session_audio_info(session_id: str) -> dict:
     """セッションの再生対象音声ファイルのメタ情報を返す。
-    優先: combined.flac → combined.wav → system.wav → mic.wav。
-    旧セッションの combined.play.wav は最後の互換 fallback。
+    優先: combined.mp3 → combined.play.mp3 → 旧FLACの再生用MP3 → WAV系。
     """
     from src.config import APP_DIR
     sid = _require_safe_session_id(session_id)
