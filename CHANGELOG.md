@@ -3,6 +3,17 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.2] - 2026-08-14
+
+### Fixed
+
+- Keep the Whisper worker running when macOS rejects the optional process-priority change.
+- Fix playback seeking for legacy FLAC recordings and reduce false-positive transcript filtering.
+
+### Tests
+
+- `python -m unittest tests/test_resource_monitor.py tests/test_streaming_model_loader.py tests/test_streaming_generation.py`
+
 ## [0.2.1] - 2026-08-13
 
 This release stabilizes recording startup and keeps the Whisper model controls compact.
