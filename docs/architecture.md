@@ -596,6 +596,7 @@ class PipelineStage(Enum):
 | GET | /api/minutes/search?q={query}&project={id} | 議事録検索 |
 | GET | /api/settings | 設定取得 |
 | PUT | /api/settings | 設定更新 |
+| GET | /api/summarize/codex/usage?days=30 | Seam経由のCodex CLI利用量集計 |
 | GET | /api/models/whisper | Whisperモデル一覧・キャッシュ状態・ダウンロード進捗 |
 | POST | /api/models/whisper/{model_name}/download | Whisperモデルのダウンロード開始 |
 | DELETE | /api/models/whisper/{model_name} | Whisperモデルのキャッシュ削除 |
@@ -657,6 +658,13 @@ ws://localhost:18900/ws
 
 // エラー
 { "type": "error", "data": { "stage": "...", "message": "...", "recoverable": true } }
+
+// Codex CLI活動・利用量
+{ "type": "summary_activity", "data": { "minutes_id": "...", "activity": "推論: ..." } }
+{ "type": "summary_usage", "data": {
+    "minutes_id": "...",
+    "usage": { "input_tokens": 1200, "output_tokens": 80, "reasoning_output_tokens": 40, "total_tokens": 1280 }
+} }
 ```
 
 **GUI 側の再接続戦略**:

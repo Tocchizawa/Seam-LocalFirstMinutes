@@ -37,6 +37,80 @@ from .registry import get_provider
 logger = logging.getLogger(__name__)
 
 DRAFTS_DIR = APP_DIR / "summary_drafts"
+CODEX_USAGE_PATH = APP_DIR / "codex_usage.jsonl"
+
+_USAGE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def _usage_int(item: dict[str, Any], key: str) -> int:
+    try:
+        return max(0, int(item.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_codex_usage(minutes_id: str, model: str | None, usage: dict[str, int]) -> None:
+    """Codexのusageだけを保存し、promptやCLI出力は保存しない。"""
+    try:
+        CODEX_USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": time.time(),
+            "minutes_id": minutes_id,
+            "model": model,
+            **{key: _usage_int(usage, key) for key in _USAGE_KEYS},
+        }
+        with CODEX_USAGE_PATH.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.warning("[summary] failed to persist Codex usage: %s", exc)
+
+
+def get_codex_usage_summary(days: int = 30) -> dict[str, Any]:
+    days = max(1, min(365, int(days)))
+    cutoff = time.time() - days * 24 * 60 * 60
+    entries: list[dict[str, Any]] = []
+    try:
+        lines = CODEX_USAGE_PATH.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    except Exception as exc:
+        logger.warning("[summary] failed to read Codex usage: %s", exc)
+        lines = []
+
+    for line in lines:
+        try:
+            item = json.loads(line)
+            if not isinstance(item, dict):
+                continue
+            timestamp = float(item.get("timestamp", 0))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < cutoff:
+            continue
+        entries.append(item)
+
+    total = {
+        key: sum(_usage_int(item, key) for item in entries)
+        for key in _USAGE_KEYS
+    }
+    runs = len(entries)
+    average = {key: round(value / runs) if runs else 0 for key, value in total.items()}
+    recent = [
+        {
+            "timestamp": item.get("timestamp"),
+            "model": item.get("model"),
+            **{key: _usage_int(item, key) for key in _USAGE_KEYS},
+        }
+        for item in entries[-20:]
+    ]
+    return {"days": days, "runs": runs, "total": total, "average": average, "recent": recent}
 
 JobState = Literal["queued", "running", "done", "failed", "cancelled", "skipped"]
 
@@ -55,6 +129,8 @@ class JobStatus:
     # 細粒度ステージ (UI のステップ表示用)
     stage: str | None = None
     stage_label: str | None = None
+    activity: str | None = None
+    usage: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +145,8 @@ class JobStatus:
             "finished_at": self.finished_at,
             "stage": self.stage,
             "stage_label": self.stage_label,
+            "activity": self.activity,
+            "usage": self.usage,
         }
 
 
@@ -388,6 +466,7 @@ class SummaryRunner:
             # CLI provider (claude_code / codex) が「何をしているか」を UI に伝えるイベント
             if not label:
                 return
+            status.activity = label
             await self._broadcast({
                 "type": "summary_activity",
                 "data": {
@@ -435,6 +514,20 @@ class SummaryRunner:
             )
             await self._broadcast_failed(status)
             return
+
+        if result.usage:
+            status.usage = result.usage
+            await self._broadcast({
+                "type": "summary_usage",
+                "data": {
+                    "minutes_id": minutes_id,
+                    "provider": result.provider,
+                    "model": result.model,
+                    "usage": result.usage,
+                },
+            })
+            if result.provider == "codex":
+                _record_codex_usage(minutes_id, result.model, result.usage)
 
         # 9. draft保存 → DB更新 → draft削除
         await self._save_with_recovery(record, status, result)
@@ -590,6 +683,7 @@ class SummaryRunner:
                 "duration_sec": result.duration_sec,
                 "input_chars": result.input_chars,
                 "output_chars": result.output_chars,
+                "usage": result.usage,
                 # タイトル生成成功時のみ含む。フロントは値があれば minutes.title を上書き表示する。
                 "new_title": new_title,
             },

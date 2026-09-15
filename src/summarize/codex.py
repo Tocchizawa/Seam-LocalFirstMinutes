@@ -1,17 +1,18 @@
 """Codex CLI provider — OpenAI ChatGPT subscription経由で要約。
 
-`codex exec -` を subprocess で起動し、stdin で prompt を渡して stdout を逐次キャプチャする。
+`codex exec --json -` を subprocess で起動し、stdin で prompt を渡してJSONLイベントを逐次キャプチャする。
 Claude Code 同様 APIキー不要 (Codex CLI のサブスク認証を流用)。
 
 注意:
-  - codex は streaming structured output を持たないため、
-    ANSI制御文字を除去しつつ stdout をそのまま要約として扱う。
+  - 推論・ツールの詳細本文は保存せず、UI用の短い活動ラベルだけを流す。
+  - 古いCLIやテスト用の通常テキスト出力は後方互換として処理する。
   - prompt は stdin で明示的に渡して close する
     (親プロセスの stdin pipe 継承による `Reading additional input from stdin...` を回避)
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -67,6 +68,109 @@ def _clean_activity_line(line: str) -> str:
     return s
 
 
+_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+
+
+def _value_text(value: Any) -> str:
+    """構造化イベントからUI用の短い文字列だけを取り出す。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(part for part in (_value_text(v) for v in value) if part)
+    if isinstance(value, dict):
+        for key in ("text", "summary", "message", "command", "path", "query", "name"):
+            if key in value:
+                text = _value_text(value[key])
+                if text:
+                    return text
+    return ""
+
+
+def _item_text(item: dict[str, Any]) -> str:
+    for key in ("text", "summary", "content"):
+        text = _value_text(item.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _item_activity(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "item")
+    labels = {
+        "reasoning": "推論",
+        "command_execution": "コマンド実行",
+        "file_change": "ファイル変更",
+        "file_read": "ファイル読み込み",
+        "web_search": "Web検索",
+        "mcp_tool_call": "外部ツール",
+        "collab_tool_call": "サブタスク",
+        "error": "Codexエラー",
+    }
+    label = labels.get(item_type, item_type)
+    detail = _item_text(item)
+    if item_type == "command_execution":
+        detail = _value_text(item.get("command")) or detail
+    elif item_type == "file_change":
+        detail = _value_text(item.get("path")) or detail
+    elif item_type == "web_search":
+        detail = _value_text(item.get("query")) or detail
+    elif item_type == "error":
+        detail = _value_text(item.get("message")) or detail
+    return _clean_activity_line(f"{label}: {detail}" if detail else label)
+
+
+def _normalize_usage(raw: Any) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    keys = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    usage: dict[str, int] = {}
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            usage[key] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    if "total_tokens" not in usage:
+        usage["total_tokens"] = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+    return usage if usage.get("total_tokens", 0) or usage else None
+
+
+def _parse_json_result(raw: bytes) -> tuple[str, dict[str, int] | None]:
+    """フォールバック実行時のJSONLを最終メッセージとusageへ変換する。"""
+    text = ""
+    usage: dict[str, int] | None = None
+    parsed = False
+    for raw_line in raw.splitlines():
+        line = _strip_ansi(raw_line.decode("utf-8", errors="replace")).strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        parsed = True
+        if event.get("type") == "item.completed":
+            item = event.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = _item_text(item)
+        elif event.get("type") == "turn.completed":
+            usage = _normalize_usage(event.get("usage"))
+    if parsed:
+        return text.strip(), usage
+    return _strip_ansi(raw.decode("utf-8", errors="replace")).strip(), None
+
+
 class CodexProvider(SummarizerProvider):
     name = PROVIDER_CODEX
 
@@ -77,6 +181,8 @@ class CodexProvider(SummarizerProvider):
         # alias ("gpt-5", "o3" 等) もフルID もそのまま渡せる前提。
         # 空文字の場合は --model を付けず、Codex CLI 側の既定モデルを使う。
         self._model = str(self._config.get("model", "")).strip()
+        effort = str(self._config.get("reasoning_effort", "low") or "low").strip().lower()
+        self._reasoning_effort = effort if effort in _REASONING_EFFORTS else "low"
         self._launcher_command = str(self._config.get("launcher_command", "")).strip()
         self._connect_timeout_sec = clamp_connect_timeout(
             self._config.get("connect_timeout_sec", 30),
@@ -86,6 +192,9 @@ class CodexProvider(SummarizerProvider):
         self._extra_args = normalize_extra_args(extra)
         self._proc: asyncio.subprocess.Process | None = None
         self._cancel_event = asyncio.Event()
+
+    def _reasoning_args(self) -> list[str]:
+        return ["-c", f'model_reasoning_effort="{self._reasoning_effort}"']
 
     def _build_cmd(self, command_args: list[str]) -> tuple[list[str] | None, str]:
         return build_command_argv(
@@ -158,6 +267,7 @@ class CodexProvider(SummarizerProvider):
                     "exec",
                     "--skip-git-repo-check",
                     "--ephemeral",
+                    *self._reasoning_args(),
                     *model_arg,
                     *self._extra_args,
                     "-",
@@ -285,6 +395,8 @@ class CodexProvider(SummarizerProvider):
                 "exec",
                 "--skip-git-repo-check",
                 "--ephemeral",
+                "--json",
+                *self._reasoning_args(),
                 *cur_model_arg,
                 *repo_arg,
                 *add_dir_args,
@@ -341,7 +453,10 @@ class CodexProvider(SummarizerProvider):
             )
 
         out_chunks: list[str] = []
-        in_summary = False  # 最初の "## " 見出しに当たったら True
+        in_summary = False  # 旧CLIの通常テキスト出力用
+        json_mode = False
+        last_agent_text = ""
+        usage: dict[str, int] | None = None
 
         async def _emit_activity(msg: str) -> None:
             if on_activity is None:
@@ -370,6 +485,50 @@ class CodexProvider(SummarizerProvider):
                         continue
 
                     stripped = text.strip()
+                    try:
+                        event = json.loads(stripped)
+                    except (TypeError, ValueError):
+                        event = None
+                    if isinstance(event, dict) and isinstance(event.get("type"), str):
+                        json_mode = True
+                        event_type = event["type"]
+                        if event_type in {"thread.started", "turn.started"}:
+                            await _emit_activity(
+                                "Codexスレッド開始" if event_type == "thread.started" else "推論開始",
+                            )
+                        elif event_type in {"item.started", "item.updated", "item.completed"}:
+                            item = event.get("item") or {}
+                            if isinstance(item, dict):
+                                item_type = str(item.get("type") or "")
+                                if item_type == "agent_message":
+                                    full_text = _item_text(item)
+                                    if full_text:
+                                        if full_text.startswith(last_agent_text):
+                                            delta = full_text[len(last_agent_text):]
+                                        else:
+                                            delta = full_text
+                                        last_agent_text = full_text
+                                        if delta:
+                                            out_chunks.append(delta)
+                                            if on_token is not None:
+                                                res = on_token(delta)
+                                                if asyncio.iscoroutine(res):
+                                                    await res
+                                elif event_type != "item.updated" or item_type == "reasoning":
+                                    activity = _item_activity(item)
+                                    if activity:
+                                        await _emit_activity(activity)
+                        elif event_type == "turn.completed":
+                            usage = _normalize_usage(event.get("usage"))
+                        elif event_type == "error":
+                            message = _value_text(event.get("message")) or "Codex CLIでエラーが発生しました"
+                            await _emit_activity(_clean_activity_line(message))
+                        continue
+
+                    if json_mode:
+                        # JSONLモードの警告や非JSON行は要約本文へ混ぜない。
+                        continue
+
                     # markdown 本文の開始は最初の "## " 見出し
                     if not in_summary and stripped.startswith("##"):
                         in_summary = True
@@ -436,9 +595,7 @@ class CodexProvider(SummarizerProvider):
                 fallback_code = self._proc.returncode or 0
                 self._proc = None
                 if fallback_code == 0:
-                    fallback_text = _strip_ansi(
-                        fallback_stdout.decode("utf-8", errors="replace"),
-                    ).strip()
+                    fallback_text, fallback_usage = _parse_json_result(fallback_stdout)
                     duration = time.time() - started
                     return SummaryResult(
                         text=fallback_text,
@@ -447,6 +604,7 @@ class CodexProvider(SummarizerProvider):
                         input_chars=len(full_prompt),
                         output_chars=len(fallback_text),
                         duration_sec=duration,
+                        usage=fallback_usage,
                     )
                 fallback_err = _strip_ansi(
                     fallback_stderr.decode("utf-8", errors="replace"),
@@ -475,6 +633,7 @@ class CodexProvider(SummarizerProvider):
             input_chars=len(full_prompt),
             output_chars=len(text),
             duration_sec=duration,
+            usage=usage,
         )
 
     async def cancel(self, *, reason: str = "user_cancelled") -> None:
@@ -501,6 +660,7 @@ class CodexProvider(SummarizerProvider):
             "exec",
             "--skip-git-repo-check",
             "--ephemeral",
+            *self._reasoning_args(),
             *model_arg,
             *self._extra_args,
             "-",

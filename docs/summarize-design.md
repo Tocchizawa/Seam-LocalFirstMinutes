@@ -251,6 +251,7 @@ minutes_ai:
   codex:
     binary_path: "codex"
     model: ""                  # 空なら CLI 側の既定モデル
+    reasoning_effort: "low"    # minimal / low / medium / high / xhigh
     launcher_command: ""
     launcher_shell: "/bin/zsh"
     launcher_interactive: true

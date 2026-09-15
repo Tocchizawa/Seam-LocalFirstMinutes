@@ -3,6 +3,24 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.3] - 2026-09-15
+
+### Added
+
+- Show Codex CLI activity and token usage in Seam while a summary is running.
+- Add Codex reasoning-effort settings and 30-day usage totals to the settings screen.
+
+### Changed
+
+- Run Seam-launched Codex summaries with structured JSONL output.
+- Avoid forcing Codex to read entire project reference documents before summarizing.
+
+### Tests
+
+- `tests/test_cli_providers.py` (42 passed)
+- `tests/test_summarize_foundation.py` (69 passed)
+- `pnpm build`
+
 ## [0.2.2] - 2026-08-14
 
 ### Fixed

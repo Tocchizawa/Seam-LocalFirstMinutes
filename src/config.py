@@ -76,6 +76,7 @@ DEFAULTS: dict[str, Any] = {
             # codex CLI のモデル一覧は ~/.codex/models_cache.json から動的取得 (UI で選択)。
             # ここの default はフォールバック (キャッシュ未取得時)。空文字なら --model を付けない。
             "model": "",
+            "reasoning_effort": "low",
             # zsh function 等の特殊起動が必要な場合だけ使用。
             # 例: "source ~/.zshrc; my_codex_wrapper"
             "launcher_command": "",
@@ -485,6 +486,10 @@ class Config:
         ai_codex.setdefault("binary_path", "codex")
         # 既定は空文字: --model を付けず CLI 側デフォルトを使う
         ai_codex.setdefault("model", "")
+        reasoning_effort = str(ai_codex.get("reasoning_effort", "low") or "low").strip().lower()
+        if reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            reasoning_effort = "low"
+        ai_codex["reasoning_effort"] = reasoning_effort
         ai_codex.setdefault("launcher_command", "")
         ai_codex.setdefault("launcher_shell", "/bin/zsh")
         ai_codex.setdefault("launcher_interactive", True)
