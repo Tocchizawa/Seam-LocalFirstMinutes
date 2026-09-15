@@ -134,6 +134,19 @@ export const getDefaultSummaryPrompt = () =>
 export const getCodexModels = () =>
   request<CliModelOption[]>("/api/settings/cli/codex/models");
 
+export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface CodexUsageSummary {
+  days: number;
+  runs: number;
+  total: Record<string, number>;
+  average: Record<string, number>;
+  recent: Array<Record<string, string | number | null>>;
+}
+
+export const getCodexUsage = (days = 30) =>
+  request<CodexUsageSummary>(`/api/summarize/codex/usage?days=${days}`);
+
 export const getClaudeCodeModels = () =>
   request<CliModelOption[]>("/api/settings/cli/claude_code/models");
 
@@ -597,6 +610,7 @@ export interface SummarizeStatus {
   stage_label?: string | null;
   /** CLI provider が「いま何をしているか」を示す短いラベル (例: "Read: docs/README.md") */
   activity?: string | null;
+  usage?: Record<string, number> | null;
 }
 
 export const triggerSummarize = (

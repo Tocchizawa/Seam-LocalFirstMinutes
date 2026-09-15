@@ -376,7 +376,62 @@ ok("codex output preserves Japanese", "概要" in res.text)
 
 
 # ─────────────────────────────────────────────────────────
-section("[10] _strip_ansi: ANSI escape除去")
+section("[10] CodexProvider — JSONL activity and usage")
+# ─────────────────────────────────────────────────────────
+
+
+async def _codex_json_gen():
+    events = [
+        {"type": "thread.started", "thread_id": "thr_test"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_reasoning",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "議事録の要点を整理中"}],
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "item_message", "type": "agent_message", "text": "## 概要\nテスト要約"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 1200,
+                "cached_input_tokens": 300,
+                "output_tokens": 80,
+                "reasoning_output_tokens": 40,
+            },
+        },
+    ]
+    lines = [(json.dumps(event) + "\n").encode("utf-8") for event in events]
+    fake_proc = _make_fake_proc(lines, returncode=0)
+    activities: list[str] = []
+    with patch("shutil.which", return_value="/opt/homebrew/bin/codex"):
+        mock_exec = AsyncMock(return_value=fake_proc)
+        with patch("asyncio.create_subprocess_exec", new=mock_exec):
+            p = CodexProvider({"binary_path": "codex", "reasoning_effort": "low"})
+            result = await p.generate(
+                "[00:00] hi",
+                on_activity=lambda activity: activities.append(activity),
+                timeout_sec=10,
+            )
+    return result, activities, mock_exec.await_args.args
+
+
+res, activities, argv = asyncio.run(_codex_json_gen())
+ok("codex JSONL result", res.text == "## 概要\nテスト要約")
+ok("codex reasoning activity", any("推論" in item for item in activities))
+ok("codex usage input", res.usage is not None and res.usage["input_tokens"] == 1200)
+ok("codex usage total", res.usage is not None and res.usage["total_tokens"] == 1280)
+ok("codex uses JSONL", "--json" in argv)
+ok("codex uses configured reasoning effort", 'model_reasoning_effort="low"' in argv)
+
+
+# ─────────────────────────────────────────────────────────
+section("[11] _strip_ansi: ANSI escape除去")
 # ─────────────────────────────────────────────────────────
 
 raw = "\x1b[1;31mError\x1b[0m: bad thing\n"
@@ -385,7 +440,7 @@ ok("plain pass-through", _strip_ansi("hello") == "hello")
 
 
 # ─────────────────────────────────────────────────────────
-section("[11] CodexProvider — unsupported model fallback to CLI default")
+section("[12] CodexProvider — unsupported model fallback to CLI default")
 # ─────────────────────────────────────────────────────────
 
 
@@ -418,7 +473,7 @@ ok("fallback message note", "fallback" in (h.message or ""))
 
 
 # ─────────────────────────────────────────────────────────
-section("[12] CodexProvider — launcher_command uses zsh -ic")
+section("[13] CodexProvider — launcher_command uses zsh -ic")
 # ─────────────────────────────────────────────────────────
 
 
@@ -447,7 +502,7 @@ ok("launcher clears shell hash", len(argv) >= 3 and "hash -r" in str(argv[2]))
 
 
 # ─────────────────────────────────────────────────────────
-section("[13] cli_launcher — refreshes PATH before direct binary resolution")
+section("[14] cli_launcher — refreshes PATH before direct binary resolution")
 # ─────────────────────────────────────────────────────────
 
 with tempfile.TemporaryDirectory() as td:

@@ -28,7 +28,7 @@ from src.summarize.registry import (
     is_cloud_provider,
     is_known_provider,
 )
-from src.summarize.runner import get_runner
+from src.summarize.runner import get_codex_usage_summary, get_runner
 
 router = APIRouter(tags=["summarize"])
 
@@ -105,6 +105,12 @@ async def summarize_active() -> list[dict]:
             "state": status.state if status is not None else None,
         })
     return out
+
+
+@router.get("/api/summarize/codex/usage")
+async def codex_usage(days: int = 30) -> dict:
+    """Seam経由で実行したCodex CLIの使用量集計。prompt本文は返さない。"""
+    return get_codex_usage_summary(days)
 
 
 # ───────── provider config ─────────

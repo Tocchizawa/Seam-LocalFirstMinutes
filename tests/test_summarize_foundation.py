@@ -6,10 +6,12 @@ provider実装やネットワークIOは触らない (Phase 2 以降の provider
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -78,6 +80,7 @@ print("=" * 60)
 
 from src.summarize.prompts import (
     SYSTEM_PROMPT,
+    _format_docs_hint,
     build_messages,
     build_user_prompt,
     estimate_tokens_jp,
@@ -152,6 +155,11 @@ assert_true("project name 反映", "えがいて" in prompt2)
 assert_true("member with role 反映", "田中 (リード)" in prompt2)
 assert_true("member without role 反映", "- 佐藤" in prompt2 and "佐藤 ()" not in prompt2)
 assert_true("glossary 反映", "Supabase: BaaS" in prompt2)
+
+with tempfile.TemporaryDirectory() as docs_dir:
+    Path(docs_dir, "KNOWLEDGE.md").write_text("large reference", encoding="utf-8")
+    docs_hint = _format_docs_hint(ProjectContext(doc_dirs=[docs_dir]))
+    assert_true("docs hint does not force full read", "最初から読み込まない" in docs_hint)
 
 # build_messages
 sys_p, user_p = build_messages("[00:00] hello", ctx)
@@ -345,6 +353,11 @@ with tempfile.TemporaryDirectory() as tmp:
             30,
             c.get("minutes_ai", "codex", "connect_timeout_sec"),
         )
+        assert_eq(
+            "codex reasoning_effort default",
+            "low",
+            c.get("minutes_ai", "codex", "reasoning_effort"),
+        )
         c.update({
             "minutes_ai": {
                 "codex": {
@@ -435,6 +448,48 @@ with tempfile.TemporaryDirectory() as tmp:
         assert_eq("recover_drafts no dir → 0", 0, n)
     finally:
         runner_mod.DRAFTS_DIR = orig_drafts
+
+
+# ─── Codex usage aggregation ───
+print()
+print("=" * 60)
+print("[13] Codex usage aggregation")
+print("=" * 60)
+
+orig_usage_path = runner_mod.CODEX_USAGE_PATH
+with tempfile.TemporaryDirectory() as tmp:
+    usage_path = Path(tmp) / "codex_usage.jsonl"
+    now = time.time()
+    usage_path.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": now,
+                "model": "gpt-test",
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "prompt": "must not be returned",
+            }),
+            json.dumps({
+                "timestamp": now - 400 * 24 * 60 * 60,
+                "model": "old",
+                "input_tokens": 900,
+                "output_tokens": 100,
+                "total_tokens": 1000,
+            }),
+            "not-json",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    runner_mod.CODEX_USAGE_PATH = usage_path
+    try:
+        usage_summary = runner_mod.get_codex_usage_summary(30)
+        assert_eq("usage keeps recent runs", 1, usage_summary["runs"])
+        assert_eq("usage total tokens", 120, usage_summary["total"]["total_tokens"])
+        assert_eq("usage average tokens", 120, usage_summary["average"]["total_tokens"])
+        assert_true("usage does not expose prompt", "prompt" not in usage_summary["recent"][0])
+    finally:
+        runner_mod.CODEX_USAGE_PATH = orig_usage_path
 
 
 # ─── Summary ───

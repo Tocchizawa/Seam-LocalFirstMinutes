@@ -63,6 +63,11 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function fmtTokens(n: unknown): string {
+  const value = Number(n);
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)).toLocaleString() : "—";
+}
+
 export function DetailView(props: Props) {
   const isLive = !!props.sessionId;
   const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
@@ -385,6 +390,11 @@ export function DetailView(props: Props) {
               activity,
             }));
           }
+        } else if (m.type === "summary_usage") {
+          setSummaryJob((prev) => ({
+            ...(prev || { minutes_id: minutesId, state: "running" as const }),
+            usage: m.data?.usage ?? null,
+          }));
         } else if (m.type === "summary_chunk") {
           const chunk = String(m.data.text || "");
           setSummaryJob((prev) => ({
@@ -400,6 +410,7 @@ export function DetailView(props: Props) {
             minutes_id: minutesId,
             provider: m.data?.provider ?? null,
             model: m.data?.model ?? null,
+            usage: m.data?.usage ?? null,
             finished_at: Date.now() / 1000,
           });
           // タイトル即時反映 (DB は既に更新済み、UI 楽観反映)
@@ -1380,7 +1391,7 @@ function SummaryPanel({
     : (savedSummary || job?.partial_text || "");
 
   // Status banner があるかどうか (生成中・失敗・skip・cancel)
-  const showBanner = isRunning || isFailed || isSkipped || isCancelled;
+  const showBanner = isRunning || isFailed || isSkipped || isCancelled || Boolean(job?.usage);
 
   // 編集モード state
   const [editing, setEditing] = useState(false);
@@ -1549,6 +1560,19 @@ function SummaryStatusBanner({
         <button onClick={onCancel} className="btn h-7 px-2.5 text-[11px]">
           キャンセル
         </button>
+      </div>
+    );
+  }
+  if (state === "done" && job.usage) {
+    return (
+      <div className="summary-banner summary-banner-info">
+        <span className="text-[11px] text-(--t3) flex-1 tabular-nums">
+          Codex使用量: 入力 {fmtTokens(job.usage.input_tokens)} · 出力 {fmtTokens(job.usage.output_tokens)}
+          {job.usage.reasoning_output_tokens
+            ? ` · 推論 ${fmtTokens(job.usage.reasoning_output_tokens)}`
+            : ""}
+          {` · 合計 ${fmtTokens(job.usage.total_tokens)}`}
+        </span>
       </div>
     );
   }

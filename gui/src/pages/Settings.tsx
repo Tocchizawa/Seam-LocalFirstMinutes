@@ -24,6 +24,7 @@ import {
   consentProvider,
   getRecommendedProvider,
   getCodexModels,
+  getCodexUsage,
   getClaudeCodeModels,
   getDefaultSummaryPrompt,
   getWhisperModels,
@@ -40,6 +41,8 @@ import {
   type DiarizationTestResult,
   type SpeakerProfile,
   type CliModelOption,
+  type CodexReasoningEffort,
+  type CodexUsageSummary,
   type WhisperModelInfo,
   type WhisperDownloadStatus,
 } from "../lib/api";
@@ -123,6 +126,7 @@ function settingsFormSnapshot(data: Record<string, any>): string {
     aiGeminiModel: String(ai.gemini?.model ?? "gemini-2.0-flash"),
     aiClaudeCodeModel: String(ai.claude_code?.model ?? "sonnet"),
     aiCodexModel: String(ai.codex?.model ?? "").trim(),
+    aiCodexReasoningEffort: String(ai.codex?.reasoning_effort ?? "low"),
     aiClaudeCodeLauncher: String(ai.claude_code?.launcher_command ?? "").trim(),
     aiCodexLauncher: String(ai.codex?.launcher_command ?? "").trim(),
     aiCustomPrompt: String(ai.custom_system_prompt ?? ""),
@@ -179,9 +183,11 @@ export function SettingsModal({ onClose }: Props) {
   const [aiGeminiModel, setAiGeminiModel] = useState("gemini-2.0-flash");
   const [aiClaudeCodeModel, setAiClaudeCodeModel] = useState("sonnet");
   const [aiCodexModel, setAiCodexModel] = useState("");
+  const [aiCodexReasoningEffort, setAiCodexReasoningEffort] = useState<CodexReasoningEffort>("low");
   const [aiClaudeCodeLauncher, setAiClaudeCodeLauncher] = useState("");
   const [aiCodexLauncher, setAiCodexLauncher] = useState("");
   const [codexModelChoices, setCodexModelChoices] = useState<CliModelOption[]>([]);
+  const [codexUsage, setCodexUsage] = useState<CodexUsageSummary | null>(null);
   const [claudeCodeChoices, setClaudeCodeChoices] = useState<CliModelOption[]>([]);
   const [aiConsent, setAiConsent] = useState<Record<string, boolean>>({});
   // ─── 要約 system prompt ───
@@ -363,6 +369,12 @@ export function SettingsModal({ onClose }: Props) {
       setAiGeminiModel(String(ai.gemini?.model ?? "gemini-2.0-flash"));
       setAiClaudeCodeModel(String(ai.claude_code?.model ?? "sonnet"));
       setAiCodexModel(String(ai.codex?.model ?? ""));
+      const effort = String(ai.codex?.reasoning_effort ?? "low");
+      setAiCodexReasoningEffort(
+        (["minimal", "low", "medium", "high", "xhigh"] as const).includes(effort as CodexReasoningEffort)
+          ? effort as CodexReasoningEffort
+          : "low",
+      );
       setAiClaudeCodeLauncher(String(ai.claude_code?.launcher_command ?? ""));
       setAiCodexLauncher(String(ai.codex?.launcher_command ?? ""));
       setAiCustomPrompt(String(ai.custom_system_prompt ?? ""));
@@ -450,7 +462,8 @@ export function SettingsModal({ onClose }: Props) {
       getDefaultSummaryPrompt().catch(() => null),
       listApiKeys().catch(() => null),
       getRecommendedProvider().catch(() => null),
-    ]).then(([codexModels, claudeModels, prompt, keys, recommended]) => {
+      getCodexUsage().catch(() => null),
+    ]).then(([codexModels, claudeModels, prompt, keys, recommended, usage]) => {
       completed = true;
       if (cancelled) return;
       setCodexModelChoices(codexModels);
@@ -458,6 +471,7 @@ export function SettingsModal({ onClose }: Props) {
       if (prompt) setDefaultPrompt(prompt.prompt);
       if (keys) setAiKeysPresent(keys.providers || {});
       if (recommended) setAiRecommended(recommended);
+      setCodexUsage(usage);
     });
     return () => {
       cancelled = true;
@@ -513,7 +527,11 @@ export function SettingsModal({ onClose }: Props) {
       openai: { model: aiOpenAIModel },
       gemini: { model: aiGeminiModel },
       claude_code: { model: aiClaudeCodeModel, launcher_command: aiClaudeCodeLauncher },
-      codex: { model: aiCodexModel, launcher_command: aiCodexLauncher },
+      codex: {
+        model: aiCodexModel,
+        reasoning_effort: aiCodexReasoningEffort,
+        launcher_command: aiCodexLauncher,
+      },
     },
     recording: {
       stop_forget_reminder: {
@@ -535,7 +553,7 @@ export function SettingsModal({ onClose }: Props) {
     diarDevice, diarMinSpeakers, diarMaxSpeakers, lm, aiProvider, aiAutoGenerate,
     aiGenerateTitle, aiAutoDictionaryUpdate, promptIsCustom, promptValue, aiTimeoutSec,
     aiOllamaModel, aiOllamaCtx, aiClaudeModel, aiOpenAIModel, aiGeminiModel,
-    aiClaudeCodeModel, aiCodexModel, aiClaudeCodeLauncher, aiCodexLauncher,
+    aiClaudeCodeModel, aiCodexModel, aiCodexReasoningEffort, aiClaudeCodeLauncher, aiCodexLauncher,
     stopForgetEnabled, stopForgetSilenceSec, stopForgetLevelThreshold, ll,
     updateCheckOnStartup, updateAutoInstallOnStartup, debugEnabled,
   ]);
@@ -609,6 +627,7 @@ export function SettingsModal({ onClose }: Props) {
           },
           codex: {
             model: aiCodexModel.trim(),
+            reasoning_effort: aiCodexReasoningEffort,
             launcher_command: aiCodexLauncher.trim(),
           },
         },
@@ -1690,7 +1709,7 @@ export function SettingsModal({ onClose }: Props) {
                           既定では PATH の <code className="px-1 py-0.5 bg-(--surface-2) rounded">claude</code> を実行します。
                           起動コマンドを指定した場合は <code className="px-1 py-0.5 bg-(--surface-2) rounded">/bin/zsh -ic</code> 経由で実行します。
                           docs フォルダを <code className="px-1 py-0.5 bg-(--surface-2) rounded">--add-dir</code> で渡し、
-                          KNOWLEDGE.md 等を agent が自動参照します。
+                          KNOWLEDGE.md 等は必要な場合だけ agent が参照します。
                         </p>
                       </SGroup>
                     )}
@@ -1742,6 +1761,22 @@ export function SettingsModal({ onClose }: Props) {
                           </button>
                         </SRow>
                         <SRow
+                          label="推論レベル"
+                          hint="Seamから起動するCodex CLIだけに適用します。要約は低めが既定です"
+                        >
+                          <Select
+                            value={aiCodexReasoningEffort}
+                            onChange={(value) => setAiCodexReasoningEffort(value as CodexReasoningEffort)}
+                            options={[
+                              { value: "minimal", label: "minimal (最短)" },
+                              { value: "low", label: "low (高速・推奨)" },
+                              { value: "medium", label: "medium" },
+                              { value: "high", label: "high" },
+                              { value: "xhigh", label: "xhigh (深い推論)" },
+                            ]}
+                          />
+                        </SRow>
+                        <SRow
                           label="起動コマンド (任意)"
                           hint="zsh function を使う場合に指定 (例: source ~/.zshrc; my_codex)"
                         >
@@ -1759,6 +1794,25 @@ export function SettingsModal({ onClose }: Props) {
                           docs フォルダを <code className="px-1 py-0.5 bg-(--surface-2) rounded">--add-dir</code> で渡し、
                           KNOWLEDGE.md 等を agent が自動参照します。
                         </p>
+                        <SRow
+                          label="平均利用トークン数"
+                          hint="Seam経由のCodex要約。直近30日・実行単位"
+                        >
+                          {codexUsage?.runs ? (
+                            <span className="num text-[11px] text-(--t2) tabular-nums">
+                              {Number(codexUsage.average.total_tokens || 0).toLocaleString()} / 実行
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-(--t3)">まだ利用記録がありません</span>
+                          )}
+                        </SRow>
+                        {codexUsage?.runs ? (
+                          <SRow label="累計 / 実行回数" hint="入力・出力・推論を含む合計">
+                            <span className="num text-[11px] text-(--t2) tabular-nums">
+                              {Number(codexUsage.total.total_tokens || 0).toLocaleString()} / {codexUsage.runs} 回
+                            </span>
+                          </SRow>
+                        ) : null}
                       </SGroup>
                     )}
 
