@@ -404,3 +404,15 @@ Canonical storageはSQLiteの既存topic/block rows。additive migrationはblock
 schema v2 operation planと10個のsemantic operation名、question/evidence state、atomic transaction規則の詳細は [v2 implementation contract](./live-notes-v2-report.md) に記録する。Snapshotの `document.nodes[]` はcanonical topic/block IDとper-entity revisionを持つprojectionであり、独立した保存正本ではない。`document.markdown`、document revision、questions、takeawayもsnapshotの派生値を含む。手動編集はentity単位のrevisionとprotectionを使い、複数unitの変更はexpected note revision付き `/document/edits` deltaとして原子的に適用する。
 
 評価シナリオは [live_notes_v2_scenario.json](../tests/fixtures/live_notes_v2_scenario.json) を参照。これは入力データであり、正解ノートやprovider応答fixtureではない。
+
+## v3意味メモリ
+
+v3も既存SQLite topic/blockを正本とし、追加migrationでblockに `canonical_key`、`content_digest`、`item_status`、質問に `conversation_state` と `verification_state` を加える。`live_note_item_relations` は answers/supersedes/duplicates/supports/contradicts/related の安定ID関係を保持し、`live_note_intents` は人間が削除・却下した意味内容の再生成を抑止する。検索はFTS5 trigramが利用できる環境ではtrigram indexを使い、利用できない場合は正規化token検索へフォールバックする。新旧行は起動時に安全に再索引され、migrationはminutes/transcriptを変更しない。
+
+topic digestは意味を持つ短い要約としてtopic行に保存し、outlineと話題検索に使う。未設定の旧topicだけ本文からfallbackを作る。既存回答blockの改訂はquestion revisionに加え `expected_revisions[block_id]` でblock revisionも検証する。質問状態変更はblock revisionと独立した `expected_question_revision` を必要とする。項目状態はrole固有で、質問の会話・検証状態はitem statusに混在させない。意味操作のsupports/contradicts/related関係は同じsession内のstable block IDと期待revisionを指定し、同じevent transaction/undo履歴で保存される。
+
+`SET_ITEM_STATUS` では質問をansweredにできず、本文・根拠とrelationを伴う `RESOLVE_QUESTION` を使う。外部検証のattestation経路は未実装のため、semantic status操作で `verified_against_source` へ遷移できない。自動consolidationはcooldownと最低fast-batch数に加え、重複・解決・topic departure/switch・情報密度など、fast batchに保存されたsemantic triggerを要求し、未処理発話があれば待つ。手動consolidateはこのtrigger条件を迂回できる。
+
+構造化操作はschema v3で `MERGE_TOPICS` と `SET_ITEM_STATUS` を追加する。v1/v2保存済みoperationは引き続き読み込み可能。会話で質問が回答された状態は `answered_in_discussion`、外部資料での確認は独立した `verification_state` であり、会話発話だけでverifiedにはできない。fast batchはtopic merge/restructureを実行せず、consolidation/finalizeのみが行う。
+
+snapshotの `document` はtitleと編集revision、takeaway、未解決質問数、外部確認要件数を含む表示projection。質問一覧は会話状態と検証状態を両方返す。タイトルと要点はrevision付き `/document/edits` で編集され、手動変更はAI保護される。

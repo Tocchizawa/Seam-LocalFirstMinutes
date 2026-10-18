@@ -8,7 +8,7 @@ import "./live-notes.css";
 
 export function LiveNotesPanel({ controller, transcript }: { controller: LiveNotesController; transcript?: ReactNode }) {
   const { snapshot, error, storageError, connected, mutate } = controller;
-  const [tab, setTab] = useState<"note" | "transcript" | "history">("note");
+  const [tab, setTab] = useState<"note" | "history">("note");
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState<LiveEvent[]>([]);
@@ -56,7 +56,6 @@ export function LiveNotesPanel({ controller, transcript }: { controller: LiveNot
       <div className="live-note-nav">
         <div role="tablist" aria-label="会議の表示">
           <button id={`note-tab-${sessionId}`} role="tab" aria-selected={tab === "note"} aria-controls={`note-panel-${sessionId}`} onClick={() => { setTab("note"); setUpdates(0); }}>ノート{updates > 0 ? ` +${updates}` : ""}</button>
-          {transcript && <button id={`transcript-tab-${sessionId}`} role="tab" aria-selected={tab === "transcript"} aria-controls={`transcript-panel-${sessionId}`} onClick={() => setTab("transcript")}>文字起こし</button>}
           <button id={`history-tab-${sessionId}`} role="tab" aria-selected={tab === "history"} aria-controls={`history-panel-${sessionId}`} onClick={() => setTab("history")}>更新履歴</button>
         </div>
         <div className="live-note-actions">
@@ -67,8 +66,8 @@ export function LiveNotesPanel({ controller, transcript }: { controller: LiveNot
       </div>
       <div id={`note-panel-${sessionId}`} role="tabpanel" aria-labelledby={`note-tab-${sessionId}`} hidden={tab !== "note"} className="live-note-body seam-v2-note-body">
         <LiveNoteDocumentEditor controller={controller} snapshot={snapshot} onError={setActionError} />
+        {transcript && <details className="live-note-transcript-disclosure"><summary>文字起こしを表示</summary><div>{transcript}</div></details>}
       </div>
-      {transcript && <div id={`transcript-panel-${sessionId}`} role="tabpanel" aria-labelledby={`transcript-tab-${sessionId}`} hidden={tab !== "transcript"} className="live-note-transcript">{transcript}</div>}
       <div id={`history-panel-${sessionId}`} role="tabpanel" aria-labelledby={`history-tab-${sessionId}`} hidden={tab !== "history"} className="live-note-history">
         <h3>更新履歴</h3><p>手動操作とAIの更新を保存しています。元に戻す操作も履歴に残ります。</p>
         {events.length === 0 ? <p>更新履歴はまだありません。</p> : events.map((event) => <article key={event.id}>

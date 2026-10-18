@@ -58,7 +58,7 @@
 @media(max-width:760px) { .live-note-body { flex-direction:column; }.live-note-outline { width:auto; max-height:160px; padding:10px 14px; border-right:0; border-bottom:1px solid var(--border); }.live-note-outline nav { display:flex; gap:5px; overflow-x:auto; }.live-note-outline nav a { flex-shrink:0; max-width:250px; }.live-note-outline .input { margin-bottom:4px; }.live-note-document { padding:16px 12px; }.live-note-topic-heading { flex-wrap:wrap; }.live-note-topic-heading input { flex-basis:100%; width:100%; }.live-note-topic-heading>.live-note-owner { margin-right:auto; }.live-note-status { padding:9px 12px; gap:7px; }.live-note-nav { padding:8px; }.live-note-actions { width:100%; }.live-notes-panel .btn { min-height:36px; }.live-note-add-topic { flex-wrap:wrap; }.live-note-add-topic input { flex-basis:100%; }.live-note-settings { padding:12px; }.live-note-settings label { flex-wrap:wrap; } }
 
 /* Seam v2: one stable, editable meeting document with a quiet outline. */
-.seam-v2-note-body { padding:0; min-height:0; flex:1; overflow:hidden; }
+.seam-v2-note-body { padding:0; min-height:0; flex:1; overflow:hidden; display:flex; flex-direction:column; }
 .seam-live-document-layout { display:grid; grid-template-columns:minmax(190px,235px) minmax(0,1fr); min-height:0; height:100%; background:var(--surface); }
 .seam-live-outline { min-width:0; overflow:auto; padding:23px 13px 18px 18px; border-right:1px solid var(--border); background:color-mix(in srgb,var(--surface) 92%,var(--t3)); }
 .seam-outline-heading { display:flex; justify-content:space-between; align-items:baseline; gap:8px; padding:0 8px 12px; color:var(--t2); font-size:12px; font-weight:650; }
@@ -70,14 +70,18 @@
 .seam-live-outline nav button span { min-width:0; overflow-wrap:anywhere; }
 .seam-live-outline nav button i { flex:none; width:6px; height:6px; margin:6px 1px 0 auto; border-radius:50%; background:var(--accent); }
 .seam-live-outline>p { margin:21px 8px 0; padding-top:13px; border-top:1px solid var(--border); color:var(--t2); font-size:10px; line-height:1.7; }
-.seam-document-scroll { min-width:0; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.seam-document-scroll { min-width:0; min-height:0; overflow:auto; overflow-anchor:none; overscroll-behavior:contain; scrollbar-gutter:stable; }
 .seam-document-inner { width:min(100%,920px); margin:0 auto; padding:35px clamp(22px,6vw,74px) 100px; }
 .seam-document-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:18px; margin:0 0 28px; padding:0 0 20px; border-bottom:1px solid var(--border); }
 .seam-document-heading h1 { margin:0; color:var(--t1); font-size:25px; line-height:1.4; letter-spacing:-.45px; font-weight:690; overflow-wrap:anywhere; }
-.seam-document-heading p { margin:7px 0 0; color:var(--t2); font-size:11px; }
+.seam-document-heading p { margin:0; color:var(--t2); font-size:11px; }
 .seam-save-state { flex:none; padding-bottom:2px; color:var(--t2); font-size:10px; }
 .seam-document-editor { min-height:220px; outline:none; color:var(--t1); font-size:13px; line-height:1.9; }
 .seam-document-editor h1 { font-size:22px; line-height:1.45; margin:0 0 20px; }
+.seam-document-editor [data-unit-type="document-title"] { margin:0 0 22px; padding:0 0 17px; border-bottom:1px solid var(--border); }
+.seam-document-editor [data-unit-type="document-title"] h1 { margin:0; font-size:25px; letter-spacing:-.45px; font-weight:690; }
+.seam-document-editor [data-unit-type="document-takeaway"] { margin:0 0 24px; padding:0 14px 6px; border-left:3px solid color-mix(in srgb,var(--accent) 50%,var(--border)); }
+.seam-document-editor [data-unit-type="document-takeaway"] h2 { margin:10px 0 4px; font-size:12px; color:var(--t3); }
 .seam-document-editor h2 { margin:30px 0 11px; padding-top:2px; font-size:17px; line-height:1.5; font-weight:680; scroll-margin-top:20px; }
 .seam-document-editor h3 { margin:23px 0 9px; font-size:14px; line-height:1.55; }
 .seam-document-editor p { margin:8px 0 13px; color:var(--t2); }
@@ -122,6 +126,10 @@
 .seam-evidence-panel>div span,.seam-evidence-panel>div small { color:var(--t2); }
 .seam-evidence-panel>div small { grid-column:1/-1; }
 .seam-document-empty { color:var(--t2); text-align:center; padding:60px 20px; font-size:12px; }
+.live-note-transcript-disclosure { flex:none; max-height:36px; overflow:hidden; border-top:1px solid var(--border); background:var(--surface); color:var(--t2); transition:max-height .18s ease; }
+.live-note-transcript-disclosure[open] { max-height:min(38vh,320px); overflow:auto; }
+.live-note-transcript-disclosure>summary { position:sticky; top:0; z-index:1; padding:9px 16px; background:var(--surface); color:var(--t3); font-size:10px; cursor:pointer; }
+.live-note-transcript-disclosure>div { padding:0 16px 16px; }
 .seam-structure-panel { margin-top:32px; border-top:1px solid var(--border); color:var(--t2); font-size:11px; }
 .seam-structure-panel>summary { padding:13px 0; color:var(--t2); cursor:pointer; font-weight:550; }
 .seam-structure-panel>summary:hover { color:var(--accent); }
@@ -143,5 +151,5 @@
 .seam-structure-add-block textarea { flex-basis:100%; }
 .seam-structure-add-block small { color:var(--warning,var(--accent)); }
 @media(max-width:850px) { .seam-live-document-layout { grid-template-columns:185px minmax(0,1fr); }.seam-document-inner { padding:26px 28px 80px; } }
-@media(max-width:650px) { .seam-v2-note-body { overflow:auto; }.seam-live-document-layout { display:flex; height:auto; min-height:100%; flex-direction:column; }.seam-live-outline { padding:10px 12px; border-right:0; border-bottom:1px solid var(--border); overflow:visible; }.seam-outline-heading { padding:0 5px 7px; }.seam-live-outline nav { display:flex; gap:4px; overflow-x:auto; padding-bottom:1px; }.seam-live-outline nav button { flex:none; width:auto; max-width:240px; min-height:34px; padding:7px 9px; border:1px solid var(--border); }.seam-live-outline nav button i { align-self:center; margin:0; }.seam-live-outline>p { display:none; }.seam-document-scroll { overflow:visible; }.seam-document-inner { padding:21px 19px 70px; }.seam-document-heading { align-items:flex-start; margin-bottom:20px; }.seam-document-heading h1 { font-size:21px; }.seam-save-state { max-width:112px; text-align:right; line-height:1.5; }.seam-structure-add-topic { align-items:stretch; flex-direction:column; }.seam-structure-block { flex-wrap:wrap; }.seam-structure-block>span { flex-basis:100%; } }
+@media(max-width:650px) { .seam-v2-note-body { overflow:hidden; }.seam-live-document-layout { display:flex; flex:1; height:auto; min-height:0; flex-direction:column; overflow:hidden; }.seam-live-outline { flex:none; max-height:118px; padding:8px 12px; border-right:0; border-bottom:1px solid var(--border); overflow:hidden; }.seam-outline-heading { padding:0 5px 7px; }.seam-live-outline nav { display:flex; gap:4px; overflow-x:auto; padding-bottom:1px; }.seam-live-outline nav button { flex:none; width:auto; max-width:240px; min-height:34px; padding:7px 9px; border:1px solid var(--border); }.seam-live-outline nav button i { align-self:center; margin:0; }.seam-live-outline>p { display:none; }.seam-document-scroll { overflow:auto; }.seam-document-inner { padding:21px 19px 70px; }.seam-document-heading { align-items:flex-start; margin-bottom:20px; }.seam-document-heading h1 { font-size:21px; }.seam-document-editor [data-unit-type="document-title"] h1 { font-size:21px; }.seam-save-state { max-width:112px; text-align:right; line-height:1.5; }.seam-structure-add-topic { align-items:stretch; flex-direction:column; }.seam-structure-block { flex-wrap:wrap; }.seam-structure-block>span { flex-basis:100%; } }
 @media(prefers-reduced-motion:reduce) { .seam-live-outline nav button { scroll-behavior:auto; } }

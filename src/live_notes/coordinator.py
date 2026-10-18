@@ -176,6 +176,17 @@ class LiveNoteCoordinator:
 
     async def control(self, sid, action):
         s = await self.call("session", sid)
+        if action == "consolidate":
+            settings = json.loads(s["live_config_json"])
+            if s["provider"] not in ("codex", "claude_code"):
+                raise NoteError("CLI_PROVIDER_REQUIRED", "次回の録音前にCodexまたはClaudeを選択してください")
+            if not self._has_consent(s["provider"], settings):
+                raise NoteError("CONSENT_REQUIRED", "設定画面で発話テキストの送信に同意してください", 403)
+            batch = await self.call("manual_consolidation_batch", sid)
+            if batch:
+                self.spawn(sid)
+                return await self.notify(sid, reason="手動整理をキューに追加しました", consolidation_batch_id=batch["id"])
+            return await self.notify(sid, reason="同じrevisionの整理がすでに処理中です")
         if action == "pause":
             if sid in self.cancellations:
                 self.cancellations[sid].set()
@@ -393,6 +404,7 @@ class LiveNoteCoordinator:
                                 check.get("error", "CLIに必要な制限機能がありません"),
                             )
                     context = await self.call("context", sid, batch)
+                    context_expansion_used = False
                     for repair in range(2):
                         if repair:
                             try:
@@ -409,7 +421,7 @@ class LiveNoteCoordinator:
                                 403,
                             )
                         cid = await self.call(
-                            "start_call", sid, batch, context, repair=bool(repair)
+                            "start_call", sid, batch, context, repair=bool(repair and not context_expansion_used)
                         )
                         started = time.monotonic()
                         try:
@@ -418,7 +430,7 @@ class LiveNoteCoordinator:
                                 raise asyncio.CancelledError()
                             raw = await provider.infer_operations(
                                 build_prompt(context),
-                                semantic_operation_plan_schema(),
+                                semantic_operation_plan_schema(version=3),
                                 timeout=settings["invocation_timeout_sec"],
                                 cancellation=cancel,
                             )
@@ -429,6 +441,12 @@ class LiveNoteCoordinator:
                                 s["provider"], settings
                             ):
                                 raise asyncio.CancelledError()
+                            if isinstance(raw, dict) and raw.get("context_request"):
+                                if repair or context_expansion_used:
+                                    raise NoteError("INVALID_CONTEXT_REQUEST", "文脈拡張は1回までです")
+                                context_expansion_used = True
+                                context = await self.call("expand_context", sid, context, raw["context_request"])
+                                continue
                             result, conflicts = await self.call(
                                 "apply", sid, batch, context, raw
                             )
@@ -465,6 +483,8 @@ class LiveNoteCoordinator:
                                 "validation",
                             )
                             if (
+                                context_expansion_used
+                                or
                                 repair
                                 or batch["repair_calls"]
                                 >= settings["max_structural_repair_calls"]

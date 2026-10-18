@@ -132,7 +132,9 @@ Zoom等のオンライン会議中にバックグラウンドで PC 内部音声
 
 初期状態はOFF。ONの会議では録音中に確定発話をテーマ別のMarkdownノートへ蓄積する。
 既存テーマ・過去テーマへの復帰を識別し、背景を消さず、提案・決定・懸念・未解決・アクションを区別する。
-現行ライブノートは SQLiteのcanonical topics/blocksを保ち、意味状態付きのschema v2操作、atomic plan application、document.nodes projection、revision付きdocument delta編集、fast/consolidation/finalizeを提供する。migrationは既存minutes/transcriptを再書込しない。機能契約は [v2実装レポート](./live-notes-v2-report.md)、目標と品質DoDは [v2設計書](./SEAM_LIVE_NOTES_V2_DESIGN.md) を参照する。設計目標の意味品質は実モデル評価で別途確認する。
+現行ライブノートは SQLiteのcanonical topics/blocksを保ち、schema v3の意味操作、質問の会話・検証状態分離、atomic plan application、全topic横断の検索、document projectionとrevision付きdelta編集、fast/consolidation/finalizeを提供する。v1/v2保存済みoperationは引き続き読み込み、migrationは既存minutes/transcriptを再書込しない。機能契約は [v3 backend notes](../implementation-notes-v3-backend.md) を参照する。設計目標の意味品質は実モデル評価で別途確認する。
+
+質問の会話上の回答は外部資料による検証を意味しない。既存回答の改訂はquestionとanswer blockのrevisionを個別に照合する。項目状態はclaim/decision/actionのroleに合わせ、質問のopen/answered/reopened等は専用stateとして保持する。意味関係は同一会議内のstable IDとrevisionが一致するときだけ保存する。
 
 | ID | 必須要件 |
 |---|---|

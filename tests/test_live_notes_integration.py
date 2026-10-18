@@ -329,6 +329,11 @@ def test_journal_recovery_and_processing_batch(tmp_path, monkeypatch):
 
 def test_cli_delay_pause_failure_does_not_block_manual_edit(tmp_path, monkeypatch):
     async def run():
+        # This test verifies concurrent manual editing while the CLI is running;
+        # host CPU/memory pressure must not prevent the fake CLI job from starting.
+        from src.audio.resource_monitor import ResourceMonitor
+
+        monkeypatch.setattr(ResourceMonitor, "should_throttle", lambda *_, **__: False)
         db, c, cli, events = await setup_coordinator(tmp_path, monkeypatch)
         try:
             from src.live_notes.models import HumanOperation

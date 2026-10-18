@@ -23,14 +23,14 @@ let offline = sessionStorage.getItem("seam:test-offline") === "true", delay = fa
 Object.defineProperty(window, "__seamFixture", { configurable: true, get: () => snapshot });
 const requests = new Map<string, LiveSnapshot>();
 const requestLog: Array<{ method: string; path: string; status?: number; error?: string }> = [];
-Object.defineProperty(window, "__seamFixtureActions", { configurable: true, value: { aiUpdate, requestLog: () => requestLog, seedThreeUnits, deleteMiddleAndUpdateLast, seedSuggestion, rejectNextSuggestionResolution } });
+Object.defineProperty(window, "__seamFixtureActions", { configurable: true, value: { aiUpdate, requestLog: () => requestLog, seedThreeUnits, deleteMiddleAndUpdateLast, seedSuggestion, rejectNextSuggestionResolution, seedV3Document } });
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const publish = () => window.dispatchEvent(new CustomEvent("recording-ws:live_note_patch", { detail: { session_id: snapshot.session_id, revision: snapshot.note_revision } }));
-const commit = (action: string, actor = "human") => {
+const commit = (action: string, actor = "human", notify = true) => {
   snapshot.note_revision++;
   history.unshift({ id: `event-${snapshot.note_revision}`, actor, note_revision: snapshot.note_revision, operation_json: JSON.stringify([{ action }]), undo_json: previous ? JSON.stringify(previous) : undefined, created_at: new Date().toISOString() });
   sessionStorage.setItem("seam:test-snapshot", JSON.stringify(snapshot));
-  publish();
+  if (notify) publish();
 };
 window.fetch = async (input, init) => {
   const url = new URL(String(input));
@@ -78,7 +78,17 @@ window.fetch = async (input, init) => {
     for (const operation of body.operations || []) {
       const targetTopic = snapshot.topics.find((row) => row.id === operation.id);
       const targetBlock = snapshot.topics.flatMap((row) => row.blocks).find((row) => row.id === operation.id);
-      if (operation.op === "update_topic" && targetTopic) { targetTopic.title = operation.title; targetTopic.title_owner = "human"; targetTopic.revision++; }
+      if (operation.op === "update_document_title" && Number(snapshot.document?.title_revision ?? 0) !== operation.expected_revision) return json({ detail: { code: "REVISION_CONFLICT", message: "タイトルが更新されました" } }, 409);
+      if (operation.op === "update_document_takeaway" && snapshot.note_revision !== operation.expected_revision) return json({ detail: { code: "REVISION_CONFLICT", message: "要点が更新されました" } }, 409);
+      if (operation.op === "update_topic" && targetTopic && targetTopic.revision !== operation.expected_revision) return json({ detail: { code: "REVISION_CONFLICT", message: "見出しが更新されました" } }, 409);
+      if (operation.op === "update_block" && targetBlock && targetBlock.revision !== operation.expected_revision) return json({ detail: { code: "REVISION_CONFLICT", message: "本文が更新されました" } }, 409);
+    }
+    for (const operation of body.operations || []) {
+      const targetTopic = snapshot.topics.find((row) => row.id === operation.id);
+      const targetBlock = snapshot.topics.flatMap((row) => row.blocks).find((row) => row.id === operation.id);
+      if (operation.op === "update_document_title") { snapshot.document = { ...snapshot.document, title: operation.title, title_revision: Number(snapshot.document?.title_revision ?? 0) + 1 }; }
+      else if (operation.op === "update_document_takeaway") { snapshot.document = { ...snapshot.document, takeaway: operation.takeaway }; }
+      else if (operation.op === "update_topic" && targetTopic) { targetTopic.title = operation.title; targetTopic.title_owner = "human"; targetTopic.revision++; }
       else if (operation.op === "update_block" && targetBlock) { targetBlock.content_md = operation.markdown; targetBlock.owner = "human"; targetBlock.revision++; }
       else if (operation.op === "delete_block" && targetBlock) snapshot.topics.forEach((row) => { row.blocks = row.blocks.filter((entry) => entry.id !== targetBlock.id); });
       else if (operation.op === "delete_topic" && targetTopic) snapshot.topics = snapshot.topics.filter((row) => row.id !== targetTopic.id);
@@ -114,13 +124,22 @@ window.fetch = async (input, init) => {
   if (body.request_id) requests.set(body.request_id, clone(snapshot));
   return json(clone(snapshot));
 };
-function aiUpdate(same = false) {
+function aiUpdate(same = false, notify = true) {
   previous = clone(snapshot);
   const topic = snapshot.topics.find((row) => row.id === "topic-a")!;
   if (same) { topic.blocks[0].content_md = "AIから遅れて届いた更新"; topic.blocks[0].revision++; }
   else { topic.blocks.push({ id: `block-ai-${snapshot.note_revision}`, topic_id: topic.id, kind: "concern", owner: "ai", revision: 0, position: topic.blocks.length, content_md: "既存基盤の移行期間を確認する", source_segment_seqs: [2] }); }
   snapshot.llm_calls++; snapshot.last_processed_segment_seq++;
-  commit("add_block", "ai");
+  commit("add_block", "ai", notify);
+}
+function seedV3Document() {
+  previous = clone(snapshot);
+  snapshot.document = { title: "認証方式の整理", title_revision: 0, takeaway: "会議の合意を短くまとめます。", unresolved_count: 1, needs_verification_count: 1 };
+  snapshot.topics = [
+    { id: "topic-takeaway", title: "会議の要点", title_owner: "ai", revision: 0, position: 0, blocks: [{ id: "block-takeaway", topic_id: "topic-takeaway", kind: "context", owner: "ai", revision: 0, position: 0, content_md: "会議の合意を短くまとめます。", source_segment_seqs: [1] }] },
+    { id: "topic-a", title: "認証方式", title_owner: "ai", revision: 0, position: 1, blocks: [{ id: "block-a", topic_id: "topic-a", kind: "proposal", owner: "ai", revision: 0, position: 0, content_md: "既存の認証基盤を利用する案", source_segment_seqs: [2] }] },
+  ];
+  commit("seed_v3_document", "ai");
 }
 function seedThreeUnits() {
   previous = clone(snapshot);
@@ -171,7 +190,7 @@ function Fixture() {
   const [config, setConfig] = useState(LIVE_DEFAULTS);
   return <div style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
     <div style={{ display: "flex", flexWrap: "wrap", gap: 5, padding: 6, background: "#f0f0f0" }} aria-label="合成試験の操作">
-      <button className="btn" onClick={() => addTopic()}>新話題</button><button className="btn" onClick={() => aiUpdate()}>話題復帰 / 別ブロック更新</button>
+      <button className="btn" onClick={() => addTopic()}>新話題</button><button className="btn" onClick={() => aiUpdate()}>話題復帰 / 別ブロック更新</button><button className="btn" onClick={seedV3Document}>v3文書fixture</button>
       <button className="btn" onClick={() => aiUpdate(true)}>同一ブロック競合</button>
       <button className="btn" onClick={seedSuggestion}>提案レビューfixture</button>
       <button className="btn" onClick={rejectNextSuggestionResolution}>次の提案操作で409</button>

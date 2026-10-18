@@ -31,6 +31,10 @@ export interface LiveSnapshot {
   last_error?: string | null; topics: LiveTopic[]; suggestions: LiveSuggestion[];
   stopped?: boolean; queue_age_sec?: number;
   pending_segments: number; processing: boolean; llm_calls: number; model?: string;
+  document?: {
+    title?: string; title_revision?: number; takeaway?: string; takeaway_revision?: number; takeaway_block_id?: string;
+    unresolved_count?: number; needs_verification_count?: number;
+  };
 }
 
 /** Converts both current presentation metadata and legacy operation JSON into review copy. */

@@ -734,3 +734,11 @@ SQLiteのtopics/blocksが正本で、追加migrationはblockのsemantic metadata
 Snapshotの `document.nodes[]` は既存topics/blocksから作る表示用projection。単一Tiptap editorは安定ID単位で同期し、通常編集はentity route、複数単位編集は `POST /api/live-notes/{session_id}/document/edits` のrevision付きdeltaを使う。whole-document Markdown PATCHは行わない。fast update、consolidation、finalizeは同じsemaphore・CLI制限・retry policy・call budgetを使う。`consolidation_interval_sec` (default 240 seconds) and `min_consolidation_batches` (default 4) configure consolidation cadence. An unchanged-document digest prevents duplicate paid calls, while pending jobs remain claimable. Stop uses durable finalization and marks completion after the processed-segment cursor catches up.
 
 意味的品質評価用のsynthetic inputは [v2シナリオfixture](../tests/fixtures/live_notes_v2_scenario.json) にある。provider stubによる操作契約・再生・重複防止の成功は、実モデルの意味品質評価や実音声評価を代替しない。評価手順と実測結果は [v2評価レポート](./live-notes-v2-report.md) と [v2評価ノート](../implementation-notes-v2-docs.md) を参照。
+
+## v3意味検索と状態編集
+
+v3は同じSQLite schemaを加算移行し、canonical key/digest、item status、topic/item relation、削除・却下intentを保持する。FTS5 trigramで正規化した本文・別名・canonical termsを検索し、SQLite buildがtrigramを提供しない場合はtoken overlapへ退避する。context builderは全topicから候補を集めて全体上限36k文字内に収め、候補だけでなく未解決質問も状態・ID付きで渡す。明示的にtruncatedな項目またはopen question IDがある場合のみ、既存IDを対象にした1回のhost-side context expansionを許可する。追加取得を求めた過去発話は本文を同じ文脈へ含め、操作の根拠IDとして検証する。構造修復と文脈拡張は各バッチで合計最大1回まで。
+
+schema v3は `MERGE_TOPICS` と `SET_ITEM_STATUS` を追加し、v1/v2保存済みoperationも適用できる。fast batchはtopicのmerge/restructureを拒否し、Consolidator/Finalizerに限定する。v3の変更操作は再整理・最終化でも根拠発話IDを必須とする。質問の会話状態と外部検証状態は別々に保存する。手動 `/document/edits` はeditable title/takeawayを提供し、snapshot projectionのタイトルrevision、要点、状態カウントと質問状態を返す。手動consolidate APIは同じrevisionのpending passにcoalesceし、セグメント追加がない場合も実行できる。
+
+topicの意味digestはschema v3 inferenceで最大500文字として受け取り、topic rowに保存してoutlineと全topic検索に利用する。旧行でdigestが空の場合だけblock本文へfallbackする。`RESOLVE_QUESTION` が既存answer blockを更新するときはquestion revisionと `expected_revisions[block_id]` の両方を照合し、`SET_ITEM_STATUS` の質問更新は別途 `expected_question_revision` を照合する。claim/decision/actionはroleごとに許可状態を制限し、質問の会話状態をitem statusとして保存しない。supports/contradicts/related提案は同一sessionのstable block IDとexpected revisionで検証し、relation変更もatomic eventとundo snapshotに含める。

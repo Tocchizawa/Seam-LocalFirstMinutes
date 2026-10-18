@@ -1,11 +1,20 @@
 import { test, expect, type Page } from "@playwright/test";
 
-declare global { interface Window { __seamFixture: { topics: Array<{ id: string; title: string; blocks: Array<{ id: string; content_md: string; owner: string }> }> }; __seamFixtureActions: { aiUpdate(same?: boolean): void; seedThreeUnits(): void; deleteMiddleAndUpdateLast(): void; requestLog(): Array<{ method: string; path: string; status?: number; error?: string }> } } }
+declare global { interface Window { __seamFixture: { topics: Array<{ id: string; title: string; blocks: Array<{ id: string; content_md: string; owner: string }> }>; document?: { title?: string; title_revision?: number; takeaway?: string } }; __seamFixtureActions: { aiUpdate(same?: boolean, notify?: boolean): void; seedThreeUnits(): void; deleteMiddleAndUpdateLast(): void; seedV3Document(): void; requestLog(): Array<{ method: string; path: string; status?: number; error?: string }> } } }
 
 const harness = "/tests/live-notes-harness.html";
 const documentEditor = (page: Page) => page.locator(".seam-document-editor[contenteditable=true]");
 const block = (page: Page, id = "block-a") => page.locator(`.seam-document-editor [data-unit-type="block"][data-semantic-unit-id="${id}"]`);
 const editor = (page: Page, id = "block-a") => block(page, id).locator("p").first();
+const selectionSnapshot = (page: Page) => page.evaluate(() => {
+  const selection = window.getSelection(); const anchor = selection?.anchorNode;
+  const unit = anchor && (anchor instanceof Element ? anchor : anchor.parentElement)?.closest<HTMLElement>("[data-semantic-unit-id]");
+  if (!selection || !anchor || !unit) return null;
+  const range = document.createRange(); range.selectNodeContents(unit); range.setEnd(anchor, selection.anchorOffset);
+  const scroller = document.querySelector<HTMLElement>(".seam-document-scroll");
+  const visible = scroller && [...scroller.querySelectorAll<HTMLElement>("[data-semantic-unit-id]")].find((element) => element.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top);
+  return { id: unit.dataset.semanticUnitId, textOffset: range.toString().length, viewportAnchor: visible && { id: visible.dataset.semanticUnitId, top: Math.round(visible.getBoundingClientRect().top - scroller!.getBoundingClientRect().top) } };
+});
 const topic = (page: Page, id = "topic-a") => page.locator(`.seam-document-editor [data-unit-type="topic"][data-semantic-unit-id="${id}"]`);
 const outline = (page: Page) => page.getByRole("complementary", { name: "議論の目次" });
 const structure = (page: Page) => page.locator(".seam-structure-panel");
@@ -31,12 +40,12 @@ test("AI update to another block preserves focused input, selection, and scroll"
   await open(page);
   await editor(page).fill("人間の入力を保持する");
   await editor(page).press("ArrowLeft");
-  const selectionBefore = await page.evaluate(() => ({ offset: window.getSelection()?.anchorOffset, scroll: document.querySelector(".seam-document-scroll")?.scrollTop }));
+  const selectionBefore = await selectionSnapshot(page);
   await page.evaluate(() => window.__seamFixtureActions.aiUpdate());
   await expect(page.locator(".seam-document-editor [data-unit-type=block]")).toHaveCount(2);
   await expect(documentEditor(page)).toBeFocused();
   await expect(block(page)).toContainText("人間の入力を保持する");
-  const selectionAfter = await page.evaluate(() => ({ offset: window.getSelection()?.anchorOffset, scroll: document.querySelector(".seam-document-scroll")?.scrollTop }));
+  const selectionAfter = await selectionSnapshot(page);
   expect(selectionAfter).toEqual(selectionBefore);
 });
 
@@ -47,22 +56,24 @@ test("remote delete and update in one snapshot map later semantic ranges safely"
   const last = block(page, "remote-c").locator("p").first();
   await last.click();
   await last.press("End");
-  const before = await page.evaluate(() => ({ offset: window.getSelection()?.anchorOffset, scroll: document.querySelector(".seam-document-scroll")?.scrollTop }));
+  const before = await selectionSnapshot(page);
   await page.evaluate(() => window.__seamFixtureActions.deleteMiddleAndUpdateLast());
   await expect(page.locator(".seam-document-editor [data-unit-type=block]")).toHaveCount(2);
   await expect(block(page, "remote-b")).toHaveCount(0);
-  await expect(block(page, "remote-c")).toContainText("更新された最後のメモ");
+  await expect(block(page, "remote-c")).toContainText("最後のメモ");
   await expect(block(page, "block-a")).toContainText("既存の認証基盤を利用する案");
   await expect(documentEditor(page)).toBeFocused();
-  const after = await page.evaluate(() => ({ offset: window.getSelection()?.anchorOffset, scroll: document.querySelector(".seam-document-scroll")?.scrollTop }));
+  const after = await selectionSnapshot(page);
   expect(after).toEqual(before);
+  await page.getByRole("button", { name: "認証方式" }).click();
+  await expect(block(page, "remote-c")).toContainText("更新された最後のメモ");
 });
 
 test("same-block stale update becomes conflict without losing manual draft", async ({ page }) => {
   await open(page);
   await editor(page).fill("11月中旬へ変更（PM確認済み）");
-  await page.evaluate(() => window.__seamFixtureActions.aiUpdate(true));
-  await expect.poll(() => page.evaluate(() => window.__seamFixtureActions.requestLog().some((request) => request.method === "PATCH" && request.path.endsWith("/blocks/block-a") && request.status === 409)), { timeout: 10000 }).toBe(true);
+  await page.evaluate(() => window.__seamFixtureActions.aiUpdate(true, false));
+  await expect.poll(() => page.evaluate(() => window.__seamFixtureActions.requestLog().some((request) => request.method === "POST" && request.path.endsWith("/document/edits") && request.status === 409)), { timeout: 10000 }).toBe(true);
   await expect(page.getByRole("status").filter({ hasText: "競合または接続エラー · 入力を保持中" })).toBeVisible({ timeout: 10000 });
   await expect(block(page)).toContainText("11月中旬へ変更（PM確認済み）");
   expect(await page.evaluate(() => localStorage.getItem("seam:live-document-draft:v1:test-session"))).toContain("11月中旬");

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 import time
+import unicodedata
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +20,12 @@ def now():
 
 def uid():
     return uuid.uuid4().hex
+
+
+def _canonical_key(text, aliases=(), terms=()):
+    value = unicodedata.normalize("NFKC", " ".join([text or "", *aliases, *terms])).casefold()
+    words = re.findall(r"[a-z0-9_]+|[\u3040-\u30ff\u3400-\u9fff]+", value)
+    return " ".join(sorted(set(words)))[:2000]
 
 
 SCHEMA = """
@@ -98,6 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_live_questions ON live_note_questions(session_id,
 
 def migrate(conn):
     conn.executescript(SCHEMA)
+    current_version = conn.execute("SELECT coalesce(max(version),1) FROM live_note_schema").fetchone()[0]
     conn.execute("DELETE FROM live_note_schema WHERE version=1")
     conn.execute("INSERT OR IGNORE INTO live_note_schema(version) VALUES(2)")
     additions = {
@@ -129,6 +138,48 @@ def migrate(conn):
     ):
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    # V3 semantic memory is additive. Preserve legacy question state and derive
+    # the two independent state dimensions from it on first migration.
+    conn.execute("SAVEPOINT live_notes_v3_migration")
+    try:
+        for table, column, declaration in (
+            ("live_note_blocks", "canonical_key", "TEXT NOT NULL DEFAULT ''"),
+            ("live_note_blocks", "content_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("live_note_blocks", "item_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("live_note_questions", "conversation_state", "TEXT NOT NULL DEFAULT 'open'"),
+            ("live_note_questions", "verification_state", "TEXT NOT NULL DEFAULT 'unverified'"),
+            ("live_note_batches", "consolidation_reason", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        conn.execute("CREATE TABLE IF NOT EXISTS live_note_item_relations (session_id TEXT NOT NULL, from_item_id TEXT NOT NULL, to_item_id TEXT NOT NULL, relation_type TEXT NOT NULL CHECK(relation_type IN ('answers','supersedes','duplicates','supports','contradicts','related')), created_at TEXT NOT NULL, PRIMARY KEY(session_id,from_item_id,to_item_id,relation_type))")
+        conn.execute("CREATE TABLE IF NOT EXISTS live_note_intents (session_id TEXT NOT NULL, canonical_key TEXT NOT NULL, intent TEXT NOT NULL CHECK(intent IN ('rejected','deleted')), created_at TEXT NOT NULL, PRIMARY KEY(session_id,canonical_key))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_live_note_relations_to ON live_note_item_relations(session_id,to_item_id)")
+        try:
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS live_note_search USING fts5(block_id UNINDEXED, session_id UNINDEXED, topic_id UNINDEXED, content, tokenize='trigram')")
+            conn.execute("DELETE FROM live_note_search")
+            conn.execute("INSERT INTO live_note_search(block_id,session_id,topic_id,content) SELECT b.id,t.session_id,b.topic_id,coalesce(b.content_md,'')||' '||coalesce(b.aliases_json,'')||' '||coalesce(b.canonical_terms_json,'')||' '||coalesce(b.canonical_key,'') FROM live_note_blocks b JOIN live_note_topics t ON t.id=b.topic_id")
+            conn.execute("DELETE FROM live_note_schema")
+            conn.execute("INSERT INTO live_note_schema(version) VALUES(3)")
+        except sqlite3.OperationalError:
+            # FTS5/trigram is optional on older system SQLite; the context
+            # retriever retains a normalized-token fallback.
+            conn.execute("CREATE TABLE IF NOT EXISTS live_note_search (block_id TEXT, session_id TEXT, topic_id TEXT, content TEXT)")
+            conn.execute("DELETE FROM live_note_search")
+            conn.execute("INSERT INTO live_note_search SELECT b.id,t.session_id,b.topic_id,coalesce(b.content_md,'')||' '||coalesce(b.aliases_json,'')||' '||coalesce(b.canonical_terms_json,'')||' '||coalesce(b.canonical_key,'') FROM live_note_blocks b JOIN live_note_topics t ON t.id=b.topic_id")
+            conn.execute("DELETE FROM live_note_schema")
+            conn.execute("INSERT INTO live_note_schema(version) VALUES(3)")
+        # v2 question rows mapped 'answered' to conversational answer only;
+        # verification stays explicitly separate and unverified.
+        if current_version < 3:
+            conn.execute("UPDATE live_note_questions SET conversation_state=CASE state WHEN 'answered' THEN 'answered_in_discussion' WHEN 'deferred' THEN 'deferred' WHEN 'not_applicable' THEN 'not_applicable' ELSE 'open' END, verification_state='unverified'")
+        for row in conn.execute("SELECT id,content_md FROM live_note_blocks WHERE canonical_key='' OR content_digest=''").fetchall():
+            conn.execute("UPDATE live_note_blocks SET canonical_key=?,content_digest=? WHERE id=?", (_canonical_key(row["content_md"]), hashlib.sha256(row["content_md"].encode()).hexdigest(), row["id"]))
+        conn.execute("RELEASE live_notes_v3_migration")
+    except Exception:
+        conn.execute("ROLLBACK TO live_notes_v3_migration")
+        conn.execute("RELEASE live_notes_v3_migration")
+        raise
     # Older resolvers could queue a RESOLVE_QUESTION against a question that
     # was already answered. Those rows cannot ever pass acceptance checks.
     # Keep them in history and remove them from the actionable pending queue.
@@ -256,18 +307,24 @@ class LiveNoteStore:
         s["questions"] = [dict(r) for r in self.conn.execute(
             "SELECT * FROM live_note_questions WHERE session_id=? ORDER BY created_seq,id", (sid,)
         )]
+        s["relations"] = [dict(r) for r in self.conn.execute(
+            "SELECT from_item_id,to_item_id,relation_type,created_at FROM live_note_item_relations WHERE session_id=? ORDER BY from_item_id,to_item_id,relation_type", (sid,)
+        )]
         for question in s["questions"]:
             question["resolution_evidence"] = json.loads(question.pop("resolution_evidence_json"))
+            question.setdefault("conversation_state", "answered_in_discussion" if question.get("state") == "answered" else question.get("state", "open"))
+            question.setdefault("verification_state", "unverified")
         metadata = json.loads(self.session(sid)["meeting_meta_json"])
         s["legacy_takeaway"] = metadata.get("takeaway")
         takeaway = self.conn.execute(
-            "SELECT b.content_md FROM live_note_blocks b JOIN live_note_topics t ON t.id=b.topic_id "
+            "SELECT b.content_md,b.id FROM live_note_blocks b JOIN live_note_topics t ON t.id=b.topic_id "
             "WHERE t.session_id=? AND t.deleted_at IS NULL AND t.archived_at IS NULL "
             "AND b.deleted_at IS NULL AND b.is_takeaway=1 ORDER BY b.updated_at DESC LIMIT 1", (sid,)
         ).fetchone()
         # Read legacy metadata during migration, but new v2 takeaways live in the
         # ordinary editable topic/block stream.
         s["takeaway"] = takeaway[0] if takeaway else metadata.get("takeaway")
+        takeaway_block_id = takeaway[1] if takeaway else None
         # A stable, unified-editor projection. IDs remain the canonical DB IDs.
         nodes = []
         ordinal = 0
@@ -292,6 +349,11 @@ class LiveNoteStore:
                                         "is_takeaway": bool(block.get("is_takeaway"))}})
                 ordinal += 1
         s["document"] = {"id": sid, "title": metadata.get("title", ""),
+                          "title_revision": metadata.get("title_revision", 0),
+                          "takeaway": s.get("takeaway"),
+                          "takeaway_block_id": takeaway_block_id,
+                          "unresolved_count": sum(q.get("conversation_state", q.get("state")) in ("open", "reopened") for q in s["questions"]),
+                          "needs_verification_count": sum(q.get("verification_state") == "needs_verification" for q in s["questions"]) + sum(b.get("item_status") == "needs_verification" or b.get("epistemic_state") == "unknown" for t in s["topics"] for b in t["blocks"]),
                           "markdown": render_markdown(s["topics"]), "revision": s["note_revision"], "nodes": nodes}
         s["document_revision"] = s["note_revision"]
         s["suggestions"] = [
@@ -592,6 +654,8 @@ class LiveNoteStore:
 
     def _apply_v2(self, sid, batch, context, raw):
         plan = SemanticOperationPlan.model_validate(raw)
+        if plan.context_request:
+            raise NoteError("CONTEXT_REQUEST_UNRESOLVED", "context_requestはホストで取得して再推論が必要です")
         if plan.batch_id != batch["id"] or plan.base_revision != context["base_note_revision"]:
             raise NoteError("INVALID_PLAN", "バッチまたは基準revisionが不一致です")
         settings = json.loads(self.session(sid)["live_config_json"])
@@ -600,6 +664,7 @@ class LiveNoteStore:
         valid_sources = {r["segment_seq"]: r["text"] for r in context["segments"]}
         applied, conflicts, seen = [], [], set()
         temp_topics = {}
+        topic_digest_updates = {}
         with self.conn:
             current = self.conn.execute("SELECT * FROM live_note_batches WHERE id=? AND session_id=?", (batch["id"], sid)).fetchone()
             if current is None:
@@ -633,7 +698,9 @@ class LiveNoteStore:
                     raise NoteError("INVALID_EVIDENCE", "存在しない発話が参照されました")
                 if op.verified_against_source is True:
                     raise NoteError("INVALID_EVIDENCE", "会議の発話だけでは外部ソースの検証を証明できません")
-                if op.type != "NO_CHANGE" and not op.source_segments and batch.get("kind", "fast") == "fast":
+                if batch.get("kind", "fast") == "fast" and op.type in ("RESTRUCTURE_TOPIC", "MERGE_TOPICS"):
+                    raise NoteError("INVALID_PLAN", "fast batchではtopic構造を変更できません")
+                if op.type != "NO_CHANGE" and not op.source_segments and (plan.schema_version == 3 or batch.get("kind", "fast") == "fast"):
                     raise NoteError("INVALID_EVIDENCE", "発話の根拠が必要です")
                 if self.conn.execute("SELECT 1 FROM live_note_applied_operations WHERE op_id=?", (op.op_id,)).fetchone():
                     raise NoteError("INVALID_PLAN", "別のバッチの操作IDです")
@@ -651,11 +718,21 @@ class LiveNoteStore:
                         if temp_topics.get(op.topic_id) != tid:
                             raise NoteError("INVALID_PLAN", "仮topic IDの参照が一致しません")
                     outcome.update({"topic_id": tid, "created": tid in created_topics})
+                    if op.topic_digest and op.topic_digest.strip():
+                        topic_digest_updates[tid] = op.topic_digest.strip()
                 elif op.type == "UPSERT_KNOWLEDGE":
                     if not op.topic_id or not op.content_md or not op.content_md.strip() or not op.semantic_role:
                         raise NoteError("INVALID_PLAN", "知見にはtopic、semantic_role、本文が必要です")
                     topic = self._topic(sid, temp_topics.get(op.topic_id, op.topic_id))
+                    if op.topic_digest and op.topic_digest.strip():
+                        topic_digest_updates[topic["id"]] = op.topic_digest.strip()
                     evidence = " ".join(valid_sources[x] for x in op.source_segments)
+                    canonical = _canonical_key(op.content_md, op.aliases, op.canonical_terms)
+                    if not op.block_id and self.conn.execute("SELECT 1 FROM live_note_intents WHERE session_id=? AND canonical_key=?", (sid, canonical)).fetchone():
+                        outcome["suppressed_by_user_intent"] = True
+                        applied.append(outcome)
+                        self.conn.execute("INSERT INTO live_note_applied_operations VALUES(?,?,?)", (op.op_id,batch["id"],"suppressed"))
+                        continue
                     if op.semantic_role == "decision" and not re.search(r"決定|合意|承認|確定|採用します|で進めます|agree(?:d)?|decid(?:e|ed)", evidence, re.I):
                         conflict = "明示的な決定根拠がないため保留"
                     elif op.block_id:
@@ -668,14 +745,17 @@ class LiveNoteStore:
                             conflict = "AIノートが更新されたため新しい根拠を保留しました"
                         else:
                             old_src = json.loads(block["source_segments_json"])
-                            self.conn.execute("UPDATE live_note_blocks SET content_md=?,semantic_role=?,epistemic_state=?,resolution_state=?,verified_against_source=?,source_segments_json=?,aliases_json=?,canonical_terms_json=?,semantic_v2=1,revision=revision+1,updated_at=? WHERE id=?",
-                            (op.content_md, op.semantic_role, op.epistemic_state or "supported", op.resolution_state, int(bool(op.verified_against_source)), json.dumps(self._union(old_src, op.source_segments)), json.dumps(self._union(json.loads(block["aliases_json"]), op.aliases)), json.dumps(self._union(json.loads(block["canonical_terms_json"]), op.canonical_terms)), now(), block["id"]))
+                            aliases = self._union(json.loads(block["aliases_json"]), op.aliases)
+                            terms = self._union(json.loads(block["canonical_terms_json"]), op.canonical_terms)
+                            self.conn.execute("UPDATE live_note_blocks SET content_md=?,semantic_role=?,epistemic_state=?,resolution_state=?,verified_against_source=?,source_segments_json=?,aliases_json=?,canonical_terms_json=?,canonical_key=?,content_digest=?,semantic_v2=1,revision=revision+1,updated_at=? WHERE id=?",
+                            (op.content_md, op.semantic_role, op.epistemic_state or "supported", op.resolution_state, int(bool(op.verified_against_source)), json.dumps(self._union(old_src, op.source_segments)), json.dumps(aliases), json.dumps(terms), _canonical_key(op.content_md,aliases,terms),hashlib.sha256(op.content_md.encode()).hexdigest(), now(), block["id"]))
                             outcome["block_id"] = block["id"]
                     else:
                         legacy_kind = {"open_question":"question", "decision":"decision", "action":"action", "risk":"concern", "option":"proposal"}.get(op.semantic_role, "point")
                         bid = self._new_block(topic["id"], legacy_kind, op.content_md, "ai", op.source_segments, semantic_v2=True)
                         self.conn.execute("UPDATE live_note_blocks SET semantic_role=?,epistemic_state=?,resolution_state=?,verified_against_source=?,aliases_json=?,canonical_terms_json=? WHERE id=?",
                             (op.semantic_role, op.epistemic_state or "supported", op.resolution_state, int(bool(op.verified_against_source)), json.dumps(op.aliases), json.dumps(op.canonical_terms), bid))
+                        self.conn.execute("UPDATE live_note_blocks SET canonical_key=?,content_digest=? WHERE id=?", (canonical,hashlib.sha256(op.content_md.encode()).hexdigest(),bid))
                         outcome["block_id"] = bid
                         if op.semantic_role == "open_question":
                             qid = op.question_id or uid()
@@ -706,12 +786,14 @@ class LiveNoteStore:
                                 outcome.update({"question_id": q["id"], "answer_node_id": answer["id"], "duplicate_resolution": True})
                             else:
                                 expected_answer_revision = op.expected_revisions.get(answer["id"])
-                                if expected_answer_revision is None:
+                                if expected_answer_revision is None and plan.schema_version == 2:
                                     for context_topic in context.get("related_topics", []):
                                         context_block = next((item for item in context_topic.get("blocks", []) if item.get("id") == answer["id"]), None)
                                         if context_block:
                                             expected_answer_revision = context_block.get("revision")
                                             break
+                                if expected_answer_revision is None:
+                                    expected_answer_revision = -1
                                 ai_current = answer["owner"] == "ai" and not answer["protected"] and expected_answer_revision == answer["revision"]
                                 if ai_current:
                                     old_id = uid()
@@ -773,11 +855,15 @@ class LiveNoteStore:
                             answer = self._block(sid, ans_id)
                             expected_answer_revision = op.expected_revisions.get(ans_id)
                             if expected_answer_revision is None:
+                                if plan.schema_version == 3:
+                                    raise NoteError("INVALID_PLAN", "既存の回答にはexpected_revisionsが必要です")
                                 for context_topic in context.get("related_topics", []):
                                     context_block = next((item for item in context_topic.get("blocks", []) if item.get("id") == ans_id), None)
                                     if context_block:
                                         expected_answer_revision = context_block.get("revision")
                                         break
+                                if expected_answer_revision is None:
+                                    expected_answer_revision = -1
                             human_protected = answer["owner"] == "human" or answer["protected"]
                             stale_answer = expected_answer_revision is not None and answer["revision"] != expected_answer_revision
                             if human_protected or stale_answer:
@@ -806,8 +892,11 @@ class LiveNoteStore:
                                 ans_id = self._new_block(topic_id, "point", op.content_md, "ai", self._union(json.loads(q["resolution_evidence_json"]), op.source_segments), semantic_v2=True)
                                 self.conn.execute("UPDATE live_note_blocks SET semantic_role=?,epistemic_state=?,aliases_json=?,canonical_terms_json=?,semantic_v2=1 WHERE id=?", (op.semantic_role or "conclusion", op.epistemic_state or "supported", json.dumps(op.aliases), json.dumps(op.canonical_terms), ans_id))
                             self.conn.execute("UPDATE live_note_questions SET state='answered',answer_node_id=?,resolution_evidence_json=?,resolved_seq=?,revision=revision+1,updated_at=? WHERE id=?", (ans_id, json.dumps(self._union(json.loads(q["resolution_evidence_json"]), op.source_segments)), max(op.source_segments), now(), q["id"]))
+                            self.conn.execute("UPDATE live_note_questions SET conversation_state='answered_in_discussion',verification_state='unverified' WHERE id=?", (q["id"],))
+                            self.conn.execute("INSERT OR IGNORE INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,ans_id,q["id"],"answers",now()))
                             if q["question_node_id"]:
                                 self.conn.execute("UPDATE live_note_blocks SET resolution_state='answered',epistemic_state='superseded',superseded_by=?,revision=revision+1,updated_at=? WHERE id=?", (ans_id, now(), q["question_node_id"]))
+                                self.conn.execute("INSERT OR IGNORE INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,ans_id,q["question_node_id"],"supersedes",now()))
                             outcome.update({"question_id": q["id"], "answer_node_id": ans_id, "resolution_evidence": self._union(json.loads(q["resolution_evidence_json"]), op.source_segments)})
                 elif op.type == "REVISE_CLAIM":
                     if not op.block_id or not op.content_md:
@@ -823,6 +912,7 @@ class LiveNoteStore:
                         self.conn.execute("INSERT INTO live_note_blocks(id,topic_id,kind,content_md,owner,position,revision,source_segments_json,deleted_at,created_at,updated_at,semantic_role,epistemic_state,resolution_state,user_touched,protected,verified_against_source,aliases_json,canonical_terms_json,superseded_by) SELECT ?,topic_id,kind,content_md,'ai',?,0,source_segments_json,?,?,?,semantic_role,'superseded',resolution_state,0,0,verified_against_source,aliases_json,canonical_terms_json,? FROM live_note_blocks WHERE id=?", (old_id,pos,now(),now(),now(),b["id"],b["id"]))
                         src = self._union(json.loads(b["source_segments_json"]), op.source_segments)
                         self.conn.execute("UPDATE live_note_blocks SET content_md=?,semantic_role=?,epistemic_state=?,source_segments_json=?,verified_against_source=?,semantic_v2=1,superseded_by=NULL,revision=revision+1,updated_at=? WHERE id=?", (op.content_md, op.semantic_role or b["semantic_role"], op.epistemic_state or "supported",json.dumps(src),int(bool(op.verified_against_source)),now(),b["id"]))
+                        self.conn.execute("INSERT OR IGNORE INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,b["id"],old_id,"supersedes",now()))
                         outcome.update({"block_id": b["id"], "superseded_block_id": old_id})
                 elif op.type == "MERGE_BLOCKS":
                     ids = self._union(op.source_block_ids, [op.target_block_id] if op.target_block_id else [])
@@ -844,6 +934,7 @@ class LiveNoteStore:
                         for b in blocks:
                             if b["id"] != target["id"]:
                                 self.conn.execute("UPDATE live_note_blocks SET deleted_at=?,superseded_by=?,epistemic_state='superseded',revision=revision+1,updated_at=? WHERE id=?", (now(),target["id"],now(),b["id"]))
+                                self.conn.execute("INSERT OR IGNORE INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,target["id"],b["id"],"duplicates",now()))
                         outcome.update({"target_block_id": target["id"], "merged_block_ids": ids, "source_segments": sources})
                 elif op.type == "MOVE_BLOCK":
                     if not op.block_id or not op.target_topic_id:
@@ -876,6 +967,57 @@ class LiveNoteStore:
                                 pos = op.block_order.index(block_id)
                                 self.conn.execute("UPDATE live_note_blocks SET topic_id=?,position=?,revision=revision+1,updated_at=? WHERE id=?",(op.target_topic_id,pos,now(),block_id))
                         outcome.update({"topic_ids": tids, "title": op.title})
+                elif op.type == "MERGE_TOPICS":
+                    target_id = temp_topics.get(op.topic_id, op.topic_id)
+                    source_id = temp_topics.get(op.source_topic_id, op.source_topic_id)
+                    if not target_id or not source_id or target_id == source_id:
+                        raise NoteError("INVALID_PLAN", "統合する二つのtopicが必要です")
+                    target = self._topic(sid, target_id)
+                    source = self._topic(sid, source_id)
+                    if batch.get("kind", "fast") == "fast":
+                        raise NoteError("INVALID_PLAN", "fast batchではtopic統合できません")
+                    if target["title_owner"] == "human" or source["title_owner"] == "human" or any(op.expected_topic_revisions.get(t["id"]) != t["revision"] for t in (target, source)):
+                        conflict = "人間編集またはtopic版競合のため統合を提案しました"
+                    else:
+                        for row in self.conn.execute("SELECT id,position FROM live_note_blocks WHERE topic_id=? AND deleted_at IS NULL ORDER BY position", (source_id,)).fetchall():
+                            pos = self.conn.execute("SELECT coalesce(max(position),-1)+1 FROM live_note_blocks WHERE topic_id=?", (target_id,)).fetchone()[0]
+                            self.conn.execute("UPDATE live_note_blocks SET topic_id=?,position=?,revision=revision+1,updated_at=? WHERE id=?", (target_id,pos,now(),row["id"]))
+                        self.conn.execute("UPDATE live_note_topics SET archived_at=?,revision=revision+1,updated_at=? WHERE id=?", (now(),now(),source_id))
+                        self.conn.execute("UPDATE live_note_questions SET topic_id=?,revision=revision+1,updated_at=? WHERE session_id=? AND topic_id=?", (target_id,now(),sid,source_id))
+                        self.conn.execute("UPDATE live_note_sessions SET active_topic_id=? WHERE session_id=? AND active_topic_id=?", (target_id,sid,source_id))
+                        self.conn.execute("INSERT OR IGNORE INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,source_id,target_id,"duplicates",now()))
+                        outcome.update({"target_topic_id":target_id,"source_topic_id":source_id,"merged":True})
+                elif op.type == "SET_ITEM_STATUS":
+                    block = self._block(sid, op.block_id)
+                    if block["revision"] != op.expected_revision or block["owner"] == "human" or block["protected"]:
+                        conflict = "人間編集または版競合のため状態変更を保留しました"
+                    elif not any((op.item_status, op.conversation_state, op.verification_state)):
+                        raise NoteError("INVALID_PLAN", "状態変更を指定してください")
+                    else:
+                        if op.conversation_state or op.verification_state:
+                            question = self.conn.execute("SELECT * FROM live_note_questions WHERE id=? AND session_id=? AND question_node_id=?", (op.question_id,sid,block["id"])).fetchone()
+                            if not question:
+                                raise NoteError("QUESTION_NOT_FOUND", "対象の質問がありません",404)
+                            if question["revision"] != op.expected_question_revision:
+                                raise NoteError("REVISION_CONFLICT", "質問状態が更新されました",409)
+                            if op.conversation_state == "answered_in_discussion":
+                                raise NoteError("INVALID_PLAN", "質問は回答本文と根拠を伴うRESOLVE_QUESTIONで解決してください")
+                            if op.verification_state == "verified_against_source":
+                                raise NoteError("INVALID_EVIDENCE", "外部資料の確認状態はこの会議操作から設定できません")
+                            self.conn.execute("UPDATE live_note_questions SET conversation_state=coalesce(?,conversation_state),verification_state=coalesce(?,verification_state),state=CASE coalesce(?,conversation_state) WHEN 'answered_in_discussion' THEN 'answered' WHEN 'deferred' THEN 'deferred' WHEN 'not_applicable' THEN 'not_applicable' ELSE 'open' END,revision=revision+1,updated_at=? WHERE id=?", (op.conversation_state,op.verification_state,op.conversation_state,now(),question["id"]))
+                            if op.conversation_state:
+                                resolution = "answered" if op.conversation_state == "answered_in_discussion" else op.conversation_state
+                                self.conn.execute("UPDATE live_note_blocks SET resolution_state=?,revision=revision+1,updated_at=? WHERE id=?",(resolution,now(),block["id"]))
+                        if op.item_status:
+                            allowed_status = {
+                                "action": {"open", "assigned", "done", "cancelled", "needs_verification"},
+                                "decision": {"proposed", "agreed_in_meeting", "cancelled", "needs_verification"},
+                                "open_question": set(),
+                            }.get(block["semantic_role"], {"tentative", "supported_in_discussion", "disputed", "needs_verification"})
+                            if op.item_status not in allowed_status:
+                                raise NoteError("INVALID_PLAN", f"{block['semantic_role']}では{op.item_status}状態を設定できません")
+                            self.conn.execute("UPDATE live_note_blocks SET item_status=?,revision=revision+1,updated_at=? WHERE id=?", (op.item_status,now(),block["id"]))
+                        outcome.update({"block_id":block["id"],"item_status":op.item_status})
                 elif op.type == "UPDATE_TAKEAWAY":
                     if not op.content_md or len(op.content_md) > 1200:
                         raise NoteError("INVALID_PLAN", "要点は1200文字以内で指定してください")
@@ -950,9 +1092,36 @@ class LiveNoteStore:
                         if not created.get("duplicate"):
                             conflicts.append(created)
                         outcome["suggestion_id"] = created["id"]
+                if not conflict and op.relations:
+                    source_id = outcome.get("block_id") or outcome.get("answer_node_id")
+                    if not source_id:
+                        raise NoteError("INVALID_PLAN", "関連先の項目を作成する操作が必要です")
+                    self._block(sid, source_id)
+                    for relation in op.relations:
+                        target = self._block(sid, relation.target_id)
+                        if target["revision"] != relation.expected_revision:
+                            raise NoteError("REVISION_CONFLICT", "関連先の項目が更新されました",409)
+                        self.conn.execute("INSERT OR IGNORE INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,source_id,target["id"],relation.relation_type,now()))
                 applied.append(outcome)
                 self.conn.execute("INSERT INTO live_note_applied_operations VALUES(?,?,?)", (op.op_id,batch["id"],"suggestion" if conflict else "applied"))
-            self.conn.execute("UPDATE live_note_batches SET status='done',last_error=NULL,updated_at=? WHERE id=?", (now(),batch["id"]))
+            for topic_id, digest in topic_digest_updates.items():
+                topic = self.conn.execute("SELECT digest,archived_at,deleted_at FROM live_note_topics WHERE id=? AND session_id=?",(topic_id,sid)).fetchone()
+                if topic and not topic["archived_at"] and not topic["deleted_at"] and topic["digest"] != digest:
+                    self.conn.execute("UPDATE live_note_topics SET digest=?,revision=revision+1,updated_at=? WHERE id=?",(digest,now(),topic_id))
+            consolidation_reasons = []
+            if any(op.type in ("MERGE_BLOCKS", "MERGE_TOPICS") for op in plan.operations): consolidation_reasons.append("duplicates")
+            if any(op.type in ("RESOLVE_QUESTION", "REVISE_CLAIM", "SET_ITEM_STATUS") for op in plan.operations): consolidation_reasons.append("resolved_old_text")
+            if any(op.type in ("RESTRUCTURE_TOPIC", "MERGE_TOPICS", "MOVE_BLOCK") for op in plan.operations): consolidation_reasons.append("topic_departure")
+            if any(op.type == "CREATE_TOPIC" for op in plan.operations): consolidation_reasons.append("topic_switch")
+            semantic_text = sum(len(op.content_md or "") for op in plan.operations if op.type in ("UPSERT_KNOWLEDGE", "RESOLVE_QUESTION", "REVISE_CLAIM", "UPDATE_TAKEAWAY"))
+            semantic_items = sum(1 for op in plan.operations if op.type in ("UPSERT_KNOWLEDGE", "RESOLVE_QUESTION", "REVISE_CLAIM"))
+            if semantic_text >= 3000 or semantic_items >= 6: consolidation_reasons.append("density")
+            if batch.get("kind") in ("consolidate", "finalize") and plan.reason: consolidation_reasons.append("info_density")
+            if batch.get("consolidation_reason") == "manual": consolidation_reasons.append("manual")
+            self.conn.execute("UPDATE live_note_batches SET status='done',last_error=NULL,consolidation_reason=?,updated_at=? WHERE id=?", (json.dumps({"triggers":self._union(consolidation_reasons),"plan_reason":plan.reason},ensure_ascii=False),now(),batch["id"]))
+            for row in self.conn.execute("SELECT id,content_md,aliases_json,canonical_terms_json FROM live_note_blocks WHERE topic_id IN (SELECT id FROM live_note_topics WHERE session_id=?)", (sid,)).fetchall():
+                aliases=json.loads(row["aliases_json"]); terms=json.loads(row["canonical_terms_json"])
+                self.conn.execute("UPDATE live_note_blocks SET canonical_key=?,content_digest=? WHERE id=?", (_canonical_key(row["content_md"],aliases,terms),hashlib.sha256(row["content_md"].encode()).hexdigest(),row["id"]))
             self.conn.execute("UPDATE live_note_sessions SET last_processed_segment_seq=?,failures=0,next_attempt_at=0,last_error=NULL WHERE session_id=?", (max(cursor, batch["seq_to"]),sid))
             processed_cursor = max(cursor, batch["seq_to"])
             if current["kind"] == "finalize" and not self.conn.execute("SELECT 1 FROM live_note_segments WHERE session_id=? AND segment_seq>? LIMIT 1",(sid,processed_cursor)).fetchone():
@@ -1042,8 +1211,11 @@ class LiveNoteStore:
                         (body.content_md, body.kind or b["kind"], now(), target),
                     )
                 else:
+                    key = _canonical_key(b["content_md"], json.loads(b["aliases_json"]), json.loads(b["canonical_terms_json"]))
+                    if key:
+                        self.conn.execute("INSERT OR REPLACE INTO live_note_intents VALUES(?,?,?,?)", (sid,key,"deleted",now()))
                     self.conn.execute(
-                        "UPDATE live_note_blocks SET deleted_at=?,owner='human',revision=revision+1,updated_at=? WHERE id=?",
+                        "UPDATE live_note_blocks SET deleted_at=?,owner='human',user_touched=1,protected=1,revision=revision+1,updated_at=? WHERE id=?",
                         (now(), now(), target),
                     )
             elif action == "reorder":
@@ -1115,6 +1287,11 @@ class LiveNoteStore:
                 later.op == "delete_topic" and later.id == op.client_id for later in body.operations
             )}
             for index, op in enumerate(body.operations):
+                if op.op in ("update_document_title", "update_document_takeaway"):
+                    key = ("document", op.op)
+                    if key in entity_writes:
+                        raise NoteError("INVALID_DOCUMENT_EDIT", "文書フィールドを複数回変更できません")
+                    entity_writes.add(key)
                 if op.op in ("update_topic", "delete_topic"):
                     key = ("topic", op.id)
                     if key in entity_writes:
@@ -1133,7 +1310,14 @@ class LiveNoteStore:
             active_topic_ids = {t["id"] for t in before["topics"] if not t["deleted_at"]}
             active_block_ids = {b["id"] for t in before["topics"] for b in t["blocks"] if not b["deleted_at"]}
             for op in body.operations:
-                if op.op in ("update_topic", "delete_topic"):
+                if op.op == "update_document_title":
+                    metadata = json.loads(self.session(sid)["meeting_meta_json"])
+                    if op.expected_revision != metadata.get("title_revision", 0):
+                        raise NoteError("REVISION_CONFLICT", "文書タイトルが更新されました", 409, before)
+                elif op.op == "update_document_takeaway":
+                    if op.expected_revision != before["note_revision"]:
+                        raise NoteError("REVISION_CONFLICT", "ノートが更新されました", 409, before)
+                elif op.op in ("update_topic", "delete_topic"):
                     topic = self._topic(sid, op.id)
                     self._revision(topic, op.expected_revision)
                 elif op.op in ("update_block", "delete_block"):
@@ -1154,7 +1338,25 @@ class LiveNoteStore:
 
             edits = []
             for op in body.operations:
-                if op.op == "update_topic":
+                if op.op == "update_document_title":
+                    metadata = json.loads(self.session(sid)["meeting_meta_json"])
+                    metadata["title"] = op.title.strip()
+                    metadata["title_revision"] = metadata.get("title_revision", 0) + 1
+                    self.conn.execute("UPDATE live_note_sessions SET meeting_meta_json=? WHERE session_id=?", (json.dumps(metadata, ensure_ascii=False), sid))
+                    edits.append({"op": op.op})
+                elif op.op == "update_document_takeaway":
+                    if op.markdown is None or len(op.markdown) > 1200:
+                        raise NoteError("CONTENT_REQUIRED", "要点は1200文字以内で指定してください")
+                    metadata = json.loads(self.session(sid)["meeting_meta_json"])
+                    block_id = before["document"].get("takeaway_block_id")
+                    if block_id:
+                        block = self._block(sid, block_id)
+                        self.conn.execute("UPDATE live_note_blocks SET content_md=?,owner='human',user_touched=1,protected=1,canonical_key=?,content_digest=?,revision=revision+1,updated_at=? WHERE id=?", (op.markdown, _canonical_key(op.markdown), hashlib.sha256(op.markdown.encode()).hexdigest(), now(), block_id))
+                    else:
+                        metadata["takeaway"] = op.markdown
+                        self.conn.execute("UPDATE live_note_sessions SET meeting_meta_json=? WHERE session_id=?", (json.dumps(metadata, ensure_ascii=False), sid))
+                    edits.append({"op": op.op, "id": block_id})
+                elif op.op == "update_topic":
                     self.conn.execute("UPDATE live_note_topics SET title=?,title_owner='human',revision=revision+1,updated_at=? WHERE id=?", (op.title.strip(), now(), op.id))
                     edits.append({"op":op.op,"id":op.id})
                 elif op.op == "update_block":
@@ -1163,7 +1365,7 @@ class LiveNoteStore:
                         raise NoteError("CONTENT_REQUIRED", "本文が必要です")
                     kind = op.kind or block["kind"]
                     role = {"question":"open_question","decision":"decision","action":"action","concern":"risk","proposal":"option"}.get(kind,"note")
-                    self.conn.execute("UPDATE live_note_blocks SET content_md=?,kind=?,semantic_role=?,semantic_v2=1,owner='human',user_touched=1,protected=1,revision=revision+1,updated_at=? WHERE id=?", (op.markdown,kind,role,now(),op.id))
+                    self.conn.execute("UPDATE live_note_blocks SET content_md=?,kind=?,semantic_role=?,semantic_v2=1,owner='human',user_touched=1,protected=1,canonical_key=?,content_digest=?,revision=revision+1,updated_at=? WHERE id=?", (op.markdown,kind,role,_canonical_key(op.markdown),hashlib.sha256(op.markdown.encode()).hexdigest(),now(),op.id))
                     edits.append({"op":op.op,"id":op.id})
                 elif op.op == "create_topic":
                     tid = id_map[op.client_id]
@@ -1182,6 +1384,10 @@ class LiveNoteStore:
                     self.conn.execute("UPDATE live_note_sessions SET active_topic_id=NULL WHERE session_id=? AND active_topic_id=?",(sid,op.id))
                     edits.append({"op":op.op,"id":op.id})
                 elif op.op == "delete_block":
+                    block = self._block(sid, op.id)
+                    key = _canonical_key(block["content_md"], json.loads(block["aliases_json"]), json.loads(block["canonical_terms_json"]))
+                    if key:
+                        self.conn.execute("INSERT OR REPLACE INTO live_note_intents VALUES(?,?,?,?)", (sid,key,"deleted",now()))
                     self.conn.execute("UPDATE live_note_blocks SET deleted_at=?,owner='human',user_touched=1,protected=1,revision=revision+1,updated_at=? WHERE id=?",(now(),now(),op.id))
                     edits.append({"op":op.op,"id":op.id})
                 elif op.op == "reorder_topics":
@@ -1216,6 +1422,15 @@ class LiveNoteStore:
         old_questions = {q["id"]: q for q in previous.get("questions", [])}
         after_questions = {q["id"]: q for q in after.get("questions", [])}
         current_questions = {q["id"]: q for q in current.get("questions", [])}
+        previous_relations = previous.get("relations", [])
+        after_relations = after.get("relations", [])
+        current_relations = current.get("relations", [])
+        if previous_relations != after_relations:
+            if current_relations != after_relations:
+                raise NoteError("UNDO_CONFLICT", "関連項目には後から変更があります", 409)
+            self.conn.execute("DELETE FROM live_note_item_relations WHERE session_id=?", (sid,))
+            for relation in previous_relations:
+                self.conn.execute("INSERT INTO live_note_item_relations VALUES(?,?,?,?,?)", (sid,relation["from_item_id"],relation["to_item_id"],relation["relation_type"],relation["created_at"]))
         for qid, q_after in after_questions.items():
             q_before = old_questions.get(qid)
             if q_before is None or q_before.get("revision") != q_after.get("revision"):
@@ -1223,7 +1438,7 @@ class LiveNoteStore:
                 if not q_now or q_now.get("revision") != q_after.get("revision"):
                     raise NoteError("UNDO_CONFLICT", "質問には後から変更があります", 409)
                 if q_before:
-                    self.conn.execute("UPDATE live_note_questions SET state=?,answer_node_id=?,question_node_id=?,resolution_evidence_json=?,resolved_seq=?,revision=revision+1,updated_at=? WHERE id=?", (q_before["state"],q_before["answer_node_id"],q_before["question_node_id"],json.dumps(q_before["resolution_evidence"]),q_before["resolved_seq"],now(),qid))
+                    self.conn.execute("UPDATE live_note_questions SET topic_id=?,state=?,conversation_state=?,verification_state=?,answer_node_id=?,question_node_id=?,resolution_evidence_json=?,resolved_seq=?,revision=revision+1,updated_at=? WHERE id=?", (q_before["topic_id"],q_before["state"],q_before.get("conversation_state","open"),q_before.get("verification_state","unverified"),q_before["answer_node_id"],q_before["question_node_id"],json.dumps(q_before["resolution_evidence"]),q_before["resolved_seq"],now(),qid))
                 else:
                     self.conn.execute("DELETE FROM live_note_questions WHERE id=?", (qid,))
         if previous.get("legacy_takeaway") != after.get("legacy_takeaway"):
@@ -1235,6 +1450,15 @@ class LiveNoteStore:
             else:
                 metadata["takeaway"] = previous["legacy_takeaway"]
             self.conn.execute("UPDATE live_note_sessions SET meeting_meta_json=? WHERE session_id=?", (json.dumps(metadata,ensure_ascii=False),sid))
+        previous_title = previous.get("document", {}).get("title", "")
+        after_title = after.get("document", {}).get("title", "")
+        if previous_title != after_title:
+            if current.get("document", {}).get("title", "") != after_title:
+                raise NoteError("UNDO_CONFLICT", "文書タイトルには後から変更があります", 409)
+            metadata=json.loads(self.session(sid)["meeting_meta_json"])
+            metadata["title"]=previous_title
+            metadata["title_revision"]=metadata.get("title_revision",0)+1
+            self.conn.execute("UPDATE live_note_sessions SET meeting_meta_json=? WHERE session_id=?",(json.dumps(metadata,ensure_ascii=False),sid))
         touched_topics = [
             key
             for key, row in after_topics.items()
@@ -1269,6 +1493,8 @@ class LiveNoteStore:
         for key in touched_topics:
             old = old_topics.get(key)
             if old:
+                if old.get("archived_at") is None and after_topics[key].get("archived_at") is not None:
+                    self.conn.execute("DELETE FROM live_note_item_relations WHERE session_id=? AND from_item_id=? AND relation_type='duplicates'",(sid,key))
                 self.conn.execute(
                     "UPDATE live_note_topics SET title=?,title_owner=?,position=?,deleted_at=?,archived_at=?,digest=?,revision=revision+1,updated_at=? WHERE id=?",
                     (old["title"], old["title_owner"], old["position"], old["deleted_at"], old.get("archived_at"), old.get("digest", ""), now(), key),
@@ -1282,7 +1508,7 @@ class LiveNoteStore:
             old = old_blocks.get(key)
             if old:
                 self.conn.execute(
-                    "UPDATE live_note_blocks SET topic_id=?,content_md=?,kind=?,owner=?,position=?,deleted_at=?,source_segments_json=?,semantic_role=?,epistemic_state=?,resolution_state=?,user_touched=?,protected=?,verified_against_source=?,aliases_json=?,canonical_terms_json=?,superseded_by=?,semantic_v2=?,is_takeaway=?,revision=revision+1,updated_at=? WHERE id=?",
+                    "UPDATE live_note_blocks SET topic_id=?,content_md=?,kind=?,owner=?,position=?,deleted_at=?,source_segments_json=?,semantic_role=?,epistemic_state=?,resolution_state=?,user_touched=?,protected=?,verified_against_source=?,aliases_json=?,canonical_terms_json=?,superseded_by=?,semantic_v2=?,is_takeaway=?,canonical_key=?,content_digest=?,item_status=?,revision=revision+1,updated_at=? WHERE id=?",
                     (
                         old["topic_id"],
                         old["content_md"],
@@ -1294,10 +1520,14 @@ class LiveNoteStore:
                         old["semantic_role"], old["epistemic_state"], old["resolution_state"],
                         int(old["user_touched"]), int(old["protected"]), int(old["verified_against_source"]),
                         json.dumps(old["aliases"]), json.dumps(old["canonical_terms"]), old["superseded_by"], int(old.get("semantic_v2", False)), int(old.get("is_takeaway", False)),
+                        old.get("canonical_key",_canonical_key(old["content_md"])), old.get("content_digest",hashlib.sha256(old["content_md"].encode()).hexdigest()), old.get("item_status","unknown"),
                         now(),
                         key,
                     ),
                 )
+                if old.get("deleted_at") is None and after_blocks[key].get("deleted_at") is not None:
+                    deleted_key = _canonical_key(old["content_md"], old.get("aliases", []), old.get("canonical_terms", []))
+                    self.conn.execute("DELETE FROM live_note_intents WHERE session_id=? AND canonical_key=? AND intent='deleted'",(sid,deleted_key))
             else:
                 self.conn.execute(
                     "UPDATE live_note_blocks SET deleted_at=?,owner='human',revision=revision+1 WHERE id=?",
@@ -1453,6 +1683,14 @@ class LiveNoteStore:
             "UPDATE live_note_suggestions SET status=? WHERE id=?",
             ("accepted" if body.action == "accept" else "dismissed", suggestion_id),
         )
+        if body.action == "dismiss":
+            try:
+                proposed = json.loads(row["suggested_operation_json"])
+                key = _canonical_key(proposed.get("content_md") or proposed.get("markdown") or proposed.get("title") or "", proposed.get("aliases", []), proposed.get("canonical_terms", []))
+                if key:
+                    self.conn.execute("INSERT OR REPLACE INTO live_note_intents VALUES(?,?,?,?)", (sid,key,"rejected",now()))
+            except (TypeError, ValueError):
+                pass
 
     def event_operations(self, sid, revision):
         row = self.conn.execute(
@@ -1537,9 +1775,9 @@ class LiveNoteStore:
         row = self.conn.execute("SELECT * FROM live_note_batches WHERE id=?", (bid,)).fetchone()
         return dict(row) if row and row["status"] != "done" else None
 
-    def consolidation_batch(self, sid):
+    def consolidation_batch(self, sid, manual=False):
         s = self.session(sid)
-        if s["stopped"] or s["paused"] or self.snapshot(sid)["pending_segments"]:
+        if s["stopped"] or s["paused"] or (self.snapshot(sid)["pending_segments"] and not manual):
             return None
         existing = self.conn.execute(
             "SELECT * FROM live_note_batches WHERE session_id=? AND kind='consolidate' AND status!='done' ORDER BY created_at DESC LIMIT 1",
@@ -1547,9 +1785,9 @@ class LiveNoteStore:
         ).fetchone()
         if existing:
             return dict(existing)
-        latest = self.conn.execute("SELECT max(created_at) FROM live_note_batches WHERE session_id=? AND kind='consolidate'",(sid,)).fetchone()[0]
+        latest = self.conn.execute("SELECT max(created_at) FROM live_note_batches WHERE session_id=? AND kind='consolidate' AND status='done'",(sid,)).fetchone()[0]
         completed = self.conn.execute("SELECT context_json FROM live_note_batches WHERE session_id=? AND kind='consolidate' AND status='done' ORDER BY created_at DESC LIMIT 1", (sid,)).fetchone()
-        if completed and completed[0]:
+        if completed and completed[0] and not manual:
             try:
                 if json.loads(completed[0]).get("_document_digest") == self._document_digest(sid):
                     return None
@@ -1557,16 +1795,38 @@ class LiveNoteStore:
                 pass
         baseline = datetime.fromisoformat(latest).timestamp() if latest else datetime.fromisoformat(s["started_at"]).timestamp()
         settings = json.loads(s["live_config_json"])
-        if time.time() - baseline < settings.get("consolidation_interval_sec", 240):
+        if not manual and time.time() - baseline < settings.get("consolidation_interval_sec", 240):
             return None
-        fast_count = self.conn.execute("SELECT count(*) FROM live_note_batches WHERE session_id=? AND kind='fast' AND status='done'",(sid,)).fetchone()[0]
-        if fast_count < settings.get("min_consolidation_batches", 4):
+        if latest:
+            fast_rows = self.conn.execute("SELECT consolidation_reason FROM live_note_batches WHERE session_id=? AND kind='fast' AND status='done' AND created_at>? ORDER BY created_at",(sid,latest)).fetchall()
+        else:
+            fast_rows = self.conn.execute("SELECT consolidation_reason FROM live_note_batches WHERE session_id=? AND kind='fast' AND status='done' ORDER BY created_at",(sid,)).fetchall()
+        fast_count = len(fast_rows)
+        if not manual and fast_count < settings.get("min_consolidation_batches", 4):
+            return None
+        semantic_triggers = set()
+        for row in fast_rows:
+            try:
+                payload = json.loads(row["consolidation_reason"] or "{}")
+                semantic_triggers.update(payload.get("triggers", []))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        eligible_triggers = {"duplicates", "resolved_old_text", "topic_departure", "topic_switch", "density"}
+        if not manual and not semantic_triggers.intersection(eligible_triggers):
             return None
         cursor=s["last_processed_segment_seq"]; bid=f"{sid}:consolidate:{cursor}:{int(time.time())}"
         with self.conn:
             self.conn.execute("INSERT OR IGNORE INTO live_note_batches(id,session_id,seq_from,seq_to,status,provider,created_at,updated_at,kind) VALUES(?,?,?,?,'pending',?,?,?,'consolidate')",(bid,sid,cursor+1,cursor,s["provider"],now(),now()))
         row=self.conn.execute("SELECT * FROM live_note_batches WHERE id=?",(bid,)).fetchone()
         return dict(row) if row and row["status"]!='done' else None
+
+    def manual_consolidation_batch(self, sid):
+        batch = self.consolidation_batch(sid, manual=True)
+        if batch:
+            with self.conn:
+                self.conn.execute("UPDATE live_note_batches SET consolidation_reason='manual' WHERE id=?", (batch["id"],))
+                batch["consolidation_reason"] = "manual"
+        return batch
 
     def context(self, sid, batch):
         snap = self.snapshot(sid)
@@ -1590,52 +1850,66 @@ class LiveNoteStore:
             ) | {t[i : i + 2] for i in range(len(t) - 1) if not t[i : i + 2].isspace()}
 
         query = tokens(text)
-        ranked = sorted(
-            snap["topics"],
-            key=lambda t: (
-                len(
-                    query
-                    & tokens(
-                        t["title"]
-                        + " " + " ".join(
-                            b["content_md"] + " " + " ".join(b.get("aliases", []))
-                            + " " + " ".join(b.get("canonical_terms", []))
-                            for b in t["blocks"]
-                        )
-                    )
-                ),
-                t["id"] == snap["active_topic_id"],
-            ),
-            reverse=True,
-        )
-        # Keep full outline for topic return, bounded excerpts for candidate blocks.
-        # A long human document must not grow every prompt without limit.
+        # Refresh the compact trigram index from canonical rows so old V2
+        # records, aliases and human edits are searchable immediately.
+        try:
+            self.conn.execute("DELETE FROM live_note_search WHERE session_id=?", (sid,))
+            self.conn.execute("INSERT INTO live_note_search(block_id,session_id,topic_id,content) SELECT b.id,t.session_id,b.topic_id,coalesce(b.content_md,'')||' '||coalesce(b.aliases_json,'')||' '||coalesce(b.canonical_terms_json,'')||' '||coalesce(b.canonical_key,'') FROM live_note_blocks b JOIN live_note_topics t ON t.id=b.topic_id WHERE t.session_id=? AND b.deleted_at IS NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL", (sid,))
+        except sqlite3.OperationalError:
+            pass
+        fts_hits = set()
+        trigrams = [part for token in query for part in (token[i:i+3] for i in range(max(0, len(token)-2))) if len(part) == 3]
+        if trigrams:
+            try:
+                match = " OR ".join('"' + term.replace('"', '""') + '"' for term in list(dict.fromkeys(trigrams))[:60])
+                fts_hits = {row[0] for row in self.conn.execute("SELECT block_id FROM live_note_search WHERE live_note_search MATCH ? AND session_id=? LIMIT 240", (match, sid))}
+            except sqlite3.OperationalError:
+                pass
+        topic_scores = {t["id"]: len(query & tokens(t["title"] + " " + (t.get("digest") or " ".join(b["content_md"] for b in t["blocks"])))) for t in snap["topics"]}
+        active_id = snap["active_topic_id"]
+        all_blocks = []
+        for topic in snap["topics"]:
+            for block in topic["blocks"]:
+                searchable = " ".join([block["content_md"], *block.get("aliases", []), *block.get("canonical_terms", []), block.get("canonical_key", "")])
+                score = len(query & tokens(searchable))
+                if block["id"] in fts_hits:
+                    score += 2
+                if block.get("kind") == "question" and block.get("resolution_state") in ("open", "reopened"):
+                    score += 1
+                all_blocks.append((score + (2 if topic["id"] == active_id else 0), topic, block))
+        # Every topic participates; cap globally after broad matching so a single
+        # high-overlap topic cannot hide older open questions from retrieval.
+        all_blocks.sort(key=lambda x: (x[0], -x[2]["position"]), reverse=True)
+        selected = []
+        per_topic_count = {}
+        for candidate in all_blocks:
+            topic_id = candidate[1]["id"]
+            if per_topic_count.get(topic_id, 0) >= 12:
+                continue
+            selected.append(candidate)
+            per_topic_count[topic_id] = per_topic_count.get(topic_id, 0) + 1
+            if len(selected) >= 48:
+                break
+        selected_ids = {block["id"] for _, _, block in selected}
+        for topic in snap["topics"]:
+            topic_scores[topic["id"]] += sum(1 for block in topic["blocks"] if block["id"] in selected_ids)
+        ranked = sorted(snap["topics"], key=lambda t: (topic_scores[t["id"]], t["id"] == active_id), reverse=True)
         related = []
-        remaining = 36000
-        for topic in ranked[:5]:
-            candidates = sorted(
-                topic["blocks"],
-                key=lambda b: (len(query & tokens(b["content_md"])), b["position"]),
-                reverse=True,
-            )[:12]
+        remaining = 26000
+        for topic in ranked:
+            candidates = [(score, block) for score, owner, block in selected if owner["id"] == topic["id"]]
             blocks = []
-            for block in sorted(candidates, key=lambda b: b["position"]):
+            for _, block in sorted(candidates, key=lambda x: x[1]["position"]):
                 if remaining <= 0:
                     break
                 text = block["content_md"][: min(2000, remaining)]
                 remaining -= len(text)
-                blocks.append(
-                    {
-                        **block,
-                        "content_md": text,
-                        "context_truncated": len(text) < len(block["content_md"]),
-                    }
-                )
+                blocks.append({**block, "content_md": text, "context_truncated": len(text) < len(block["content_md"])})
             related.append({**topic, "blocks": blocks})
-        relevant_topic_ids = {t["id"] for t in ranked[:5]}
-        questions = [dict(q) for q in self.conn.execute("SELECT * FROM live_note_questions WHERE session_id=? AND state='open' ORDER BY created_seq,id", (sid,))]
-        return {
-            "schema_version": 2,
+        relevant_topic_ids = {t["id"] for t in ranked}
+        questions = [dict(q) for q in self.conn.execute("SELECT * FROM live_note_questions WHERE session_id=? AND conversation_state IN ('open','reopened') ORDER BY created_seq,id", (sid,))]
+        result = {
+            "schema_version": 3,
             "meeting": json.loads(self.session(sid)["meeting_meta_json"]),
             "started_at": snap["started_at"],
             "batch_id": batch["id"],
@@ -1650,15 +1924,137 @@ class LiveNoteStore:
                     "title": t["title"],
                     "title_owner": t["title_owner"],
                     "revision": t["revision"],
-                    "digest": " ".join(b["content_md"] for b in t["blocks"])[:500],
+                    "digest": (t.get("digest") or " ".join(b["content_md"] for b in t["blocks"]))[:500],
                     "aliases": self._union(*(b.get("aliases", []) for b in t["blocks"])),
                     "canonical_terms": self._union(*(b.get("canonical_terms", []) for b in t["blocks"])),
                 }
                 for t in snap["topics"]
             ],
             "related_topics": related,
+            "candidate_block_ids": [block["id"] for _, _, block in selected],
+            "context_truncated": remaining <= 0 or any(block.get("context_truncated") for t in related for block in t["blocks"]),
             "segments": segments,
         }
+        # Keep the serialized provider context (including outline and evidence)
+        # under the established 36k character cap, not only the selected blocks.
+        def size(): return len(json.dumps(result, ensure_ascii=False))
+        if size() > 36000:
+            for topic in reversed(result["related_topics"]):
+                for block in reversed(topic["blocks"]):
+                    block["content_md"] = block["content_md"][:400]
+                    block["context_truncated"] = True
+                    result["context_truncated"] = True
+                    if size() <= 36000: break
+                if size() <= 36000: break
+        if size() > 36000:
+            for topic in result["outline"]:
+                topic["digest"] = topic["digest"][:80]
+                if size() <= 36000: break
+        if size() > 36000:
+            for question in result["open_questions"]:
+                question["text"] = question["text"][:160]
+                if size() <= 36000: break
+        if size() > 36000:
+            for segment in result["segments"]:
+                segment["text"] = segment["text"][:160]
+                if size() <= 36000: break
+        if size() > 36000:
+            result["context_truncated"] = True
+            for topic in reversed(result["related_topics"]):
+                while topic["blocks"] and size() > 36000:
+                    topic["blocks"].pop()
+                if size() <= 36000: break
+        if size() > 36000:
+            result["open_questions"] = result["open_questions"][:max(1, len(result["open_questions"]) // 2)]
+        if size() > 36000:
+            result["segments"] = result["segments"][-20:]
+        if size() > 36000:
+            result["outline"] = result["outline"][-100:]
+        return result
+
+    def expand_context(self, sid, context, request):
+        """One bounded, host-only read round for IDs already signaled as unresolved."""
+        if not context.get("context_truncated") and not request.get("question_ids"):
+            raise NoteError("INVALID_CONTEXT_REQUEST", "追加文脈を求める根拠がありません")
+        current = json.loads(json.dumps(context, ensure_ascii=False))
+        open_questions = {q["id"]: q for q in current.get("open_questions", [])}
+        requested_qids = set(request.get("question_ids", []))
+        if not requested_qids <= set(open_questions):
+            raise NoteError("INVALID_CONTEXT_REQUEST", "未解決質問IDが文脈にありません")
+        related_by_id = {topic["id"]: topic for topic in current["related_topics"]}
+        outline_by_id = {topic["id"]: topic for topic in current["outline"]}
+        allowed_topics = {open_questions[qid]["topic_id"] for qid in requested_qids}
+        allowed_topics |= {tid for tid in request.get("topic_ids", []) if tid in outline_by_id and context.get("context_truncated")}
+        block_ids = set(request.get("block_ids", []))
+        if block_ids and not context.get("context_truncated"):
+            question_nodes = {q.get("question_node_id") for q in open_questions.values() if q["id"] in requested_qids}
+            allowed_block_ids = question_nodes | {b.get("answer_node_id") for q in open_questions.values() if q["id"] in requested_qids}
+            if not block_ids <= allowed_block_ids:
+                raise NoteError("INVALID_CONTEXT_REQUEST", "未解決質問に関連しない項目IDです")
+        for bid in block_ids:
+            row = self.conn.execute("SELECT b.*,t.session_id FROM live_note_blocks b JOIN live_note_topics t ON t.id=b.topic_id WHERE b.id=? AND t.session_id=? AND b.deleted_at IS NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL", (bid,sid)).fetchone()
+            if not row: raise NoteError("INVALID_CONTEXT_REQUEST", "項目IDが存在しません")
+            allowed_topics.add(row["topic_id"])
+        evidence_rows = []
+        for seq in dict.fromkeys(request.get("evidence_segment_seqs", [])):
+            row = self.conn.execute(
+                "SELECT segment_seq,start_ms,end_ms,speaker_label,text FROM live_note_segments WHERE session_id=? AND segment_seq=?",
+                (sid,seq),
+            ).fetchone()
+            if not row: raise NoteError("INVALID_CONTEXT_REQUEST", "発話IDが存在しません")
+            evidence_rows.append(dict(row))
+        records = []
+        for tid in allowed_topics:
+            topic = self.conn.execute("SELECT * FROM live_note_topics WHERE id=? AND session_id=? AND deleted_at IS NULL AND archived_at IS NULL", (tid,sid)).fetchone()
+            if not topic: continue
+            if topic["id"] not in related_by_id:
+                related_by_id[topic["id"]] = {**dict(topic),"blocks":[]}
+            for b in self.conn.execute("SELECT * FROM live_note_blocks WHERE topic_id=? AND deleted_at IS NULL ORDER BY position", (tid,)):
+                if block_ids and b["id"] not in block_ids and tid not in set(request.get("topic_ids", [])): continue
+                record = dict(b); record["source_segment_seqs"] = json.loads(record.pop("source_segments_json")); record["aliases"] = json.loads(record.pop("aliases_json")); record["canonical_terms"] = json.loads(record.pop("canonical_terms_json"))
+                records.append((related_by_id[tid],record))
+        # Keep requested full context within the existing 36k content budget.
+        used = 0
+        for topic in related_by_id.values():
+            topic["blocks"] = [b for b in topic.get("blocks", []) if b.get("id") not in block_ids]
+            used += sum(len(b.get("content_md", "")) for b in topic["blocks"])
+        for topic, block in records:
+            room = max(0, 36000 - used)
+            value = block["content_md"][:room]
+            topic["blocks"].append({**block,"content_md":value,"context_truncated":len(value)<len(block["content_md"])})
+            used += len(value)
+        current["related_topics"] = list(related_by_id.values())
+        # A context request must return the actual cited speech, including older
+        # segments outside this batch. Keeping it in `segments` also lets the
+        # operation validator accept those exact source IDs on the second pass.
+        segment_by_seq = {segment["segment_seq"]: segment for segment in current["segments"]}
+        for row in evidence_rows:
+            segment_by_seq[row["segment_seq"]] = {**row, "context_only": True}
+        current["segments"] = sorted(segment_by_seq.values(), key=lambda row: row["segment_seq"])
+        current["expanded_context_ids"] = {"topics": sorted(allowed_topics),"blocks":sorted(block_ids),"questions":sorted(requested_qids),"evidence":request.get("evidence_segment_seqs",[])}
+        current["context_truncated"] = any(b.get("context_truncated") for t in current["related_topics"] for b in t.get("blocks",[]))
+        def size(): return len(json.dumps(current, ensure_ascii=False))
+        if size() > 36000:
+            for topic in reversed(current["related_topics"]):
+                for block in reversed(topic["blocks"]):
+                    if size() <= 36000: break
+                    if len(block["content_md"]) > 160:
+                        block["content_md"] = block["content_md"][:160]
+                        block["context_truncated"] = current["context_truncated"] = True
+                if size() <= 36000: break
+        if size() > 36000:
+            for topic in current["outline"]:
+                if size() <= 36000: break
+                topic["digest"] = topic["digest"][:80]
+        if size() > 36000:
+            for segment in current["segments"]:
+                if size() <= 36000: break
+                if len(segment["text"]) > 600:
+                    segment["text"] = segment["text"][:600]
+                    segment["context_truncated"] = current["context_truncated"] = True
+        if size() > 36000:
+            raise NoteError("CONTEXT_TOO_LARGE", "追加文脈が文字数上限を超えました")
+        return current
 
     def start_call(self, sid, batch, context, repair=False):
         settings = json.loads(self.session(sid)["live_config_json"])
@@ -1689,7 +2085,7 @@ class LiveNoteStore:
 
     def _document_digest(self, sid):
         rows = self.conn.execute(
-            "SELECT t.id,t.title,t.position,t.revision,b.id,b.content_md,b.position,b.revision,b.deleted_at "
+            "SELECT t.id,t.title,t.digest,t.position,t.revision,b.id,b.content_md,b.position,b.revision,b.deleted_at "
             "FROM live_note_topics t LEFT JOIN live_note_blocks b ON b.topic_id=t.id "
             "WHERE t.session_id=? AND t.deleted_at IS NULL AND t.archived_at IS NULL "
             "ORDER BY t.position,t.id,b.position,b.id", (sid,)
@@ -1738,7 +2134,7 @@ class LiveNoteStore:
     def apply(self, sid, batch, context, raw):
         if len(json.dumps(raw, ensure_ascii=False).encode()) > 131072:
             raise NoteError("INVALID_PLAN", "JSON出力が大きすぎます")
-        if isinstance(raw, dict) and raw.get("schema_version") == 2:
+        if isinstance(raw, dict) and raw.get("schema_version") in (2, 3):
             return self._apply_v2(sid, batch, context, raw)
         plan = OperationPlan.model_validate(raw)
         if (

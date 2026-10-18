@@ -311,7 +311,7 @@ def test_v1_migration_is_non_destructive_and_idempotent(tmp_path):
     try:
         assert second.conn.execute("SELECT summary FROM minutes WHERE id='m'").fetchone()[0] == "original"
         assert second.conn.execute("SELECT count(*) FROM live_note_schema").fetchone()[0] == 1
-        assert second.conn.execute("SELECT version FROM live_note_schema").fetchone()[0] == 2
+        assert second.conn.execute("SELECT version FROM live_note_schema").fetchone()[0] == 3
         columns = {row[1] for row in second.conn.execute("PRAGMA table_info(live_note_blocks)")}
         assert {"semantic_role", "user_touched", "aliases_json", "superseded_by"} <= columns
     finally:
@@ -339,7 +339,7 @@ def test_populated_v1_notes_migrate_without_losing_ids_text_or_evidence(tmp_path
         block = snapshot["topics"][0]["blocks"][0]
         assert (block["id"], block["content_md"], block["revision"], block["source_segment_seqs"]) == ("old-block", "既存の合意", 9, [2, 5])
         assert block["semantic_v2"] == 0
-        assert migrated.conn.execute("SELECT version FROM live_note_schema WHERE version=2").fetchone()[0] == 2
+        assert migrated.conn.execute("SELECT version FROM live_note_schema WHERE version=3").fetchone()[0] == 3
     finally:
         migrated.close()
 
@@ -545,11 +545,14 @@ def test_fast_consolidation_and_finalization_batches_survive_restart(tmp_path):
     settings = LiveSettings(max_batch_chars=120).model_dump()
     store.create("passes", "project", "codex", {"model":"synthetic"}, settings)
     store.ingest("passes", [{"segment_id":f"s{i}","start":i,"end":i+1,"text":f"evidence {i} " + "x"*65} for i in range(4)])
-    for _ in range(4):
+    for index in range(4):
         batch = store.batch("passes")
         assert batch["kind"] == "fast" and batch["seq_from"] == batch["seq_to"]
         context = store.context("passes", batch)
-        apply_v2_to(store, "passes", batch, context, {"type":"NO_CHANGE"})
+        if index == 0:
+            apply_v2_to(store, "passes", batch, context, {"type":"CREATE_TOPIC", "topic_id":"new:1", "title":"Evidence topic"})
+        else:
+            apply_v2_to(store, "passes", batch, context, {"type":"NO_CHANGE"})
     store.conn.execute("UPDATE live_note_sessions SET started_at=? WHERE session_id=?", ("2000-01-01T00:00:00+00:00", "passes"))
     consolidation = store.consolidation_batch("passes")
     assert consolidation and consolidation["kind"] == "consolidate"
@@ -596,9 +599,12 @@ def test_coordinator_routes_fast_consolidation_and_final_pass_through_shared_gat
             self.max_active = max(self.max_active, self.active)
             try:
                 await asyncio.sleep(0.01)
+                if context["batch_kind"] == "fast" and self.kinds.count("fast") == 1:
+                    operations = [SemanticOperation(op_id=context["batch_id"]+":1", type="CREATE_TOPIC", topic_id="new:1", title="Evidence topic", source_segments=[context["segments"][0]["segment_seq"]])]
+                else:
+                    operations = [SemanticOperation(op_id=context["batch_id"]+":1", type="NO_CHANGE", source_segments=[])]
                 return SemanticOperationPlan(schema_version=2, batch_id=context["batch_id"],
-                    base_revision=context["base_note_revision"], operations=[SemanticOperation(
-                        op_id=context["batch_id"]+":1", type="NO_CHANGE", source_segments=[])]).model_dump()
+                    base_revision=context["base_note_revision"], operations=operations).model_dump()
             finally:
                 self.active -= 1
 

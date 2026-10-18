@@ -1,0 +1,423 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "contains_transcript_text": false,
+  "case_id": "synthetic_23m",
+  "duration_minutes": 23,
+  "purpose": "Synthetic structural and state-transition evaluation only. No meeting transcript or real topic text is included.",
+  "calibration_only_cardinality": {
+    "topics": 1,
+    "blocks": 31,
+    "source": "Authorized count metadata; not a transcript, target Markdown, or exact generated-output oracle.",
+    "questions": 0
+  },
+  "revisited_topic_keys": [
+    "topic_shared"
+  ],
+  "allowed_claim_keys": [
+    "fact_01",
+    "fact_02",
+    "fact_03",
+    "fact_04",
+    "fact_05",
+    "fact_06",
+    "fact_07",
+    "fact_08",
+    "fact_09",
+    "fact_10",
+    "fact_11",
+    "fact_12",
+    "fact_13",
+    "fact_14",
+    "fact_15",
+    "fact_16",
+    "fact_17",
+    "fact_18",
+    "fact_19",
+    "fact_20",
+    "fact_21",
+    "fact_22",
+    "fact_23",
+    "fact_24",
+    "fact_25",
+    "fact_26",
+    "fact_27",
+    "fact_28",
+    "fact_29",
+    "fact_30",
+    "fact_31"
+  ],
+  "synthetic_segment_ids": [
+    "s23_01",
+    "s23_02",
+    "s23_03",
+    "s23_04",
+    "s23_05",
+    "s23_06",
+    "s23_07",
+    "s23_08",
+    "s23_09",
+    "s23_10",
+    "s23_11",
+    "s23_12",
+    "s23_13",
+    "s23_14",
+    "s23_15",
+    "s23_16",
+    "s23_17",
+    "s23_18",
+    "s23_19",
+    "s23_20",
+    "s23_21",
+    "s23_22",
+    "s23_23",
+    "s23_24",
+    "s23_25",
+    "s23_26",
+    "s23_27",
+    "s23_28",
+    "s23_29",
+    "s23_30",
+    "s23_31"
+  ],
+  "evidence_by_claim": {
+    "fact_01": [
+      "s23_01"
+    ],
+    "fact_02": [
+      "s23_02"
+    ],
+    "fact_03": [
+      "s23_03"
+    ],
+    "fact_04": [
+      "s23_04"
+    ],
+    "fact_05": [
+      "s23_05"
+    ],
+    "fact_06": [
+      "s23_06"
+    ],
+    "fact_07": [
+      "s23_07"
+    ],
+    "fact_08": [
+      "s23_08"
+    ],
+    "fact_09": [
+      "s23_09"
+    ],
+    "fact_10": [
+      "s23_10"
+    ],
+    "fact_11": [
+      "s23_11"
+    ],
+    "fact_12": [
+      "s23_12"
+    ],
+    "fact_13": [
+      "s23_13"
+    ],
+    "fact_14": [
+      "s23_14"
+    ],
+    "fact_15": [
+      "s23_15"
+    ],
+    "fact_16": [
+      "s23_16"
+    ],
+    "fact_17": [
+      "s23_17"
+    ],
+    "fact_18": [
+      "s23_18"
+    ],
+    "fact_19": [
+      "s23_19"
+    ],
+    "fact_20": [
+      "s23_20"
+    ],
+    "fact_21": [
+      "s23_21"
+    ],
+    "fact_22": [
+      "s23_22"
+    ],
+    "fact_23": [
+      "s23_23"
+    ],
+    "fact_24": [
+      "s23_24"
+    ],
+    "fact_25": [
+      "s23_25"
+    ],
+    "fact_26": [
+      "s23_26"
+    ],
+    "fact_27": [
+      "s23_27"
+    ],
+    "fact_28": [
+      "s23_28"
+    ],
+    "fact_29": [
+      "s23_29"
+    ],
+    "fact_30": [
+      "s23_30"
+    ],
+    "fact_31": [
+      "s23_31"
+    ]
+  },
+  "claim_topics": {
+    "fact_01": "topic_shared",
+    "fact_02": "topic_shared",
+    "fact_03": "topic_shared",
+    "fact_04": "topic_shared",
+    "fact_05": "topic_shared",
+    "fact_06": "topic_shared",
+    "fact_07": "topic_shared",
+    "fact_08": "topic_shared",
+    "fact_09": "topic_shared",
+    "fact_10": "topic_shared",
+    "fact_11": "topic_shared",
+    "fact_12": "topic_shared",
+    "fact_13": "topic_shared",
+    "fact_14": "topic_shared",
+    "fact_15": "topic_shared",
+    "fact_16": "topic_shared",
+    "fact_17": "topic_shared",
+    "fact_18": "topic_shared",
+    "fact_19": "topic_shared",
+    "fact_20": "topic_shared",
+    "fact_21": "topic_shared",
+    "fact_22": "topic_shared",
+    "fact_23": "topic_shared",
+    "fact_24": "topic_shared",
+    "fact_25": "topic_shared",
+    "fact_26": "topic_shared",
+    "fact_27": "topic_shared",
+    "fact_28": "topic_shared",
+    "fact_29": "topic_shared",
+    "fact_30": "topic_shared",
+    "fact_31": "topic_shared"
+  },
+  "verified_claim_keys": [],
+  "pass_threshold": 85,
+  "rubric_total": 100,
+  "checkpoints": [
+    {
+      "minute": 5,
+      "topic_keys": [
+        "topic_shared"
+      ],
+      "max_topic_count": 1,
+      "required_claim_keys": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08"
+      ],
+      "question_states": {
+        "q_alpha": "open"
+      },
+      "open_question_ids": [
+        "q_alpha"
+      ],
+      "preserve_from_prior": []
+    },
+    {
+      "minute": 12,
+      "topic_keys": [
+        "topic_shared"
+      ],
+      "max_topic_count": 1,
+      "required_claim_keys": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08",
+        "fact_09",
+        "fact_10",
+        "fact_11",
+        "fact_12",
+        "fact_13",
+        "fact_14",
+        "fact_15",
+        "fact_16",
+        "fact_17",
+        "fact_18",
+        "fact_19",
+        "fact_20"
+      ],
+      "question_states": {
+        "q_alpha": "answered_in_discussion",
+        "q_beta": "open"
+      },
+      "open_question_ids": [
+        "q_beta"
+      ],
+      "preserve_from_prior": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08"
+      ]
+    },
+    {
+      "minute": 18,
+      "topic_keys": [
+        "topic_shared"
+      ],
+      "max_topic_count": 1,
+      "required_claim_keys": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08",
+        "fact_09",
+        "fact_10",
+        "fact_11",
+        "fact_12",
+        "fact_13",
+        "fact_14",
+        "fact_15",
+        "fact_16",
+        "fact_17",
+        "fact_18",
+        "fact_19",
+        "fact_20",
+        "fact_21",
+        "fact_22",
+        "fact_23",
+        "fact_24",
+        "fact_25",
+        "fact_26",
+        "fact_27"
+      ],
+      "question_states": {
+        "q_alpha": "answered_in_discussion",
+        "q_beta": "answered_in_discussion"
+      },
+      "open_question_ids": [],
+      "preserve_from_prior": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08",
+        "fact_09",
+        "fact_10",
+        "fact_11",
+        "fact_12",
+        "fact_13",
+        "fact_14",
+        "fact_15",
+        "fact_16",
+        "fact_17",
+        "fact_18",
+        "fact_19",
+        "fact_20"
+      ]
+    },
+    {
+      "minute": 23,
+      "topic_keys": [
+        "topic_shared"
+      ],
+      "max_topic_count": 1,
+      "required_claim_keys": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08",
+        "fact_09",
+        "fact_10",
+        "fact_11",
+        "fact_12",
+        "fact_13",
+        "fact_14",
+        "fact_15",
+        "fact_16",
+        "fact_17",
+        "fact_18",
+        "fact_19",
+        "fact_20",
+        "fact_21",
+        "fact_22",
+        "fact_23",
+        "fact_24",
+        "fact_25",
+        "fact_26",
+        "fact_27",
+        "fact_28",
+        "fact_29",
+        "fact_30",
+        "fact_31"
+      ],
+      "question_states": {
+        "q_alpha": "answered_in_discussion",
+        "q_beta": "answered_in_discussion"
+      },
+      "open_question_ids": [],
+      "preserve_from_prior": [
+        "fact_01",
+        "fact_02",
+        "fact_03",
+        "fact_04",
+        "fact_05",
+        "fact_06",
+        "fact_07",
+        "fact_08",
+        "fact_09",
+        "fact_10",
+        "fact_11",
+        "fact_12",
+        "fact_13",
+        "fact_14",
+        "fact_15",
+        "fact_16",
+        "fact_17",
+        "fact_18",
+        "fact_19",
+        "fact_20",
+        "fact_21",
+        "fact_22",
+        "fact_23",
+        "fact_24",
+        "fact_25",
+        "fact_26",
+        "fact_27"
+      ]
+    }
+  ]
+}

@@ -86,6 +86,7 @@ GPT-6 Luna（`gpt-6-luna`）を推奨候補として表示します。未指定�
 方式・provider・modelは録音開始時に固定され、設定変更は次回の会議から適用します。
 
 Whisperの音声認識はローカルですが、**発話テキスト・ノート文脈は選択したLLM提供元へ送信されます**。
+音声そのものは送信せず、音声と文字起こしはこの端末の保存領域に残ります。Codex/Claude CLIを選ぶ場合は、推論対象となる発話テキストとノート文脈がその提供元へ渡るため、送信内容を確認してから有効化してください。
 会議参加者への録音通知・同意と、CLIの契約・利用枠を確認してください。
 必要なCLI制限に対応しない版、認証切れ、利用制限ではAI整理を停止し、録音・文字起こし・手動編集を続けます。
 
@@ -96,7 +97,7 @@ OFFの場合は従来の録音後要約を利用します。
 
 ## 実装状況メモ
 
-ライブノートv2は、意味役割・確度・質問状態を持つ10種の構造化操作を使い、重複統合・質問解決・訂正履歴・テーマ再編を提案します。SQLiteのtopics/blocksが正本で、追加migrationはsemantic metadataとquestion、batch種別、finalization stateを加えます。文書全体は `document.nodes[]` として投影し、複数単位の手動編集はrevision付きatomic delta APIで保存します。fast update・定期consolidation・終了時finalizationは同じCLI制限と呼出し制御を通ります。v2の実装契約と実測範囲は [v2評価レポート](./docs/live-notes-v2-report.md) を参照してください。
+ライブノートv3はschema v3の意味操作で、項目の状態、質問の会話上の回答と外部資料による検証、話題・項目間の関係を別々に保持します。質問が会話で回答されても外部検証済みにはなりません。手動で編集した内容は保護され、削除・却下した内容の再生成を抑えます。v1/v2の保存済み操作とSQLiteデータは加算migrationで読み込みます。実装契約と既存評価範囲は [v2評価レポート](./docs/live-notes-v2-report.md) を参照してください。[v3評価手順と結果](./docs/live-notes-v3-evaluation.md) に記す通り、合成データの構造試験は通過していますが、実会議でのモデル品質はCLIローカル実行エラーにより未判定です。
 
 - `Gemini` は設定UI/APIの枠はありますが、要約本体は未対応です
 - システム音声録音は macOS のシステム音声取得権限が必要です
@@ -142,6 +143,8 @@ pnpm build
 
 - `gui/src-tauri/target/release/bundle/macos/Seam.app`
 - `gui/src-tauri/target/release/bundle/dmg/Seam_<version>_aarch64.dmg`
+
+Apple Developer IDの設定がないローカルビルドはアドホック署名で、公証された公開配布物にはなりません。
 
 ## セキュリティ / プライバシー方針（要点）
 

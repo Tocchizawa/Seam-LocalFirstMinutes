@@ -10,9 +10,10 @@ import { Markdown } from "tiptap-markdown";
 import { TableKit } from "@tiptap/extension-table";
 import UniqueID from "@tiptap/extension-unique-id";
 import { AllSelection, TextSelection } from "@tiptap/pm/state";
+import { canSplit } from "@tiptap/pm/transform";
 import { getLiveSuggestionReview, LiveApiError, newRequestId, useNewNoteDraft, type LiveNotesController, type LiveSnapshot, type LiveTopic } from "../../lib/live-notes";
 
-type SemanticUnit = { id: string; type: "topic" | "block"; topic_id?: string; markdown: string; position: number; revision: number; kind?: string; semantic_role?: string; epistemic_state?: string; resolution_state?: string; user_touched?: boolean; protected?: boolean; source_segments?: number[] };
+type SemanticUnit = { id: string; type: "document_title" | "document_takeaway" | "topic" | "block"; topic_id?: string; markdown: string; position: number; revision: number; kind?: string; semantic_role?: string; epistemic_state?: string; resolution_state?: string; user_touched?: boolean; protected?: boolean; source_segments?: number[] };
 type UnitDraft = { markdown: string; baseRevision: number; requestId: string };
 const TopicUnitNode = TiptapNode.create({
   name: "topicUnit", group: "block", content: "heading", defining: true, isolating: true,
@@ -26,16 +27,50 @@ const BlockUnitNode = TiptapNode.create({
   parseHTML: () => [{ tag: "section[data-semantic-unit-id][data-unit-type=block]", getAttrs: (element) => ({ semanticUnitId: (element as HTMLElement).dataset.semanticUnitId }) }],
   renderHTML: ({ HTMLAttributes }) => ["section", { ...HTMLAttributes, "data-unit-type": "block" }, 0],
 });
+const DocumentTitleNode = TiptapNode.create({
+  name: "documentTitleUnit", group: "block", content: "heading", defining: true, isolating: true,
+  addAttributes: () => ({ semanticUnitId: { default: null, parseHTML: (element: HTMLElement) => element.dataset.semanticUnitId ?? null, renderHTML: (attrs: Record<string, unknown>) => ({ "data-semantic-unit-id": attrs.semanticUnitId }) } }),
+  parseHTML: () => [{ tag: "section[data-semantic-unit-id][data-unit-type=document-title]", getAttrs: (element) => ({ semanticUnitId: (element as HTMLElement).dataset.semanticUnitId }) }],
+  renderHTML: ({ HTMLAttributes }) => ["section", { ...HTMLAttributes, "data-unit-type": "document-title" }, 0],
+});
+const DocumentTakeawayNode = TiptapNode.create({
+  name: "documentTakeawayUnit", group: "block", content: "block+", defining: true, isolating: true,
+  addAttributes: () => ({ semanticUnitId: { default: null, parseHTML: (element: HTMLElement) => element.dataset.semanticUnitId ?? null, renderHTML: (attrs: Record<string, unknown>) => ({ "data-semantic-unit-id": attrs.semanticUnitId }) } }),
+  parseHTML: () => [{ tag: "section[data-semantic-unit-id][data-unit-type=document-takeaway]", getAttrs: (element) => ({ semanticUnitId: (element as HTMLElement).dataset.semanticUnitId }) }],
+  renderHTML: ({ HTMLAttributes }) => ["section", { ...HTMLAttributes, "data-unit-type": "document-takeaway" }, 0],
+});
 
 function readUnits(snapshot: LiveSnapshot): SemanticUnit[] {
-  const documentUnits = (snapshot as LiveSnapshot & { document?: { nodes?: SemanticUnit[] } }).document?.nodes;
-  if (documentUnits?.length) return documentUnits.map((unit) => {
+  const document = snapshot.document as (LiveSnapshot["document"] & { nodes?: SemanticUnit[] }) | undefined;
+  const documentUnits = document?.nodes;
+  const title: SemanticUnit = { id: "document-title", type: "document_title", markdown: `# ${document?.title || "議論ノート"}`, position: -2000, revision: Number(document?.title_revision ?? 0) };
+  const isLegacyTakeawayHeading = (topicId: string) => {
+    const topic = snapshot.topics.find((item) => item.id === topicId);
+    const onlyBlock = topic?.blocks.length === 1 ? topic.blocks[0] : null;
+    if (!document?.takeaway || topic?.title_owner !== "ai" || !onlyBlock) return false;
+    if (document.takeaway_block_id) return onlyBlock.id === document.takeaway_block_id;
+    // Pre-v3 metadata has no takeaway ID. Its dedicated AI context heading may
+    // outlive a later manual edit to the synthetic document takeaway.
+    return onlyBlock.content_md.trim() === document.takeaway.trim()
+      || (onlyBlock.kind === "context" && /^(会議の要点|要点|概要|summary)$/i.test(topic.title.trim()));
+  };
+  if (documentUnits?.length) {
+    const nodes: SemanticUnit[] = documentUnits.filter((unit) => !(unit.type === "topic" && isLegacyTakeawayHeading(unit.id))).map((unit) => {
     const topic = snapshot.topics.find((item) => item.id === unit.id);
     const block = snapshot.topics.flatMap((item) => item.blocks).find((item) => item.id === unit.id);
-    return { ...unit, revision: Number((unit as SemanticUnit & { revision?: number }).revision ?? topic?.revision ?? block?.revision ?? snapshot.note_revision), kind: unit.kind ?? block?.kind };
-  });
-  const units: SemanticUnit[] = [];
+    return { ...unit, revision: Number((unit as SemanticUnit & { revision?: number }).revision ?? topic?.revision ?? block?.revision ?? snapshot.note_revision), kind: unit.kind ?? block?.kind } as SemanticUnit;
+    });
+    const hasTakeawayBlock = document?.takeaway && (document.takeaway_block_id
+      ? nodes.some((unit) => unit.id === document.takeaway_block_id)
+      : nodes.some((unit) => unit.type === "block" && unit.markdown.trim() === document.takeaway?.trim()));
+    nodes.unshift(title);
+    if (document?.takeaway && !hasTakeawayBlock) nodes.splice(1, 0, { id: "document-takeaway", type: "document_takeaway", markdown: `## 要点\n\n${document.takeaway}`, position: -1000, revision: Number(document.takeaway_revision ?? snapshot.note_revision) });
+    return nodes;
+  }
+  const units: SemanticUnit[] = [title];
+  if (document?.takeaway) units.push({ id: "document-takeaway", type: "document_takeaway", markdown: `## 要点\n\n${document.takeaway}`, position: -1000, revision: Number(document.takeaway_revision ?? snapshot.note_revision) });
   for (const topic of [...snapshot.topics].sort((a, b) => a.position - b.position)) {
+    if (isLegacyTakeawayHeading(topic.id)) continue;
     units.push({ id: topic.id, type: "topic", markdown: `## ${topic.title}`, position: topic.position * 1000, revision: topic.revision });
     for (const block of [...topic.blocks].sort((a, b) => a.position - b.position)) units.push({ id: block.id, type: "block", topic_id: topic.id, markdown: block.content_md, position: topic.position * 1000 + block.position + 1, revision: block.revision, kind: block.kind });
   }
@@ -50,7 +85,7 @@ function nodesForMarkdown(editor: NonNullable<ReturnType<typeof useEditor>>, uni
   const host = document.createElement("div");
   host.innerHTML = storage.markdown?.parser?.parse(unit.markdown) ?? unit.markdown;
   const fragment = PMDOMParser.fromSchema(editor.schema).parse(host);
-  const type = unit.type === "topic" ? editor.schema.nodes.topicUnit : editor.schema.nodes.blockUnit;
+  const type = unit.type === "topic" ? editor.schema.nodes.topicUnit : unit.type === "document_title" ? editor.schema.nodes.documentTitleUnit : unit.type === "document_takeaway" ? editor.schema.nodes.documentTakeawayUnit : editor.schema.nodes.blockUnit;
   return [type.create({ semanticUnitId: unit.id }, fragment.content)];
 }
 function unitMarkdown(editor: NonNullable<ReturnType<typeof useEditor>>, nodes: PMNode[]) {
@@ -101,6 +136,8 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
   const [saveState, setSaveState] = useState("保存済み");
   const [conflicted, setConflicted] = useState<string[]>([]);
   const [active, setActive] = useState<string | null>(null);
+  const [editingUnitId, setEditingUnitId] = useState<string | null>(null);
+  const editorFocused = useRef(false);
   const [suggestionBusy, setSuggestionBusy] = useState<string | null>(null);
   const [resolvedSuggestions, setResolvedSuggestions] = useState<Record<string, "apply" | "keep">>({});
   const [suggestionFeedback, setSuggestionFeedback] = useState("");
@@ -117,16 +154,21 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
     const block = serverUnits.find((unit) => unit.type === "block" && unit.topic_id === topic?.id);
     if (!topic || !block) return false;
     const current = ranges(editor);
+    const title = serverUnits.find((unit) => unit.type === "document_title");
+    const takeaway = serverUnits.find((unit) => unit.type === "document_takeaway");
     const topicNode = current.get(topic.id)?.nodes[0] ?? nodesForMarkdown(editor, topic)[0];
     const blockNode = nodesForMarkdown(editor, { ...block, markdown })[0];
-    for (const unit of serverUnits) if (unit.id !== topic.id && unit.id !== block.id) {
+    const preserved = new Set([topic.id, block.id, title?.id, takeaway?.id].filter(Boolean));
+    for (const unit of serverUnits) if (!preserved.has(unit.id)) {
       structuralDeletes.current.add(unit.id);
       delete draftRef.current[unit.id];
     }
     persistDrafts();
     try { localStorage.setItem(structuralDraftKey(snapshot.session_id), JSON.stringify([...structuralDeletes.current])); }
     catch { setSaveState("端末への構成下書き保存に失敗しました"); }
-    const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, [topicNode, blockNode]);
+    const titleNode = title ? current.get(title.id)?.nodes[0] ?? nodesForMarkdown(editor, title)[0] : null;
+    const takeawayNode = takeaway ? current.get(takeaway.id)?.nodes[0] ?? nodesForMarkdown(editor, takeaway)[0] : null;
+    const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, [titleNode, takeawayNode, topicNode, blockNode].filter((node): node is PMNode => Boolean(node)));
     tr.setSelection(TextSelection.near(tr.doc.resolve(Math.max(1, tr.doc.content.size - 1)), -1));
     view.dispatch(tr.setMeta("seamWholeReplacement", true));
     capture(editor);
@@ -189,7 +231,7 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
   const replaceUserSelection = (view: import("@tiptap/pm/view").EditorView, markdown: string) =>
     isDocumentWideSelection(view) ? replaceWholeDocument(view, markdown) : replaceCrossUnitSelection(view, markdown);
   const editor = useEditor({
-    extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3, 4] }, link: false }), Link.configure({ openOnClick: false, linkOnPaste: true, HTMLAttributes: { rel: "noopener noreferrer", target: "_blank" } }), TaskList, TaskItem.configure({ nested: true }), TableKit.configure({ table: { resizable: false } }), TopicUnitNode, BlockUnitNode, UniqueID.configure({ attributeName: "seamNodeUid", types: ["topicUnit", "blockUnit", "paragraph", "heading", "bulletList", "orderedList", "blockquote", "codeBlock", "horizontalRule", "taskList", "table"] }), Markdown.configure({ html: false, linkify: true, transformPastedText: true, breaks: false })],
+    extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3, 4] }, link: false }), Link.configure({ openOnClick: false, linkOnPaste: true, HTMLAttributes: { rel: "noopener noreferrer", target: "_blank" } }), TaskList, TaskItem.configure({ nested: true }), TableKit.configure({ table: { resizable: false } }), TopicUnitNode, BlockUnitNode, DocumentTitleNode, DocumentTakeawayNode, UniqueID.configure({ attributeName: "seamNodeUid", types: ["topicUnit", "blockUnit", "documentTitleUnit", "documentTakeawayUnit", "paragraph", "heading", "bulletList", "orderedList", "blockquote", "codeBlock", "horizontalRule", "taskList", "table"] }), Markdown.configure({ html: false, linkify: true, transformPastedText: true, breaks: false })],
     content: "",
     onUpdate: ({ editor: current, transaction }) => { if (transaction.getMeta("seamRemote")) return; capture(current); },
     editorProps: {
@@ -198,6 +240,21 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
           view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));
           return true;
+        }
+        if (event.key === "Enter" && !event.shiftKey && !composing.current && view.state.selection.empty) {
+          const { $from } = view.state.selection;
+          let semanticContainer: PMNode | null = null;
+          for (let depth = $from.depth; depth >= 0; depth--) {
+            const node = $from.node(depth);
+            if (["documentTitleUnit", "blockUnit", "documentTakeawayUnit"].includes(node.type.name)) { semanticContainer = node; break; }
+          }
+          if (semanticContainer?.type.name === "documentTitleUnit") return true;
+          if ((semanticContainer?.type.name === "blockUnit" || semanticContainer?.type.name === "documentTakeawayUnit") && $from.parent.isTextblock) {
+            if (canSplit(view.state.doc, $from.pos, 1)) {
+              view.dispatch(view.state.tr.split($from.pos));
+              return true;
+            }
+          }
         }
         if ((event.key === "Backspace" || event.key === "Delete") && (isDocumentWideSelection(view) || selectedUnitIds())) return replaceUserSelection(view, "");
         return false;
@@ -209,6 +266,18 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
         return text == null ? false : replaceUserSelection(view, text);
       },
       handleDOMEvents: {
+        focus: () => { editorFocused.current = true; return false; },
+        blur: (view, event) => {
+          const relatedTarget = (event as FocusEvent).relatedTarget;
+          // ProseMirror may briefly move focus to <body> while reconciling a
+          // remote transaction. Only a concrete destination outside the editor
+          // means the user left the active semantic unit.
+          if (relatedTarget instanceof HTMLElement && relatedTarget !== document.body && !view.dom.contains(relatedTarget)) {
+            editorFocused.current = false;
+            setEditingUnitId(null);
+          }
+          return false;
+        },
         beforeinput: (view, event) => {
           const input = event as InputEvent;
           if (!isDocumentWideSelection(view) && !selectedUnitIds()) return false;
@@ -239,6 +308,14 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
           return false;
         },
       },
+    },
+    onSelectionUpdate: ({ editor: current }) => {
+      let unitId: string | null = null;
+      for (let depth = current.state.selection.$from.depth; depth >= 0; depth--) {
+        const id = current.state.selection.$from.node(depth).attrs.semanticUnitId;
+        if (typeof id === "string") { unitId = id; break; }
+      }
+      setEditingUnitId((previous) => previous === unitId ? previous : unitId);
     },
   });
   function persistDrafts() {
@@ -272,42 +349,35 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
     inFlight.current = true; setSaveState("保存中…");
     let failed = false, blocked = false;
     try {
-      if (structuralDeletes.current.size) {
+      {
         const operations: Record<string, unknown>[] = [];
+        const savedDraftIds: string[] = [];
+        const requestId = pending[0]?.[1].requestId ?? newRequestId();
         for (const [id, draft] of pending) {
           const unit = unitRef.current.find((item) => item.id === id);
           if (!unit) continue;
-          if (unit.type === "topic") operations.push({ op: "update_topic", id, expected_revision: conflicted.includes(id) ? unit.revision : draft.baseRevision, title: draft.markdown.replace(/^#{1,6}\\s*/, "").trim() });
+          if (conflicted.includes(id) && !force) { blocked = true; continue; }
+          savedDraftIds.push(id);
+          if (unit.type === "document_title") operations.push({ op: "update_document_title", title: draft.markdown.replace(/^#{1,6}\s*/, "").trim(), expected_revision: conflicted.includes(id) ? unit.revision : draft.baseRevision });
+          else if (unit.type === "document_takeaway") operations.push({ op: "update_document_takeaway", takeaway: draft.markdown.replace(/^##\s*要点\s*\n?/, "").trim(), expected_revision: conflicted.includes(id) ? unit.revision : draft.baseRevision });
+          else if (unit.type === "topic") operations.push({ op: "update_topic", id, expected_revision: conflicted.includes(id) ? unit.revision : draft.baseRevision, title: draft.markdown.replace(/^#{1,6}\s*/, "").trim() });
           else operations.push({ op: "update_block", id, expected_revision: conflicted.includes(id) ? unit.revision : draft.baseRevision, markdown: draft.markdown, kind: unit.kind ?? "point" });
         }
         for (const id of structuralDeletes.current) {
           const unit = unitRef.current.find((item) => item.id === id);
-          if (unit) operations.push({ op: unit.type === "topic" ? "delete_topic" : "delete_block", id, expected_revision: unit.revision });
+          if (unit && (unit.type === "topic" || unit.type === "block")) operations.push({ op: unit.type === "topic" ? "delete_topic" : "delete_block", id, expected_revision: unit.revision });
         }
-        await controller.mutate("/document/edits", "POST", { expected_note_revision: snapshot.note_revision, request_id: newRequestId(), operations });
-        for (const [id, draft] of pending) if (draftRef.current[id]?.requestId === draft.requestId) delete draftRef.current[id];
+        if (operations.length) await controller.mutate("/document/edits", "POST", { expected_note_revision: snapshot.note_revision, request_id: requestId, operations });
+        for (const id of savedDraftIds) {
+          const draft = pending.find(([pendingId]) => pendingId === id)?.[1];
+          const unit = unitRef.current.find((item) => item.id === id);
+          if (draft && draftRef.current[id]?.requestId === draft.requestId) delete draftRef.current[id];
+          else if (draft && unit && draftRef.current[id]) draftRef.current[id] = { ...draftRef.current[id], baseRevision: unit.revision + 1 };
+        }
         structuralDeletes.current.clear();
         localStorage.removeItem(structuralDraftKey(snapshot.session_id));
         persistDrafts();
         setConflicted([]); setSaveState(Object.keys(draftRef.current).length ? "保存中…" : "保存済み"); onError(null);
-        return;
-      }
-      for (const [id, draft] of pending) {
-        if (conflicted.includes(id) && !force) { blocked = true; continue; }
-        const unit = unitRef.current.find((item) => item.id === id);
-        if (!unit) continue;
-        const expected = conflicted.includes(id) ? unit.revision : draft.baseRevision;
-        const requestId = conflicted.includes(id) ? newRequestId() : draft.requestId;
-        if (unit.type === "topic") {
-          const title = draft.markdown.replace(/^#{1,6}\s*/, "").trim();
-          await controller.mutate(`/topics/${encodeURIComponent(id)}`, "PATCH", { title, expected_revision: expected, request_id: requestId });
-        } else {
-          const topic = snapshot.topics.find((item) => item.id === unit.topic_id);
-          await controller.mutate(`/blocks/${encodeURIComponent(id)}`, "PATCH", { content_md: draft.markdown, kind: unit.kind ?? topic?.blocks.find((block) => block.id === id)?.kind ?? "point", expected_revision: expected, request_id: requestId });
-        }
-        if (draftRef.current[id]?.requestId === draft.requestId) delete draftRef.current[id];
-        else if (draftRef.current[id]) draftRef.current[id] = { ...draftRef.current[id], baseRevision: unit.revision + 1 };
-        persistDrafts();
       }
       setConflicted([]); setSaveState(Object.keys(draftRef.current).length ? "保存中…" : "保存済み"); onError(null);
     } catch (cause) {
@@ -317,7 +387,7 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
       setSaveState("競合または接続エラー · 入力を保持中"); onError(message);
       await controller.refresh();
     } finally { inFlight.current = false; if (!failed && !blocked && Object.keys(draftRef.current).length) queueSave(); }
-  }, [controller, editor, snapshot, conflicted, onError]);
+  }, [controller, editor, snapshot, conflicted, editingUnitId, onError]);
   saveRef.current = savePending;
 
   // Reconcile one server semantic unit at a time. A dirty unit is never replaced.
@@ -341,18 +411,55 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
     });
     const currentIds = [...current.keys()];
     const remove = currentIds.filter((id) => !visibleUnits.some((unit) => unit.id === id) && !draftRef.current[id]).map((id) => ({ id, range: current.get(id)! }));
+    const focusedInEditor = editorFocused.current || editor.view.hasFocus();
+    const selectionAnchor = editor.state.selection.anchor;
+    const selectionUnitId = [...current.entries()].find(([, range]) => selectionAnchor > range.from && selectionAnchor < range.to)?.[0] ?? null;
+    const nativeSelection = window.getSelection();
+    const nativeAnchor = nativeSelection?.anchorNode;
+    const nativeElement = nativeAnchor instanceof Element ? nativeAnchor : nativeAnchor?.parentElement;
+    const nativeUnit = nativeElement && editor.view.dom.contains(nativeElement) ? nativeElement.closest<HTMLElement>("[data-semantic-unit-id]") : null;
+    // The browser's caret can be ahead of ProseMirror's selection during an
+    // End key event. Protect that actual DOM unit before mapping a remote edit.
+    const protectedId = focusedInEditor ? nativeUnit?.dataset.semanticUnitId ?? selectionUnitId ?? editingUnitId : null;
     if (!replacements.length && !remove.length && (currentIds.length > 0 || visibleUnits.length === 0)) return;
     const view = editor.view;
-    const hadFocus = view.hasFocus();
+    const hadFocus = focusedInEditor;
     const scrollElement = document.querySelector<HTMLElement>(".seam-document-scroll");
     const previousScrollTop = scrollElement?.scrollTop;
+    const visibleAnchor = scrollElement ? [...scrollElement.querySelectorAll<HTMLElement>("[data-semantic-unit-id]")].find((element) => element.getBoundingClientRect().bottom > scrollElement.getBoundingClientRect().top) : null;
+    const anchorId = visibleAnchor?.dataset.semanticUnitId;
+    const anchorTop = visibleAnchor?.getBoundingClientRect().top;
+    const anchorRangeBefore = anchorId ? current.get(anchorId) : undefined;
+    let anchorMoved = false;
+    const restoreScroll = () => {
+      if (scrollElement && !anchorMoved && previousScrollTop !== undefined) {
+        // A change below the visible anchor must not cause a scroll correction.
+        // Layout can settle after dispatch; using its transient bounding box
+        // would otherwise scroll the document by a few dozen pixels.
+        scrollElement.scrollTop = previousScrollTop;
+      } else if (scrollElement && anchorId && anchorTop !== undefined) {
+        const anchorAfter = scrollElement.querySelector<HTMLElement>(`[data-semantic-unit-id="${CSS.escape(anchorId)}"]`);
+        if (anchorAfter) scrollElement.scrollTop += anchorAfter.getBoundingClientRect().top - anchorTop;
+      } else if (scrollElement && previousScrollTop !== undefined) scrollElement.scrollTop = previousScrollTop;
+    };
+    const protectedRange = protectedId ? current.get(protectedId) : undefined;
+    const protectedSelection = protectedRange && focusedInEditor ? {
+      anchor: editor.state.selection.anchor - protectedRange.from - 1,
+      head: editor.state.selection.head - protectedRange.from - 1,
+    } : null;
+    const nativeBookmark = nativeSelection?.anchorNode && nativeSelection.focusNode ? {
+      anchorNode: nativeSelection.anchorNode,
+      anchorOffset: nativeSelection.anchorOffset,
+      focusNode: nativeSelection.focusNode,
+      focusOffset: nativeSelection.focusOffset,
+    } : null;
     let tr = editor.state.tr;
     const bootstrap = currentIds.length === 0 && visibleUnits.length > 0;
     if (bootstrap) tr = tr.replaceWith(0, tr.doc.content.size, visibleUnits.flatMap((unit) => nodesForMarkdown(editor, { ...unit, markdown: draftRef.current[unit.id]?.markdown ?? unit.markdown })));
     else {
       const mappedActions = [
-        ...remove.map(({ range }) => ({ from: range.from, to: range.to, type: "delete" as const })),
-        ...replacements.flatMap(({ unit, existing }) => existing ? [{ from: existing.from, to: existing.to, type: "replace" as const, unit }] : []),
+        ...remove.filter(({ id }) => id !== protectedId).map(({ range }) => ({ from: range.from, to: range.to, type: "delete" as const })),
+        ...replacements.flatMap(({ unit, existing }) => existing && unit.id !== protectedId ? [{ from: existing.from, to: existing.to, type: "replace" as const, unit }] : []),
       ].sort((a, b) => b.from - a.from);
       for (const action of mappedActions) {
         if (action.type === "delete") tr = tr.delete(action.from, action.to);
@@ -364,12 +471,43 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
     }
     if (visibleUnits.length === 0 && tr.doc.childCount === 0) tr = tr.insert(0, editor.schema.nodes.paragraph.create());
     if (tr.docChanged) {
-      tr.setSelection(editor.state.selection.map(tr.doc, tr.mapping));
+      anchorMoved = !!anchorRangeBefore && tr.mapping.map(anchorRangeBefore.from) !== anchorRangeBefore.from;
+      let selection = editor.state.selection.map(tr.doc, tr.mapping);
+      if (protectedSelection && protectedId) {
+        let unitRange: { from: number; to: number } | null = null;
+        tr.doc.forEach((node, offset) => {
+          if (node.attrs.semanticUnitId === protectedId) unitRange = { from: unitRange?.from ?? offset, to: offset + node.nodeSize };
+        });
+        if (unitRange) {
+          const range = unitRange as { from: number; to: number };
+          const anchor = Math.max(range.from + 1, Math.min(range.to - 1, range.from + 1 + protectedSelection.anchor));
+          const head = Math.max(range.from + 1, Math.min(range.to - 1, range.from + 1 + protectedSelection.head));
+          try { selection = TextSelection.create(tr.doc, anchor, head); } catch {}
+        }
+      }
+      tr.setSelection(selection);
       view.dispatch(tr.setMeta("addToHistory", false).setMeta("seamRemote", true));
-      if (hadFocus && !view.hasFocus()) view.focus();
-      if (scrollElement && previousScrollTop !== undefined) scrollElement.scrollTop = previousScrollTop;
+      if (hadFocus) {
+        const restoreFocusAndSelection = () => {
+          // ProseMirror's focus() can scroll the selection into view after our
+          // anchor restoration. Focus the editable DOM without browser scroll;
+          // the transaction and bookmark already restored its selection.
+          if (editorFocused.current) view.dom.focus({ preventScroll: true });
+          if (nativeBookmark && nativeBookmark.anchorNode.isConnected && nativeBookmark.focusNode.isConnected && view.dom.contains(nativeBookmark.anchorNode) && view.dom.contains(nativeBookmark.focusNode)) {
+            window.getSelection()?.setBaseAndExtent(nativeBookmark.anchorNode, nativeBookmark.anchorOffset, nativeBookmark.focusNode, nativeBookmark.focusOffset);
+          }
+        };
+        restoreFocusAndSelection();
+        restoreScroll();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (editorFocused.current && nativeBookmark && nativeBookmark.anchorNode.isConnected && nativeBookmark.focusNode.isConnected && view.dom.contains(nativeBookmark.anchorNode) && view.dom.contains(nativeBookmark.focusNode)) {
+            window.getSelection()?.setBaseAndExtent(nativeBookmark.anchorNode, nativeBookmark.anchorOffset, nativeBookmark.focusNode, nativeBookmark.focusOffset);
+          }
+          restoreScroll();
+        }));
+      }
     }
-  }, [editor, units]);
+  }, [editor, units, editingUnitId]);
 
   useEffect(() => {
     if (!editor) return;
@@ -382,7 +520,7 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
   }, [editor, units]);
   useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
 
-  const topics = snapshot.topics.slice().sort((a, b) => a.position - b.position);
+  const topics = snapshot.topics.filter((topic) => !(snapshot.document?.takeaway && /^(会議の要点|要点|概要|summary)$/i.test(topic.title.trim()))).slice().sort((a, b) => a.position - b.position);
   const structureAction = async (path: string, method: string, body: Record<string, unknown>) => {
     try { await controller.mutate(path, method, body); onError(null); return true; }
     catch (cause) { onError(cause instanceof Error ? cause.message : "構成の変更を保存できませんでした"); return false; }
@@ -419,7 +557,7 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
     </aside>
     <main className="seam-document-scroll">
       <div className="seam-document-inner">
-        <div className="seam-document-heading"><div><h1>{(snapshot as LiveSnapshot & { document?: { title?: string } }).document?.title || "議論ノート"}</h1><p>{snapshot.processing ? "議論を整理しています" : "会議中に編集できます"}</p></div><span className="seam-save-state" role="status" aria-live="polite">{saveState}{draftVersion > 0 && conflicted.length > 0 ? ` · ${conflicted.length}件の競合` : ""}</span></div>
+        <div className="seam-document-heading"><p>{snapshot.processing ? "議論を整理しています" : "会議中に編集できます"}</p><span className="seam-save-state" role="status" aria-live="polite">{saveState}{draftVersion > 0 && conflicted.length > 0 ? ` · ${conflicted.length}件の競合` : ""}</span></div>
         {conflicted.length > 0 && <div className="seam-document-conflict" role="status"><span>サーバー側もこの範囲を更新しました。あなたの入力は端末に保持しています。</span><button type="button" onClick={() => { setConflicted([]); void savePending(true); }}>自分の入力を保存</button></div>}
         {suggestionFeedback && <p className="seam-suggestion-feedback" role="status" aria-live="polite">{suggestionFeedback}</p>}
         {pendingSuggestions.length > 0 && <details className="seam-suggestion-review">
@@ -458,7 +596,7 @@ export function LiveNoteDocumentEditor({ controller, snapshot, onError }: { cont
           </section>)}
           {topics.length === 0 && <p>最初の論点を追加すると、会議ノートを整理できます。</p>}
         </details>
-        {units.some((unit) => unit.source_segments?.length || unit.semantic_role || unit.epistemic_state) && <details className="seam-evidence-panel"><summary>根拠と内容の状態</summary>{units.filter((unit) => unit.source_segments?.length || unit.semantic_role || unit.epistemic_state).map((unit) => <div key={unit.id}><strong>{unit.type === "topic" ? snapshot.topics.find((topic) => topic.id === unit.id)?.title : snapshot.topics.flatMap((topic) => topic.blocks).find((block) => block.id === unit.id)?.content_md.split("\n")[0]}</strong><span>{unit.semantic_role || ""}{unit.epistemic_state ? ` · ${unit.epistemic_state}` : ""}</span>{unit.source_segments?.length ? <small>根拠の発話: {unit.source_segments.join(", ")}</small> : null}</div>)}</details>}
+        {units.some((unit) => unit.source_segments?.length || unit.semantic_role || unit.epistemic_state) && <details className="seam-evidence-panel"><summary>根拠と内容の状態</summary>{units.filter((unit) => unit.source_segments?.length || unit.semantic_role || unit.epistemic_state).map((unit) => { const block = snapshot.topics.flatMap((topic) => topic.blocks).find((item) => item.id === unit.id); return <div key={unit.id}><strong>{unit.type === "topic" ? snapshot.topics.find((topic) => topic.id === unit.id)?.title : block?.content_md.split("\n")[0] || unit.markdown.split("\n")[0]}</strong><span>{unit.semantic_role || ""}{unit.epistemic_state ? ` · ${unit.epistemic_state}` : ""}</span>{unit.source_segments?.length ? <small>根拠の発話: {unit.source_segments.join(", ")}</small> : null}</div>; })}</details>}
         {topics.length === 0 && <div className="seam-document-empty">確定した発話を、意味ごとに整理したノートがここに表示されます。</div>}
       </div>
     </main>

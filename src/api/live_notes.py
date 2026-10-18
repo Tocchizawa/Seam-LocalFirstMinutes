@@ -139,7 +139,7 @@ async def resolve(session_id: str, suggestion_id: str, body: HumanOperation):
 
 class Control(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["pause", "resume", "flush", "retry"]
+    action: Literal["pause", "resume", "flush", "retry", "consolidate"]
 
 
 @router.post("/{session_id}/control")
