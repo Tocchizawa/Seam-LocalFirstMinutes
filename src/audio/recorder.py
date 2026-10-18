@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+import re
 import shutil
+import subprocess
 import threading
 import time
 import wave
@@ -95,6 +97,21 @@ def _wav_duration_sec(path: Path) -> float:
 def _audio_duration_sec(path: Path) -> float:
     if path.suffix.lower() == ".flac":
         return _flac_duration_sec(path)
+    if path.suffix.lower() == ".mp3":
+        # The bundled ffmpeg is available in packaged builds; ffprobe is not.
+        # Inspect the header only rather than decoding a whole meeting.
+        try:
+            result = subprocess.run(
+                [FFMPEG, "-hide_banner", "-i", str(path)],
+                capture_output=True, text=True, timeout=5,
+            )
+            match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
+            if match:
+                hours, minutes, seconds = map(float, match.groups())
+                return hours * 3600 + minutes * 60 + seconds
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return 0.0
     return _wav_duration_sec(path)
 
 

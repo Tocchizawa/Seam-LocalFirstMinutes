@@ -2,10 +2,16 @@
 import os
 import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 import httpx
 
-BASE = "http://127.0.0.1:18900"
+BASE = os.environ.get("SEAM_TEST_BASE", "http://127.0.0.1:18900")
+_fixture_dir = tempfile.TemporaryDirectory(prefix="seam-api-fixtures-")
+FIXTURE = Path(_fixture_dir.name).resolve()
+(FIXTURE / "repo").mkdir()
+(FIXTURE / "docs").mkdir()
 PASS = 0
 FAIL = 0
 
@@ -92,12 +98,12 @@ s = r.json()
 assert_json("whisper.model default", s, "whisper.model", "medium")
 assert_json("whisper.language default", s, "whisper.language", "ja")
 assert_json("whisper.device default", s, "whisper.device", "auto")
-assert_json("whisper.streaming_chunk_sec", s, "whisper.streaming_chunk_sec", 5)
+assert_json("whisper.streaming.max_chunk_ms", s, "whisper.streaming.max_chunk_ms", 12000)
 assert_json("ollama.context_model", s, "ollama.context_model", "qwen3:8b")
-assert_json("ollama.minutes_model", s, "ollama.minutes_model", "qwen3:8b")
+assert_json("minutes_ai.ollama.model", s, "minutes_ai.ollama.model", "qwen3:8b")
 assert_json("ollama.base_url", s, "ollama.base_url", "http://localhost:11434")
 assert_json("server.host", s, "server.host", "127.0.0.1")
-assert_json("server.port", s, "server.port", 18900)
+assert_json("server.port", s, "server.port", int(os.environ.get("SEAM_TEST_PORT", "18900")))
 assert_json("recording.sample_rate", s, "recording.sample_rate", 16000)
 assert_json("agent.max_steps", s, "agent.max_steps", 15)
 assert_json("agent.max_context_tokens", s, "agent.max_context_tokens", 28000)
@@ -111,7 +117,7 @@ s = r.json()
 assert_json("updated whisper.model", s, "whisper.model", "small")
 assert_json("preserved whisper.language", s, "whisper.language", "ja")
 assert_json("preserved ollama.context_model", s, "ollama.context_model", "qwen3:8b")
-assert_json("preserved server.port", s, "server.port", 18900)
+assert_json("preserved server.port", s, "server.port", int(os.environ.get("SEAM_TEST_PORT", "18900")))
 
 # 部分更新（nested deep merge）
 r = client.put("/api/settings", json={"ollama": {"context_model": "qwen3:4b"}})
@@ -136,17 +142,17 @@ assert_len("empty list", r.json(), 0)
 print("\n[5] Projects — 作成 (プロジェクト1)")
 r = client.post("/api/projects", json={
     "name": "えがいて",
-    "repo_path": "/tmp/seam-test-repo",
-    "output_dir": "/tmp/seam-test-output1",
-    "doc_dirs": ["/tmp/seam-test-docs"],
+    "repo_path": str(FIXTURE / "repo"),
+    "output_dir": str(FIXTURE / "output1"),
+    "doc_dirs": [str(FIXTURE / "docs")],
     "members": [{"name": "とちざわ", "role": "リード"}],
     "glossary": ["Supabase: BaaS", "OG画像: プレビュー"],
 })
 assert_status("POST /api/projects", 201, r)
 p1 = r.json()
 assert_json("project name", p1, "name", "えがいて")
-assert_json("repo_path", p1, "repo_path", "/tmp/seam-test-repo")
-assert_json("output_dir", p1, "output_dir", "/tmp/seam-test-output1")
+assert_json("repo_path", p1, "repo_path", str(FIXTURE / "repo"))
+assert_json("output_dir", p1, "output_dir", str(FIXTURE / "output1"))
 assert_len("doc_dirs", p1["doc_dirs"], 1)
 assert_len("members", p1["members"], 1)
 assert_json("member name", p1["members"][0], "name", "とちざわ")
@@ -155,13 +161,13 @@ assert_len("glossary", p1["glossary"], 2)
 assert_true("id is non-empty string", isinstance(p1["id"], str) and len(p1["id"]) > 0)
 assert_true("created_at is set", len(p1["created_at"]) > 0)
 assert_true("updated_at is set", len(p1["updated_at"]) > 0)
-assert_true("output_dir auto-created", os.path.isdir("/tmp/seam-test-output1"))
+assert_true("output_dir auto-created", os.path.isdir(str(FIXTURE / "output1")))
 P1_ID = p1["id"]
 
 print("\n[6] Projects — 作成 (プロジェクト2, minimal)")
 r = client.post("/api/projects", json={
     "name": "みらもる",
-    "output_dir": "/tmp/seam-test-output2",
+    "output_dir": str(FIXTURE / "output2"),
 })
 assert_status("POST minimal project", 201, r)
 p2 = r.json()
@@ -195,8 +201,8 @@ assert_status("PUT /api/projects/{id}", 200, r)
 p1u = r.json()
 assert_json("updated name", p1u, "name", "えがいて v2")
 assert_len("updated glossary", p1u["glossary"], 3)
-assert_json("preserved repo_path", p1u, "repo_path", "/tmp/seam-test-repo")
-assert_json("preserved output_dir", p1u, "output_dir", "/tmp/seam-test-output1")
+assert_json("preserved repo_path", p1u, "repo_path", str(FIXTURE / "repo"))
+assert_json("preserved output_dir", p1u, "output_dir", str(FIXTURE / "output1"))
 assert_len("preserved doc_dirs", p1u["doc_dirs"], 1)
 assert_len("preserved members", p1u["members"], 1)
 
@@ -213,7 +219,7 @@ assert_status("PUT nonexistent", 404, r)
 print("\n[13] Projects — 削除 (output保持)")
 r = client.delete(f"/api/projects/{P2_ID}")
 assert_status("DELETE /api/projects/{id}", 200, r)
-assert_true("output_dir preserved", os.path.isdir("/tmp/seam-test-output2"))
+assert_true("output_dir preserved", os.path.isdir(str(FIXTURE / "output2")))
 
 r = client.get("/api/projects")
 assert_len("1 project after delete", r.json(), 1)
@@ -221,7 +227,7 @@ assert_len("1 project after delete", r.json(), 1)
 print("\n[14] Projects — 削除 (output削除)")
 r = client.delete(f"/api/projects/{P1_ID}?delete_output=true")
 assert_status("DELETE with delete_output", 200, r)
-assert_true("output_dir deleted", not os.path.isdir("/tmp/seam-test-output1"))
+assert_true("output_dir deleted", not os.path.isdir(str(FIXTURE / "output1")))
 
 r = client.get("/api/projects")
 assert_len("0 projects after all deleted", r.json(), 0)
@@ -455,7 +461,7 @@ client.delete("/api/minutes/test-minutes-002")
 print("\n[45] Edge — 日本語プロジェクト名")
 r = client.post("/api/projects", json={
     "name": "超長いプロジェクト名テスト用あいうえおかきくけこ",
-    "output_dir": "/tmp/seam-test-long",
+    "output_dir": str(FIXTURE / "long"),
 })
 assert_status("POST long Japanese name", 201, r)
 long_id = r.json()["id"]
@@ -466,7 +472,7 @@ client.delete(f"/api/projects/{long_id}?delete_output=true")
 print("\n[46] Edge — 特殊文字を含むプロジェクト")
 r = client.post("/api/projects", json={
     "name": 'テスト "quotes" & <angle>',
-    "output_dir": "/tmp/seam-test-special",
+    "output_dir": str(FIXTURE / "special"),
 })
 assert_status("POST special chars", 201, r)
 spec_id = r.json()["id"]
@@ -484,8 +490,8 @@ print(f"  結果: {PASS} passed, {FAIL} failed")
 print("=========================================")
 
 # Cleanup
-shutil.rmtree("/tmp/seam-test-output2", ignore_errors=True)
-shutil.rmtree("/tmp/seam-test-long", ignore_errors=True)
-shutil.rmtree("/tmp/seam-test-special", ignore_errors=True)
+shutil.rmtree(str(FIXTURE / "output2"), ignore_errors=True)
+shutil.rmtree(str(FIXTURE / "long"), ignore_errors=True)
+shutil.rmtree(str(FIXTURE / "special"), ignore_errors=True)
 
 sys.exit(1 if FAIL > 0 else 0)

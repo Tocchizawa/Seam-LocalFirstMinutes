@@ -121,6 +121,9 @@ class FakeStartRecorder:
 
 
 class FailingDb:
+    def has_live_note(self, **_kwargs) -> bool:
+        return False
+
     def insert_minutes(self, _data: dict) -> None:
         raise RuntimeError("database is locked")
 
@@ -129,6 +132,9 @@ class FailingDb:
 
 
 class CapturingDb:
+    def has_live_note(self, **_kwargs) -> bool:
+        return False
+
     def __init__(self) -> None:
         self.records: dict[str, dict] = {}
 

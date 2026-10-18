@@ -69,6 +69,31 @@ DMG を開いて `Seam.app` を `Applications` にドラッグするだけでイ
 - 用語集と誤転写補正ルール（`wrong` → `correct`）の管理
 - ドキュメント群からの用語集候補の自動抽出
 
+### 6. リアルタイム議論ノート（任意）
+
+- 録音中の確定発話をテーマ別に蓄積し、以前の話題に戻った場合は元の見出しへ追記
+- 提案・決定・懸念・未解決事項・アクションを区別し、発話の根拠を保持
+- 見出しとMarkdownブロックを直接編集。手動変更はAIから保護し、競合案は保留
+- 録音停止後も同じノートを閲覧・編集・検索・Markdown出力
+- Codex CLI / Claude Code CLI の既存ログインとモデル設定を使用（追加APIキー不要）
+
+初期状態は **OFF** です。設定の「リアルタイム議論ノート」で「次の録音でライブノートを使用」をONにし、
+CodexまたはClaude Codeを選択し、送信内容の説明に同意して保存してください。
+「ライブノートのモデル」で録音後要約とは別のモデルを選べます。Codexでは頻繁な更新向けに
+GPT-6 Luna（`gpt-6-luna`）を推奨候補として表示します。未指定なら要約設定を継承します。
+候補がない場合はモデルIDを直接入力できます。利用可否はCLI・アカウントによって異なります。
+「CLIの利用可否を確認（推論なし）」で必要なCLI機能を確認できます。既存の要約AIがCLIなら設定を引き継げます。
+方式・provider・modelは録音開始時に固定され、設定変更は次回の会議から適用します。
+
+Whisperの音声認識はローカルですが、**発話テキスト・ノート文脈は選択したLLM提供元へ送信されます**。
+会議参加者への録音通知・同意と、CLIの契約・利用枠を確認してください。
+必要なCLI制限に対応しない版、認証切れ、利用制限ではAI整理を停止し、録音・文字起こし・手動編集を続けます。
+
+AI整理は通常20〜60秒程度の発話をまとめ、CLI応答後に反映します。秒単位の更新は保証しません。
+「AI一時停止」中も発話は保存されます。停止後に整理が残る場合は、保存済み議事録から再試行できます。
+ライブノートを使う会議では、従来の録音後全文要約による上書きを行いません。
+OFFの場合は従来の録音後要約を利用します。
+
 ## 実装状況メモ
 
 - `Gemini` は設定UI/APIの枠はありますが、要約本体は未対応です
@@ -162,8 +187,16 @@ pnpm build
 ## 最低限の検証
 
 ```bash
+uv run python -m pytest tests/ -q
+uv run python scripts/run_tests.py --scripts
+uv run python scripts/run_tests.py --api
+pnpm -C gui build
 ./scripts/oss_preflight.sh
 ```
+
+Python試験は一時HOMEで実行し、既存の直接実行型チェックも別プロセスで集計します。
+実音声・実サービス依存試験の前提条件と、ライブノートの手動確認手順は
+[docs/live-notes-testing.md](./docs/live-notes-testing.md) を参照してください。
 
 高速チェック（GUI build 省略）:
 
@@ -177,6 +210,9 @@ SKIP_GUI_BUILD=1 ./scripts/oss_preflight.sh
 - 設計: [docs/architecture.md](./docs/architecture.md)
 - データモデル: [docs/data-model.md](./docs/data-model.md)
 - 要約設計: [docs/summarize-design.md](./docs/summarize-design.md)
+- ライブノート仕様・受け入れ条件: [docs/SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md](./docs/SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md)
+- ライブノートの検証・復旧手順: [docs/live-notes-testing.md](./docs/live-notes-testing.md)
+- 実装判断・DoDとの対応・検証範囲: [docs/live-notes-implementation.md](./docs/live-notes-implementation.md)
 
 ## 開発・運用
 

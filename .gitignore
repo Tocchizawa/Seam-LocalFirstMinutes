@@ -97,3 +97,6 @@ Thumbs.db
 *.tmp
 *.bak
 .cache/
+
+# Local JavaScript package cache
+.pnpm-store/

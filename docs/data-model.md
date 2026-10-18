@@ -1,5 +1,34 @@
 # Seam - データモデル設計書
 
+## リアルタイム議論ノートの正本
+
+録音開始時の `session_id` を正本キーとし、既存 `minutes` と同じSQLiteへ追加型マイグレーションで保存する。
+マイグレーションは繰り返し実行可能とし、既存minutes・FTSを維持する。
+詳細DDLとAPI契約は [ライブノート設計書 第6・11章](./SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md) を参照。
+
+| テーブル群 | 保持するもの |
+|---|---|
+| `live_note_sessions` | 会議ID、project/minutes関連、固定provider/model、状態、note revision、処理済みseq |
+| `live_note_segments` | 確定発話の安定ID・会議内seq・時刻・テキスト・話者 |
+| `live_note_topics` / `live_note_blocks` | stable ID、順序、所有者human/ai、局所revision、論理削除、Markdown、種別、根拠発話 |
+| `live_note_batches` | 未処理の連続seq範囲、実行状態、試行回数、失敗理由 |
+| `live_note_events` / `live_note_suggestions` | コミット単位の履歴・Undo情報、保留した競合案と解決状態 |
+| 操作・リクエストの一意キー | AI再試行・手動保存再送による二重適用防止 |
+
+`minutes.id` は停止後に関連付ける。ライブ議事録の `minutes.summary` はtopic/blockから生成した
+検索・従来エクスポート互換用の派生Markdownであり、編集正本ではない。
+関連するminutesへの投影とライブノート更新は同じトランザクションで行う。
+既存のライブノートなし議事録では `minutes.summary` を従来どおり編集する。
+
+手動編集は `request_id` と `expected_revision` を指定し、人間所有へ変更する。
+削除は論理削除とし履歴からUndoできる。AIに削除権限は与えず、存在しない発話根拠も受理しない。
+ライブノートはセッション作業ディレクトリの削除対象から独立して永続保持する。
+
+設定は独立した `live_notes` キーに保存する。初期値は `enabled: false`、`provider: inherit`。
+既定のバッチ間隔20/35/60秒、最大6000文字・20操作・90呼び出し/時、タイムアウト120秒、
+構造修復1回、手動保存debounce500ms。provider/modelは会議開始時に固定する。
+送信同意がない会議ではAI呼び出しを開始しない。
+
 ## 1. 設定ファイル (YAML)
 
 ### 1.1 グローバル設定 (`~/.seam/config.yaml`)
@@ -269,7 +298,7 @@ def build_transcript_text(transcript: list[dict]) -> str:
 
 ---
 
-## 4. Markdown 出力（正本）
+## 4. Markdown 出力（SQLiteからの投影）
 
 プロジェクト設定の `output_dir` に保存（存在しなければ自動作成）。
 

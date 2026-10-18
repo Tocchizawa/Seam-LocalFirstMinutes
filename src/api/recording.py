@@ -375,7 +375,11 @@ def _write_session_meta(session_id: str, **fields) -> None:
         existing["session_id"] = session_id
         existing["updated_at"] = datetime.now(timezone.utc).isoformat()
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(existing, ensure_ascii=False))
+            handle.flush()
+            if existing.get("live_notes"):
+                os.fsync(handle.fileno())
         os.replace(tmp, path)
     except Exception as e:
         logger.warning("session_meta write failed [%s]: %s", session_id, e)
@@ -388,6 +392,27 @@ def _delete_session_meta(session_id: str) -> None:
         pass
 
 
+def _live_session_metadata(session_id: str) -> dict:
+    """Pinned mode/config survives a failed live DB initialization and restart."""
+    pipeline = _pipelines.get(session_id) or {}
+    if "live_notes" in pipeline:
+        return pipeline
+    try:
+        return json.loads((_session_dir(session_id) / SESSION_META_FILENAME).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _uses_live_notes(session_id: str) -> bool:
+    return bool(_live_session_metadata(session_id).get("live_notes", False))
+
+
+def _clear_saved_session_meta(session_id: str, linked: dict | None) -> None:
+    # Preserve the recovery marker across a crash/DB error between INSERT and link.
+    if not _uses_live_notes(session_id) or (linked and linked.get("minutes_id")):
+        _delete_session_meta(session_id)
+
+
 def _append_transcript_segment(session_id: str, segment: dict) -> None:
     """確定 segment を transcript.jsonl に追記。finalize 中クラッシュ時のフォールバック用。"""
     try:
@@ -397,6 +422,9 @@ def _append_transcript_segment(session_id: str, segment: dict) -> None:
         path = d / TRANSCRIPT_JSONL_FILENAME
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(segment, ensure_ascii=False) + "\n")
+            f.flush()
+            if (_pipelines.get(session_id) or {}).get("live_notes", config.get("live_notes", "enabled", default=False)):
+                os.fsync(f.fileno())
     except Exception as e:
         logger.warning("transcript jsonl append failed [%s]: %s", session_id, e)
 
@@ -635,11 +663,55 @@ async def _stream_levels() -> None:
         await asyncio.sleep(0.1)
 
 
+async def _abort_live_note(session_id: str):
+    try:
+        from src.storage.db import db
+        if db.has_live_note(session_id=session_id):
+            from src.live_notes.coordinator import get_coordinator
+            await get_coordinator().call("state", session_id, status="aborted", stopped=1)
+    except Exception:
+        logger.warning("live note abort deferred [%s]", session_id)
+
+
+async def _live_note_call(session_id: str, action: str, *args, **kwargs):
+    """Live failures must never propagate into recording/audio finalization."""
+    from src.storage.db import db
+    try:
+        exists = db.has_live_note(session_id=session_id)
+        pinned = _live_session_metadata(session_id)
+        if not exists and not pinned.get("live_notes"):
+            return None
+        from src.live_notes.coordinator import get_coordinator
+        coordinator = get_coordinator()
+        if not exists:
+            await coordinator.start(session_id, pinned.get("project_id", "default"),
+                                    pinned["live_notes_settings"], pinned["live_notes_provider"])
+            # A transient start failure may have left earlier speech only in the journal.
+            previous = await asyncio.to_thread(_load_persisted_segments, session_id)
+            if previous:
+                await coordinator.ingest(session_id, previous)
+        if action == "initialize":
+            return await coordinator.call("snapshot", session_id)
+        return await getattr(coordinator, action)(session_id, *args, **kwargs)
+    except Exception as exc:
+        logger.warning("live note %s failed [%s]: %s", action, session_id, type(exc).__name__)
+        try:
+            await ws_manager.broadcast({"type": "live_note_error", "data": {
+                "session_id": session_id, "message": "議論ノート処理を再試行してください。音声と発話は保存されています"}})
+        except Exception:
+            pass
+        return None
+
+
 def _make_emit_segment(session_id: str):
+    emit_lock = asyncio.Lock()
     async def emit(segment: dict) -> None:
-        _append_transcript_segment(session_id, segment)
-        text_preview = (segment.get("text") or "")[:40]
-        logger.info("emit_segment[%s] %s", session_id, text_preview)
+        # Stable IDs are assigned before cross-thread scheduling by StreamingTranscriber.
+        segment.setdefault("segment_id", uuid.uuid4().hex)
+        # FIFO lock preserves upstream utterance order even when fsync is slow.
+        async with emit_lock:
+            await asyncio.to_thread(_append_transcript_segment, session_id, segment)
+            await _live_note_call(session_id, "ingest", [segment])
         try:
             await ws_manager.broadcast({
                 "type": "transcript_chunk",
@@ -805,6 +877,9 @@ async def _finalize_session(session_id: str) -> None:
             streamer_error = streamer.model_error
             streamer.cleanup()
 
+        await _live_note_call(session_id, "ingest", segments)
+        await _live_note_call(session_id, "stopped")
+
         # クリーンアップ
         _streamers.pop(session_id, None)
         _mixers.pop(session_id, None)
@@ -911,8 +986,9 @@ async def _finalize_session(session_id: str) -> None:
             if db.get_minutes(new_id) is None:
                 raise RuntimeError("inserted minutes not found")
             minutes_id = new_id
+            linked_live_note = await _live_note_call(session_id, "stopped", minutes_id)
             logger.info("Minutes saved: %s (%d segments)", session_id, len(transcript))
-            _delete_session_meta(session_id)
+            _clear_saved_session_meta(session_id, linked_live_note)
         except Exception as e:
             msg = f"DB保存に失敗しました: {e}"
             logger.error("Failed to save minutes [%s]: %s", session_id, e)
@@ -955,7 +1031,7 @@ async def _finalize_session(session_id: str) -> None:
 
         # 自動要約トリガー (auto_generate=true 時のみ)
         auto_gen = bool(config.get("minutes_ai", "auto_generate", default=True))
-        if minutes_id and auto_gen:
+        if minutes_id and auto_gen and not _uses_live_notes(session_id) and not db.has_live_note(session_id=session_id):
             try:
                 from src.summarize.runner import get_runner
 
@@ -1014,6 +1090,14 @@ async def start_recording(req: StartRequest) -> dict:
     session_id = sid
 
     pipeline = _new_pipeline(session_id, req.project_id, bool(req.capture_system))
+    pipeline["live_notes"] = bool(config.get("live_notes", "enabled", default=False))
+    if pipeline["live_notes"]:
+        from src.live_notes.models import LiveSettings, resolve_live_provider
+        live_settings = LiveSettings.model_validate(config.get("live_notes") or {}).model_dump()
+        minutes_ai = config.get("minutes_ai") or {}
+        provider, provider_config = resolve_live_provider(live_settings, minutes_ai)
+        pipeline["live_notes_settings"] = live_settings
+        pipeline["live_notes_provider"] = {"provider": provider, provider: provider_config}
     _pipelines[session_id] = pipeline
     _evict_completed_pipelines()
 
@@ -1024,6 +1108,8 @@ async def start_recording(req: StartRequest) -> dict:
         capture_system=bool(req.capture_system),
         mic_device=req.mic_device,
         state="recording",
+        live_notes=pipeline["live_notes"],
+        **({key: pipeline[key] for key in ("live_notes_settings", "live_notes_provider")} if pipeline["live_notes"] else {}),
     )
 
     # プロジェクトの用語集を取得 (initial_prompt として whisper に渡す)
@@ -1038,6 +1124,9 @@ async def start_recording(req: StartRequest) -> dict:
                 glossary.append(c.correct)
             if c.wrong and c.correct and c.wrong != c.correct:
                 corrections_list.append((c.wrong, c.correct))
+
+    if pipeline["live_notes"]:
+        await _live_note_call(session_id, "initialize")
 
     # streamer + mixer 立ち上げ
     model_name = config.get("whisper", "model", default="medium")
@@ -1076,6 +1165,7 @@ async def start_recording(req: StartRequest) -> dict:
     try:
         streamer.start(loop)
     except ResourceBusyError:
+        await _abort_live_note(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
         raise conflict(
@@ -1092,6 +1182,7 @@ async def start_recording(req: StartRequest) -> dict:
         except Exception:
             pass
         _cleanup_session(session_id)
+        await _abort_live_note(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
         raise conflict("MIXED_AUDIO_WRITER_FAILED", f"録音音声の保存準備に失敗: {e}")
@@ -1129,6 +1220,7 @@ async def start_recording(req: StartRequest) -> dict:
             code = "RECORDER_START_FAILED"
             message = f"録音開始失敗: {e}"
         _cleanup_session(session_id)
+        await _abort_live_note(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
         raise conflict(code, message)
@@ -1139,6 +1231,7 @@ async def start_recording(req: StartRequest) -> dict:
         except Exception as e:
             logger.warning("Failed to stop recorder after system audio start failure: %s", e)
         _cleanup_session(session_id)
+        await _abort_live_note(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
         raise conflict("SYSTEM_AUDIO_START_FAILED", f"内部音声の録音開始失敗: {system_error}")
@@ -1396,7 +1489,11 @@ async def _materialize_session_minutes(
 
     existing = db.get_minutes_by_session(session_id)
     if existing is not None:
-        return existing, {
+        segments = await asyncio.to_thread(_load_persisted_segments, session_id)
+        await _live_note_call(session_id, "ingest", segments)
+        linked = await _live_note_call(session_id, "stopped", existing["id"])
+        _clear_saved_session_meta(session_id, linked)
+        return db.get_minutes(existing["id"]) or existing, {
             "created": False,
             "used_audio": _pick_recovery_audio(_session_dir(session_id)) is not None,
             "used_segments": bool(existing.get("transcript")),
@@ -1472,16 +1569,15 @@ async def _materialize_session_minutes(
         "created_at": now,
         "updated_at": now,
     })
+    await _live_note_call(session_id, "ingest", segments)
+    linked = await _live_note_call(session_id, "stopped", minutes_id)
     minutes = db.get_minutes(minutes_id)
     if minutes is None:
         raise RuntimeError("minutes insert failed")
 
-    try:
-        (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-    except Exception:
-        pass
+    _clear_saved_session_meta(session_id, linked)
 
-    if transcript and bool(config.get("minutes_ai", "auto_generate", default=True)):
+    if transcript and not _uses_live_notes(session_id) and not db.has_live_note(session_id=session_id) and bool(config.get("minutes_ai", "auto_generate", default=True)):
         try:
             from src.summarize.runner import get_runner
 
@@ -1537,14 +1633,12 @@ async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
     session_id = meta.get("session_id") or session_dir.name
 
     if db.has_minutes_for_session(session_id):
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception:
-            pass
+        # INSERT may have committed immediately before a crash prevented linkage.
+        await _materialize_session_minutes(session_id, prefer_project_id=meta.get("project_id"))
         return False
 
     state = meta.get("state")
-    if state not in _RECOVERABLE_STATES:
+    if state not in _RECOVERABLE_STATES and not (meta.get("live_notes") and state == "recording"):
         logger.info(
             "[recovery] cleaning up unrecoverable session %s (state=%s)",
             session_id, state,
@@ -1564,10 +1658,12 @@ async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
         )
     except Exception as e:
         logger.info("[recovery] skipping session %s: %s", session_id, e)
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception:
-            pass
+        # A temporary DB or filesystem error must remain recoverable next launch.
+        if not meta.get("live_notes"):
+            try:
+                (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+            except Exception:
+                pass
         return False
 
     logger.info(

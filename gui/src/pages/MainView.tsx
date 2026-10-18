@@ -12,6 +12,7 @@ import { MinutesList } from "../components/MinutesList";
 import { DeviceSettingsModal } from "../components/DeviceSettingsModal";
 import { LatestSegmentPreview } from "../components/LatestSegmentPreview";
 import { Spinner } from "../components/Spinner";
+import { LiveNotesRecovery } from "../components/live-notes/LiveNotesRecovery";
 import { CheckCircle, X } from "@phosphor-icons/react";
 import { useRecording } from "../lib/recording-context";
 
@@ -32,7 +33,7 @@ export function MainView({
   onOpenMinutes, onOpenPipelineSession, onOpenLive,
 }: Props) {
   const {
-    recording, streamStatus,
+    recording, streamStatus, activeSessionId,
     setActiveSessionId, micDevice, setMicDevice,
     captureSystem, setCaptureSystem,
   } = useRecording();
@@ -316,6 +317,8 @@ export function MainView({
             onDismiss={() => setRecoveryDismissed(true)}
           />
       )}
+
+      <LiveNotesRecovery projectId={project.id} activeSessionId={recording ? activeSessionId : null} onOpen={onOpenPipelineSession} />
 
       {recording && <LatestSegmentPreview onExpand={onOpenLive} />}
       {debugMode && (

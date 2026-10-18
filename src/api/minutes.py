@@ -361,6 +361,8 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
 @router.patch("/{minutes_id}/summary")
 async def update_summary(minutes_id: str, body: SummaryUpdateRequest) -> dict:
     """ユーザーによる要約手動編集。LLM モデル列は更新しない(provenance を保持)。"""
+    if db.has_live_note(minutes_id=minutes_id):
+        raise conflict("LIVE_NOTE_MANAGED", "議論ノート専用エディターで編集してください")
     ok = db.update_summary(minutes_id, body.summary)
     if not ok:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
@@ -394,6 +396,9 @@ async def delete_minutes(minutes_id: str) -> dict:
         if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
             raise conflict("SESSION_ACTIVE", "この議事録のセッションは現在処理中のため削除できません")
 
+    if db.has_live_note(minutes_id=minutes_id):
+        from src.live_notes.coordinator import get_coordinator
+        await get_coordinator().remove(session_id)
     ok = db.delete_minutes(minutes_id)
     if not ok:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")

@@ -24,6 +24,10 @@ _COMMON_CLI_PATHS = (
     "~/.deno/bin",
     "~/.cargo/bin",
 )
+_MACOS_APP_CLI_PATHS = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
+    "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
+)
 
 
 def normalize_extra_args(raw: Any) -> list[str]:
@@ -114,6 +118,7 @@ def refresh_cli_environment(cfg: dict[str, Any] | None = None) -> str:
     shell_path_value = _read_login_shell_path(shell_path)
     add_many(_split_path(shell_path_value))
     add_many(_split_path(os.pathsep.join(_COMMON_CLI_PATHS)))
+    add_many(_split_path(os.pathsep.join(_MACOS_APP_CLI_PATHS)))
     add_many(_split_path(os.environ.get("PATH", "")))
 
     if merged:
