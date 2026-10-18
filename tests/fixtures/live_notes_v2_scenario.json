@@ -1,0 +1,230 @@
+{
+  "fixture_version": 1,
+  "title": "Live Notes v2 semantic organization evaluation",
+  "purpose": "Synthetic sequential transcript input for evaluating topic continuity, question state, correction handling, and document structure. This file contains transcript inputs and checkpoints only; it does not contain canned model responses or expected operation plans.",
+  "language": "ja",
+  "primary_scenario": {
+    "meeting_id": "synthetic-tech-meeting-001",
+    "scenario_type": "technical_explanation_with_question_resolution_and_topic_return",
+    "segments": [
+      {
+        "seq": 1,
+        "time_sec": 25,
+        "text": "NRI共通部品はmain.goの起動時に作って、gRPCサーバーを組み立てるところに渡している。"
+      },
+      {
+        "seq": 2,
+        "time_sec": 58,
+        "text": "それがNRIの受付ハンドラーまで届いているか、呼び出しを追って確認したい。"
+      },
+      {
+        "seq": 3,
+        "time_sec": 112,
+        "text": "NewGRPCServerに渡した後、その引数はどこで使っているんだっけ。"
+      },
+      {
+        "seq": 4,
+        "time_sec": 166,
+        "text": "同じところをもう一度確認すると、引数はアンダースコアで受けているように見える。"
+      },
+      {
+        "seq": 5,
+        "time_sec": 405,
+        "text": "NewNriPointの生成には引数を渡していない。なので共通部品はハンドラーに接続されていない、という理解でよさそう。"
+      },
+      {
+        "seq": 6,
+        "time_sec": 455,
+        "text": "質問を言い換えると、共通部品が生成されていることと、NRI受付側で使われることは別なんだね。"
+      },
+      {
+        "seq": 7,
+        "time_sec": 510,
+        "text": "grpcserver.NewServerは受付をまとめてgRPCサーバー本体を作る役割。NewNriPointはNRI用の受付部品を作る。"
+      },
+      {
+        "seq": 8,
+        "time_sec": 570,
+        "text": "処理順は、mainで依存を作る、NewGRPCServerへ渡す、そこで未使用、NewNriPointを引数なしで作る、最後に登録、だと思う。"
+      },
+      {
+        "seq": 9,
+        "time_sec": 650,
+        "text": "つなぐならNewGRPCServerで依存を保持してNewNriPointに渡し、ハンドラーで使う形が候補。ただし具体的な業務処理まで実装済みかは別途確認。"
+      },
+      {
+        "seq": 10,
+        "time_sec": 710,
+        "text": "ここまでの説明で、共通部品が未接続という質問には答えが出た。"
+      },
+      {
+        "seq": 11,
+        "time_sec": 775,
+        "text": "話題を切り替えて、設定ファイルの保存場所を確認しよう。"
+      },
+      {
+        "seq": 12,
+        "time_sec": 835,
+        "text": "設定はユーザーのホーム配下にあるconfig.yamlに保存される。"
+      },
+      {
+        "seq": 13,
+        "time_sec": 915,
+        "text": "さっきのNRIの話に戻ると、NewGRPCServerに渡された依存は実際には使われず、NewNriPointにも渡らない、が要点。"
+      },
+      {
+        "seq": 14,
+        "time_sec": 990,
+        "text": "さっき『NriDeps』と呼んだけど、画面の表記は『NriDependencies』に直しておいて。"
+      },
+      {
+        "seq": 15,
+        "time_sec": 1060,
+        "text": "NriDependenciesを使う接続方針はまだ候補で、コード確認と担当者・期限は決まっていない。"
+      }
+    ],
+    "checkpoints": [
+      {
+        "at_time_sec": 300,
+        "through_seq": 4,
+        "evaluation_focus": [
+          "one technical topic forms",
+          "repeated question is consolidated",
+          "question remains unanswered/open at this checkpoint",
+          "do not claim the later conclusion before supporting evidence"
+        ]
+      },
+      {
+        "at_time_sec": 720,
+        "through_seq": 10,
+        "evaluation_focus": [
+          "explain the flow and component roles",
+          "keep implementation direction distinct from verified implementation",
+          "retain evidence and uncertainty"
+        ]
+      },
+      {
+        "at_time_sec": 1080,
+        "through_seq": 15,
+        "evaluation_focus": [
+          "retain the settings topic separately",
+          "return to the existing NRI topic rather than duplicate it",
+          "apply the user correction to the displayed term",
+          "keep the proposed change tentative and avoid inventing owner or deadline"
+        ]
+      },
+      {
+        "at_time_sec": 1380,
+        "through_seq": 15,
+        "evaluation_focus": [
+          "final note remains organized by meaning",
+          "resolved question is not listed as open",
+          "manual correction persists",
+          "distinguish meeting claims from source-code verification"
+        ]
+      }
+    ],
+    "manual_correction_event": {
+      "after_seq": 14,
+      "event_type": "manual_block_update",
+      "request_id": "fixture-human-correction-001",
+      "target": {
+        "topic_ref": "existing NRI topic",
+        "block_ref": "term spelling"
+      },
+      "from": "NriDeps",
+      "to": "NriDependencies",
+      "expected_behavior": "Invoke the human-edit API after the AI-created block exists. Persist the correction as human-owned; a subsequent stale AI proposal must be rejected or surfaced as a conflict, never silently overwrite the corrected text.",
+      "harness_note": "Resolve concrete topic_id, block_id, and expected_revision from the prior snapshot at runtime; this fixture intentionally does not hardcode generated IDs."
+    }
+  },
+  "comparison_variation": {
+    "meeting_id": "synthetic-comparison-001",
+    "scenario_type": "option_comparison_with_pending_review",
+    "segments": [
+      {
+        "seq": 1,
+        "time_sec": 20,
+        "text": "A案は初期費用が低いが、運用担当を多く必要とする。"
+      },
+      {
+        "seq": 2,
+        "time_sec": 70,
+        "text": "B案は導入費用が高い一方、毎月の運用コストは低い。"
+      },
+      {
+        "seq": 3,
+        "time_sec": 125,
+        "text": "現時点ではB案がよさそう。ただし法務レビューを通してから決めたい。"
+      },
+      {
+        "seq": 4,
+        "time_sec": 190,
+        "text": "まだ正式決定ではなく、法務確認が終わるまで保留。"
+      }
+    ],
+    "checkpoints": [
+      {
+        "at_time_sec": 220,
+        "through_seq": 4,
+        "evaluation_focus": [
+          "use comparison structure rather than technical flow headings",
+          "preserve both tradeoffs",
+          "do not label B as a final decision",
+          "retain legal review as open/pending"
+        ]
+      }
+    ]
+  },
+  "outage_variation": {
+    "meeting_id": "synthetic-outage-001",
+    "scenario_type": "provider_outage_and_recovery",
+    "segments": [
+      {
+        "seq": 1,
+        "time_sec": 15,
+        "text": "APIのタイムアウトが増えている。"
+      },
+      {
+        "seq": 2,
+        "time_sec": 80,
+        "text": "データベース負荷が原因かもしれないので確認する。"
+      },
+      {
+        "seq": 3,
+        "time_sec": 145,
+        "text": "ライブAIが一時停止したので、発話は保存して整理はあとで再開する。"
+      },
+      {
+        "seq": 4,
+        "time_sec": 220,
+        "text": "確認したところデータベースではなく外部依存先の遅延だった。"
+      },
+      {
+        "seq": 5,
+        "time_sec": 300,
+        "text": "対処としてタイムアウトとリトライ設定を見直す。"
+      }
+    ],
+    "checkpoints": [
+      {
+        "at_time_sec": 180,
+        "through_seq": 3,
+        "evaluation_focus": [
+          "provider outage does not lose transcript input",
+          "do not imply AI note processing succeeded during outage"
+        ]
+      },
+      {
+        "at_time_sec": 360,
+        "through_seq": 5,
+        "evaluation_focus": [
+          "resume from retained segments without duplicate notes",
+          "mark database hypothesis as superseded or excluded in the resulting evaluation",
+          "record confirmed cause and proposed mitigation with evidence"
+        ]
+      }
+    ]
+  },
+  "evaluation_note": "Checkpoints describe what to assess, not exact expected Markdown. The 5-minute checkpoint intentionally ends before the answer; the answer appears after 6 minutes and is present by the 12-minute checkpoint. The final checkpoint is at 23 minutes. The manual correction is an explicit API event for the integration harness, not merely a transcript utterance. Check deterministic contract tests with provider stubs separately from real-provider semantic quality review. Fixture passages alone do not prove model quality, end-to-end behavior, or implementation completion."
+}

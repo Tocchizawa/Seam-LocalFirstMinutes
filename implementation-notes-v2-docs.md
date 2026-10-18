@@ -1,0 +1,37 @@
+# Live Notes v2 documentation and evaluation notes
+
+## Authoritative inputs
+
+- `docs/SEAM_LIVE_NOTES_V2_DESIGN.md` and `docs/SEAM_LIVE_NOTES_V2_GOLDEN_SAMPLE.md` are copied verbatim from the supplied handoff bundle. They define target behavior and illustrative output; the golden sample is not source-verified meeting truth.
+- `tests/fixtures/live_notes_v2_scenario.json` contains synthetic sequential transcript input and checkpoints. It does not encode canned provider output or exact expected final prose.
+- Current persisted and API contracts below are based on `src/live_notes/models.py`, `src/live_notes/repository.py`, `src/api/live_notes.py`, `implementation-notes-v2-backend.md`, and `implementation-notes-v2-ui.md` as inspected 2026-10-18. Automated status is summarized separately in `docs/live-notes-v2-report.md`.
+
+## Implemented data and operation contract
+
+SQLite topic/block rows remain canonical and v1 tables/manual APIs remain available. The additive migration adds block semantic metadata, first-class session/topic-scoped questions, batch kind, and finalization state; it preserves existing minutes and transcript content. Each block can carry `semantic_role`, `epistemic_state`, optional `resolution_state`, source-segment evidence, aliases/canonical terms, `verified_against_source`, `user_touched`, `protected`, supersession linkage, a v2 marker, and takeaway status. Questions carry open/answered/deferred/not-applicable state, associated answer node, evidence union, sequence and revision. Existing v1 kind labels remain the compatibility/rendering bridge.
+
+V2 model proposals use strict `SemanticOperationPlan` schema version 2, with ten operation types: `CREATE_TOPIC`, `UPSERT_KNOWLEDGE`, `RESOLVE_QUESTION`, `REVISE_CLAIM`, `MERGE_BLOCKS`, `MOVE_BLOCK`, `RESTRUCTURE_TOPIC`, `UPDATE_TAKEAWAY`, `SUGGEST_EDIT`, and `NO_CHANGE`. `SemanticOperation` validates type-specific fields; repository application validates IDs, same-session evidence, entity ownership/protection, and expected revisions transactionally. A committed plan is atomic and advances one note revision. Applied operation IDs are recorded for replay safety. The provider JSON schema mirrors runtime validation, including allowed `canonical_terms` on `RESOLVE_QUESTION` and `UPDATE_TAKEAWAY`; a captured regression response is at `tests/fixtures/v2/model-response-canonical-terms.json`. Plan-local `new:N` topic references resolve before operations are applied, allowing an upsert to precede its create operation in the plan; a captured replay regression is at `tests/fixtures/v2/model-response-forward-topic-ref.json`. V1 `OperationPlan` remains available for old replay/compatibility tests; it is not the active v2 CLI proposal schema.
+
+Question resolution records the answer node and evidence union, marks the question answered, and supersedes the visible question block when present. Claim revision archives old content/evidence as a superseded copy. Safe merge validates all participating block IDs, owners, protection state, topic membership, and revisions, then unions evidence, aliases, and canonical terms. Risky changes or changes to protected human content become suggestions. Accepting a correction rechecks target revision, updates the stable target block, archives prior wording/evidence, and marks the corrected block human-owned/protected; stale acceptance conflicts. Undo restores the prior state.
+
+Fast updates, scheduled consolidation, and finalization batches use the same coordinator inference semaphore, CLI restrictions, retry policy, and call budget. Stopping includes pending segments in a durable finalization pass; when fast work already completed before stop, a separate finalization batch runs. Finalization state survives restart. Consolidation uses `consolidation_interval_sec` (default 240 seconds) and `min_consolidation_batches` (default 4); unchanged canonical content suppresses repeat paid calls, while already-pending batches remain claimable before the next interval. The fixture and real-provider results do not establish general semantic quality.
+
+## Snapshot and UI edit contract
+
+Snapshots preserve `topics[].blocks[]` and add ordered `document.nodes[]`, `document.markdown`, `document.revision`, `document_revision`, `questions`, and `takeaway`. Document nodes are a projection, not a second canonical store. Nodes carry stable canonical topic/block IDs, type, position, Markdown, revisions, semantic fields, evidence, and ownership/protection details. New v2 `UPDATE_TAKEAWAY` content is created/updated as an ordinary editable “会議の要点” topic/block node, with `snapshot.takeaway` derived from that active block; legacy metadata is read only as a migration fallback.
+
+The UI uses one Tiptap `LiveNoteDocumentEditor` with stable server IDs for topic/block wrappers and a table-of-contents outline. Server snapshots and WS revisions reconcile by semantic-unit ID; clean units update with targeted transactions, while local drafts remain intact and surface conflicts. Normal edits use existing per-entity routes/revisions; cross-unit replacements use `POST /api/live-notes/{session_id}/document/edits` with an expected document revision and only changed/created/removed units. There is no whole-document Markdown PATCH. Drafts persist locally before debounced save; IME pauses saving; failed/conflicting writes retain drafts for explicit retry. The transcript/history tabs and evidence panel remain secondary to the document.
+
+## Evaluation protocol and report template
+
+The handoff golden sample is an illustration, not a byte-for-byte expected output. For the synthetic scenario, evaluate semantic properties at each checkpoint instead of exact prose. Deterministic provider-stub tests can establish schema validation, transaction behavior, state transitions, evidence checks, conflicts, idempotency and UI reconciliation. They do not establish that a real model will choose good operations or produce a readable note. Real-provider quality review must separately record provider/model, actual output, calls, checkpoint observations, and limits. Real audio/device testing is a third category.
+
+Use `docs/live-notes-v2-report.md` for the current run record. For future reruns, record baseline and candidate revisions and do not invent scores. Rubric dimensions are organization, consolidation, state accuracy, faithfulness, readability and continuity (0–5); score only after reviewing actual output. The target mean of 4 in the design is not a measured result.
+
+## Assumptions and deviations
+
+- The sequential transcript is synthetic Japanese, not a transcript of the referenced original meeting.
+- The v2 golden sample names such as `NriDeps`/`NewNriPoint` remain illustrative until checked against the target project source. The fixture therefore evaluates claims as meeting content and asks reviewers to preserve verification caveats.
+- The fixture's human correction is an explicit `manual_block_update` harness event after the relevant node exists. Resolve its topic/block IDs and expected revision from the live snapshot rather than baking generated IDs into static input.
+- Comparison and outage variations are separate cases and should be reported independently from the main technical explanation.
+- Current quality reports are limited to the exact runs documented in `docs/live-notes-v2-report.md`; passing contract/UI tests cannot be presented as a blanket v2 quality guarantee.

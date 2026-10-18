@@ -396,3 +396,11 @@ def build_transcript_text(transcript: list[dict]) -> str:
   │
   └── セッションディレクトリ全削除                   [一時データ全消去]
 ```
+
+## v2意味状態・表示snapshot
+
+Canonical storageはSQLiteの既存topic/block rows。additive migrationはblocksに `semantic_role`, `epistemic_state`, `resolution_state`, evidence, aliases/canonical terms, source-verification flag, human ownership/protection, supersession, semantic-v2 marker, takeaway flagを追加し、question rowsにはstate、answer node、resolution evidence、sequence、revisionを保持する。sessionにはbatch kindとfinalization stateを追加する。既存minutesとtranscript本文をmigrationで再構成しない。v1 kind/type/APIは旧ノートとreplay互換のため残る。
+
+schema v2 operation planと10個のsemantic operation名、question/evidence state、atomic transaction規則の詳細は [v2 implementation contract](./live-notes-v2-report.md) に記録する。Snapshotの `document.nodes[]` はcanonical topic/block IDとper-entity revisionを持つprojectionであり、独立した保存正本ではない。`document.markdown`、document revision、questions、takeawayもsnapshotの派生値を含む。手動編集はentity単位のrevisionとprotectionを使い、複数unitの変更はexpected note revision付き `/document/edits` deltaとして原子的に適用する。
+
+評価シナリオは [live_notes_v2_scenario.json](../tests/fixtures/live_notes_v2_scenario.json) を参照。これは入力データであり、正解ノートやprovider応答fixtureではない。

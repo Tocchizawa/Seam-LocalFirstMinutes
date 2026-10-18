@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from .models import (
     LiveSettings,
-    operation_plan_schema,
+    semantic_operation_plan_schema,
     resolve_live_provider,
     validation_issue_summary,
 )
@@ -299,17 +299,26 @@ class LiveNoteCoordinator:
             snap = await self.call("snapshot", sid)
             if s["status"] == "aborted":
                 return
+            scheduled_consolidation = False
             if not snap["pending_segments"]:
                 if s["stopped"]:
-                    await self.call(
-                        "state", sid, status="completed", flush_requested=0, paused=0
-                    )
-                    await self.notify(sid, "live_note_completed")
-                    return
+                    if s.get("finalize_pass_done"):
+                        await self.call("state", sid, status="completed", flush_requested=0, paused=0)
+                        await self.notify(sid, "live_note_completed")
+                        return
+                    # A stopped meeting gets one final editor pass even when the transcript cursor is caught up.
+                    final_batch = await self.call("finalize_batch", sid)
+                    if not final_batch:
+                        await asyncio.sleep(1)
+                        continue
                 if s["flush_requested"]:
                     await self.call("state", sid, flush_requested=0)
-                await asyncio.sleep(1)
-                continue
+                if not s["stopped"]:
+                    consolidation = await self.call("consolidation_batch", sid)
+                    if not consolidation:
+                        await asyncio.sleep(1)
+                        continue
+                    scheduled_consolidation = True
             if (
                 s["paused"]
                 or s["failures"] >= 3
@@ -325,10 +334,13 @@ class LiveNoteCoordinator:
             pending_chars = await self.call("pending_chars", sid)
             elapsed = time.time() - last if last else snap["queue_age_sec"]
             ready = (
+                scheduled_consolidation
+                or
                 (elapsed >= settings["target_interval_sec"])
                 or snap["queue_age_sec"] >= settings["max_wait_sec"]
                 or pending_chars >= settings["min_pending_chars"]
                 or s["flush_requested"]
+                or s["stopped"] and not s.get("finalize_pass_done")
             )
             if not ready or last and time.time() - last < settings["min_interval_sec"]:
                 await asyncio.sleep(1)
@@ -406,7 +418,7 @@ class LiveNoteCoordinator:
                                 raise asyncio.CancelledError()
                             raw = await provider.infer_operations(
                                 build_prompt(context),
-                                operation_plan_schema(),
+                                semantic_operation_plan_schema(),
                                 timeout=settings["invocation_timeout_sec"],
                                 cancellation=cancel,
                             )

@@ -132,7 +132,7 @@ Zoom等のオンライン会議中にバックグラウンドで PC 内部音声
 
 初期状態はOFF。ONの会議では録音中に確定発話をテーマ別のMarkdownノートへ蓄積する。
 既存テーマ・過去テーマへの復帰を識別し、背景を消さず、提案・決定・懸念・未解決・アクションを区別する。
-詳細の受け入れ条件は [専用設計書 第17章](./SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md) を正本とする。
+現行ライブノートは SQLiteのcanonical topics/blocksを保ち、意味状態付きのschema v2操作、atomic plan application、document.nodes projection、revision付きdocument delta編集、fast/consolidation/finalizeを提供する。migrationは既存minutes/transcriptを再書込しない。機能契約は [v2実装レポート](./live-notes-v2-report.md)、目標と品質DoDは [v2設計書](./SEAM_LIVE_NOTES_V2_DESIGN.md) を参照する。設計目標の意味品質は実モデル評価で別途確認する。
 
 | ID | 必須要件 |
 |---|---|
@@ -376,3 +376,16 @@ Phase 2: LLM使用時
 | パイプライン | 録音→文字起こし→コンテキスト調査→議事録生成の一連の処理フロー |
 | セッション | 1回の会議に対応する作業単位。パイプライン完了後に作業データは削除 |
 | 正本 | SQLite + output_dir の Markdown。セッション作業データは一時的なもの |
+
+
+## 2.6.2 ライブノートv2の意味品質目標
+
+以下はv2の受け入れ目標であり、テスト結果が記録されるまでは達成済み要件として扱わない。
+
+- 質問と回答を同一テーマに結び、回答済みの問いを未解決状態に残さない。
+- 以前のテーマへ戻った場合、同じtopicを更新し、同義見出しを増やさない。
+- 訂正で旧情報を現行の事実として残し続けない。ユーザーが直接編集した内容はAIの古い提案から保護する。
+- 技術説明、比較検討、障害調査など、会話の性質に合う文書構造を選ぶ。
+- 合成fixtureのチェックと、実プロバイダの意味品質評価を別に記録する。
+
+シナリオ入力とレポートテンプレートは [v2評価ノート](../implementation-notes-v2-docs.md) および [fixture](../tests/fixtures/live_notes_v2_scenario.json) にある。

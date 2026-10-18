@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from src.config import config
 from src.live_notes.coordinator import get_coordinator
-from src.live_notes.models import HumanOperation, resolve_live_provider
+from src.live_notes.models import DocumentEditsRequest, HumanOperation, resolve_live_provider
 from src.live_notes.repository import NoteError
 
 router = APIRouter(prefix="/api/live-notes", tags=["live-notes"])
@@ -70,6 +70,16 @@ async def history(
     session_id: str, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
 ):
     return await execute(get_coordinator().call, "history", session_id, limit, offset)
+
+
+@router.get("/{session_id}/source/{segment_seq}")
+async def source(session_id: str, segment_seq: int):
+    return await execute(get_coordinator().call, "source", session_id, segment_seq)
+
+
+@router.post("/{session_id}/document/edits")
+async def document_edits(session_id: str, body: DocumentEditsRequest):
+    return await execute(get_coordinator().call, "document_edits", session_id, body)
 
 
 @router.post("/{session_id}/topics")

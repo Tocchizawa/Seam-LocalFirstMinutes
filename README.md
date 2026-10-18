@@ -89,12 +89,14 @@ Whisperの音声認識はローカルですが、**発話テキスト・ノー�
 会議参加者への録音通知・同意と、CLIの契約・利用枠を確認してください。
 必要なCLI制限に対応しない版、認証切れ、利用制限ではAI整理を停止し、録音・文字起こし・手動編集を続けます。
 
-AI整理は通常20〜60秒程度の発話をまとめ、CLI応答後に反映します。秒単位の更新は保証しません。
+AI整理は通常20〜60秒程度の発話をまとめ、CLI応答後に反映します。consolidation間隔と最低batch数は設定可能です。秒単位の更新は保証しません。
 「AI一時停止」中も発話は保存されます。停止後に整理が残る場合は、保存済み議事録から再試行できます。
 ライブノートを使う会議では、従来の録音後全文要約による上書きを行いません。
 OFFの場合は従来の録音後要約を利用します。
 
 ## 実装状況メモ
+
+ライブノートv2は、意味役割・確度・質問状態を持つ10種の構造化操作を使い、重複統合・質問解決・訂正履歴・テーマ再編を提案します。SQLiteのtopics/blocksが正本で、追加migrationはsemantic metadataとquestion、batch種別、finalization stateを加えます。文書全体は `document.nodes[]` として投影し、複数単位の手動編集はrevision付きatomic delta APIで保存します。fast update・定期consolidation・終了時finalizationは同じCLI制限と呼出し制御を通ります。v2の実装契約と実測範囲は [v2評価レポート](./docs/live-notes-v2-report.md) を参照してください。
 
 - `Gemini` は設定UI/APIの枠はありますが、要約本体は未対応です
 - システム音声録音は macOS のシステム音声取得権限が必要です
@@ -211,6 +213,11 @@ SKIP_GUI_BUILD=1 ./scripts/oss_preflight.sh
 - データモデル: [docs/data-model.md](./docs/data-model.md)
 - 要約設計: [docs/summarize-design.md](./docs/summarize-design.md)
 - ライブノート仕様・受け入れ条件: [docs/SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md](./docs/SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md)
+- ライブノートv2目標設計: [docs/SEAM_LIVE_NOTES_V2_DESIGN.md](./docs/SEAM_LIVE_NOTES_V2_DESIGN.md)
+- ライブノートv2品質サンプル: [docs/SEAM_LIVE_NOTES_V2_GOLDEN_SAMPLE.md](./docs/SEAM_LIVE_NOTES_V2_GOLDEN_SAMPLE.md)
+- ライブノートv2評価レポート: [docs/live-notes-v2-report.md](./docs/live-notes-v2-report.md)
+- ライブノートv2実装契約・評価手順: [implementation-notes-v2-docs.md](./implementation-notes-v2-docs.md) / [tests/fixtures/live_notes_v2_scenario.json](./tests/fixtures/live_notes_v2_scenario.json)
+- ライブノートv2 UI参考モック: [reference/SEAM_LIVE_NOTES_V2_UI_MOCK.html](./reference/SEAM_LIVE_NOTES_V2_UI_MOCK.html)
 - ライブノートの検証・復旧手順: [docs/live-notes-testing.md](./docs/live-notes-testing.md)
 - 実装判断・DoDとの対応・検証範囲: [docs/live-notes-implementation.md](./docs/live-notes-implementation.md)
 

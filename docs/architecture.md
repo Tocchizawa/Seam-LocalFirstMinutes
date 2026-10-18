@@ -726,3 +726,11 @@ ws://localhost:18900/ws
 | コンテキスト調査タイムアウト | 60秒で打ち切り、それまでの知識で議事録生成 |
 | output_dir が存在しない | 自動作成 |
 | output_dir 書き込み失敗 | エラー表示 + DB には保存済みなのでデータロスなし |
+
+## v2意味編集の実装契約
+
+SQLiteのtopics/blocksが正本で、追加migrationはblockのsemantic metadata、session/topic単位のquestions、batch kind、finalization stateを追加し、保存済みminutes/transcriptを再書込しない。v1 operation plan/APIは互換用に残り、現行CLIはstrict schema v2の10操作 (`CREATE_TOPIC`, `UPSERT_KNOWLEDGE`, `RESOLVE_QUESTION`, `REVISE_CLAIM`, `MERGE_BLOCKS`, `MOVE_BLOCK`, `RESTRUCTURE_TOPIC`, `UPDATE_TAKEAWAY`, `SUGGEST_EDIT`, `NO_CHANGE`) を使う。各planは証拠・session所属・owner/protection・revisionをトランザクションで検証して原子的に適用する。
+
+Snapshotの `document.nodes[]` は既存topics/blocksから作る表示用projection。単一Tiptap editorは安定ID単位で同期し、通常編集はentity route、複数単位編集は `POST /api/live-notes/{session_id}/document/edits` のrevision付きdeltaを使う。whole-document Markdown PATCHは行わない。fast update、consolidation、finalizeは同じsemaphore・CLI制限・retry policy・call budgetを使う。`consolidation_interval_sec` (default 240 seconds) and `min_consolidation_batches` (default 4) configure consolidation cadence. An unchanged-document digest prevents duplicate paid calls, while pending jobs remain claimable. Stop uses durable finalization and marks completion after the processed-segment cursor catches up.
+
+意味的品質評価用のsynthetic inputは [v2シナリオfixture](../tests/fixtures/live_notes_v2_scenario.json) にある。provider stubによる操作契約・再生・重複防止の成功は、実モデルの意味品質評価や実音声評価を代替しない。評価手順と実測結果は [v2評価レポート](./live-notes-v2-report.md) と [v2評価ノート](../implementation-notes-v2-docs.md) を参照。

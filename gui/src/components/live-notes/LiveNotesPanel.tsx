@@ -1,21 +1,18 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
-import { LiveNoteBlockEditor } from "./LiveNoteBlockEditor";
+import { LiveNoteDocumentEditor } from "./LiveNoteDocumentEditor";
 import {
-  downloadLiveMarkdown, liveRequest, newRequestId, sessionPath, useDurableEdit, useNewNoteDraft,
-  type LiveEvent, type LiveNotesController, type LiveSuggestion, type LiveTopic,
+  downloadLiveMarkdown, liveRequest, newRequestId, sessionPath,
+  type LiveEvent, type LiveNotesController,
 } from "../../lib/live-notes";
 import "./live-notes.css";
 
 export function LiveNotesPanel({ controller, transcript }: { controller: LiveNotesController; transcript?: ReactNode }) {
-  const { snapshot, error, connected, mutate } = controller;
+  const { snapshot, error, storageError, connected, mutate } = controller;
   const [tab, setTab] = useState<"note" | "transcript" | "history">("note");
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const topicDraft = useNewNoteDraft(`seam:live-new-topic:v1:${snapshot?.session_id ?? "loading"}`);
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
-  const [search, setSearch] = useState("");
   const lastRevision = useRef<number | null>(null);
   const [updates, setUpdates] = useState(0);
   useEffect(() => {
@@ -41,20 +38,6 @@ export function LiveNotesPanel({ controller, transcript }: { controller: LiveNot
     finally { setBusy(false); }
   };
   const control = (action: string) => run(() => mutate("/control", "POST", { action }));
-  const remove = async (path: string, revision: number, label: string) => {
-    const message = `${label}を削除しますか？更新履歴から元に戻せます。未保存の入力は端末の下書きに残ります。`;
-    const isDesktop = "__TAURI_INTERNALS__" in window;
-    const confirmed = isDesktop ? await ask(message, {title:"議論ノートの削除",kind:"warning",okLabel:"削除",cancelLabel:"キャンセル"}) : window.confirm(message);
-    if (!confirmed) return;
-    void run(() => mutate(path, "DELETE", { expected_revision: revision, request_id: newRequestId() }));
-  };
-  const topics = [...snapshot.topics].sort((left, right) => left.position - right.position);
-  const visibleTopics = search.trim() ? topics.filter((topic) => `${topic.title}\n${topic.blocks.map((block) => block.content_md).join("\n")}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) : topics;
-  const reorder = (index: number, delta: number) => {
-    const ids = topics.map((topic) => topic.id);
-    [ids[index], ids[index + delta]] = [ids[index + delta], ids[index]];
-    void run(() => mutate("/topics/reorder", "POST", { topic_ids: ids, expected_revision: snapshot.note_revision, request_id: newRequestId() }));
-  };
   const paused = (snapshot as unknown as { paused?: boolean }).paused || snapshot.status === "paused";
   const status = snapshot.status === "completed" || snapshot.status === "stopped" ? (snapshot.processing ? "会議終了 · 残りの議論を整理中" : "会議終了") : paused ? "AIを一時停止中" : snapshot.processing ? "AIが議論を整理中" : snapshot.status === "error" ? "AIエラー · 録音・手動編集は継続できます" : snapshot.status === "completed" || snapshot.status === "stopped" ? "会議終了" : "発話を待機中";
   return (
@@ -66,6 +49,7 @@ export function LiveNotesPanel({ controller, transcript }: { controller: LiveNot
         {snapshot.stopped && snapshot.pending_segments > 0 && <span>整理残りあり</span>}
         {(snapshot.queue_age_sec ?? 0) > 60 && <span>更新が遅れています · 最古の未整理発話 {Math.floor(snapshot.queue_age_sec ?? 0)}秒待機</span>}
         {!connected && <span>再接続待ち · 下書きは端末に保持</span>}
+        {storageError && <span role="alert">最新ノートを端末に保存できません。空き容量やブラウザーの保存設定を確認してください。</span>}
       </div>
       <div className="live-note-privacy">音声認識はローカルで実行。発話とノートの文脈は選択したクラウドLLMへ送信されます。</div>
       {(error || snapshot.last_error || actionError) && <div className="live-note-error" role="alert">{actionError || error || snapshot.last_error}<button className="btn" onClick={() => { void controller.refresh(); }}>状態を再取得</button></div>}
@@ -81,28 +65,8 @@ export function LiveNotesPanel({ controller, transcript }: { controller: LiveNot
           <button className="btn" disabled={busy} onClick={() => { void run(() => downloadLiveMarkdown(sessionId)); }}>Markdown出力</button>
         </div>
       </div>
-      <div id={`note-panel-${sessionId}`} role="tabpanel" aria-labelledby={`note-tab-${sessionId}`} hidden={tab !== "note"} className="live-note-body">
-        <aside className="live-note-outline" aria-label="議論の目次">
-          <label htmlFor={`live-search-${sessionId}`}>目次 · {topics.length}論点</label>
-          <input id={`live-search-${sessionId}`} className="input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="論点・メモを検索" />
-          <nav>{visibleTopics.map((topic) => <a key={topic.id} href={`#live-topic-${topic.id}`} onClick={(event) => { event.preventDefault(); document.getElementById(`live-topic-${topic.id}`)?.scrollIntoView({ block: "start" }); }} aria-current={topic.id === snapshot.active_topic_id ? "location" : undefined}>{topic.title}<span>{topic.blocks.length}</span></a>)}</nav>
-        </aside>
-        <div className="live-note-document">
-          {snapshot.suggestions?.filter((suggestion) => !suggestion.status || suggestion.status === "pending").map((suggestion) => <Suggestion key={suggestion.id} suggestion={suggestion} busy={busy} resolve={(action) => { void run(() => mutate(`/suggestions/${encodeURIComponent(suggestion.id)}/resolve`, "POST", { action, expected_revision: snapshot.note_revision, request_id: newRequestId() })); }} />)}
-          {topics.length === 0 && <div className="live-note-empty"><h3>会議の議論がここに蓄積されます</h3><p>確定した発話をまとめて整理します。待機中も見出しとメモを手動で追加できます。</p></div>}
-          {topics.map((topic, index) => <TopicSection key={topic.id} topic={topic} sessionId={sessionId} controller={controller} busy={busy} hidden={!visibleTopics.includes(topic)}
-            onDelete={() => { void remove(`/topics/${encodeURIComponent(topic.id)}`, topic.revision, "この論点とメモ"); }}
-            onDeleteBlock={(id, revision) => { void remove(`/blocks/${encodeURIComponent(id)}`, revision, "このメモ"); }}
-            onMoveUp={index > 0 ? () => reorder(index, -1) : undefined}
-            onMoveDown={index < topics.length - 1 ? () => reorder(index, 1) : undefined}
-            run={run} />)}
-          <form className="live-note-add-topic" onSubmit={(event) => { event.preventDefault(); const title = topicDraft.text.trim(); if (title) void run(async () => { await mutate("/topics", "POST", { title, request_id: topicDraft.request_id }); topicDraft.clear(); }); }}>
-            <label className="sr-only" htmlFor={`new-topic-${sessionId}`}>新しい論点の見出し</label>
-            <input id={`new-topic-${sessionId}`} className="input" placeholder="新しい論点の見出し" value={topicDraft.text} onChange={(event) => topicDraft.update(event.target.value)} maxLength={120} disabled={busy} />
-            <button type="submit" className="btn" disabled={busy || !topicDraft.text.trim()}>見出しを追加</button>
-          </form>
-          {topicDraft.storageError && <p role="alert">追加中の見出しを端末に保存できませんでした。画面を閉じずに追加してください。</p>}
-        </div>
+      <div id={`note-panel-${sessionId}`} role="tabpanel" aria-labelledby={`note-tab-${sessionId}`} hidden={tab !== "note"} className="live-note-body seam-v2-note-body">
+        <LiveNoteDocumentEditor controller={controller} snapshot={snapshot} onError={setActionError} />
       </div>
       {transcript && <div id={`transcript-panel-${sessionId}`} role="tabpanel" aria-labelledby={`transcript-tab-${sessionId}`} hidden={tab !== "transcript"} className="live-note-transcript">{transcript}</div>}
       <div id={`history-panel-${sessionId}`} role="tabpanel" aria-labelledby={`history-tab-${sessionId}`} hidden={tab !== "history"} className="live-note-history">
@@ -119,45 +83,6 @@ export function LiveNotesPanel({ controller, transcript }: { controller: LiveNot
       </div>
     </section>
   );
-}
-
-function TopicSection({ sessionId, topic, controller, busy, hidden, onDelete, onDeleteBlock, onMoveUp, onMoveDown, run }: {
-  sessionId: string; topic: LiveTopic; controller: LiveNotesController; busy: boolean; hidden: boolean;
-  onDelete: () => void; onDeleteBlock: (id: string, revision: number) => void;
-  onMoveUp?: () => void; onMoveDown?: () => void; run: (action: () => Promise<unknown>) => Promise<void>;
-}) {
-  const title = useDurableEdit({ sessionId, entity: "topic", id: topic.id, revision: topic.revision, value: { title: topic.title },
-    save: async (value, revision, requestId) => {
-      const next = await controller.mutate(`/topics/${encodeURIComponent(topic.id)}`, "PATCH", { ...value, expected_revision: revision, request_id: requestId });
-      return next.topics.find((row) => row.id === topic.id)?.revision ?? revision;
-    },
-  });
-  const blockDraft = useNewNoteDraft(`seam:live-new-block:v1:${sessionId}:${topic.id}`);
-  return <section id={`live-topic-${topic.id}`} hidden={hidden} className="live-note-topic" data-topic-id={topic.id}>
-    <div className="live-note-topic-heading">
-      <label className="sr-only" htmlFor={`topic-title-${topic.id}`}>論点の見出し</label>
-      <input id={`topic-title-${topic.id}`} aria-label="論点の見出し" value={title.value.title} maxLength={120} onChange={(event) => title.update({ title: event.target.value })} onCompositionStart={title.compositionStart} onCompositionEnd={title.compositionEnd} />
-      <span className="live-note-owner">{topic.title_owner === "human" ? "手動" : "AI"}</span>
-      <button className="btn btn-ghost" aria-label="論点を上へ移動" disabled={busy || !onMoveUp} onClick={onMoveUp}>↑</button>
-      <button className="btn btn-ghost" aria-label="論点を下へ移動" disabled={busy || !onMoveDown} onClick={onMoveDown}>↓</button>
-      <button className="btn btn-ghost" aria-label="論点を削除" disabled={busy} onClick={onDelete}>削除</button>
-    </div>
-    <div className="live-note-save-state" aria-live="polite">{title.storageError ? "端末の下書き保存に失敗しました" : title.status}{title.dirty && <button className="btn btn-ghost" onClick={() => { void title.retry(); }}>見出しを再保存</button>}</div>
-    {title.conflict && <p role="alert" className="live-note-conflict">見出しが更新されました。サーバー: {topic.title}。入力は保持されています。</p>}
-    {[...topic.blocks].sort((left, right) => left.position - right.position).map((block) => <LiveNoteBlockEditor key={block.id} sessionId={sessionId} block={block} controller={controller} onDelete={() => onDeleteBlock(block.id, block.revision)} />)}
-    <form className="live-note-add-block" onSubmit={(event) => { event.preventDefault(); const content = blockDraft.text.trim(); if (content) void run(async () => { await controller.mutate("/blocks", "POST", { topic_id: topic.id, content_md: content, kind: "point", request_id: blockDraft.request_id }); blockDraft.clear(); }); }}>
-      <label className="sr-only" htmlFor={`new-block-${topic.id}`}>追加するメモ</label>
-      <textarea id={`new-block-${topic.id}`} className="input" placeholder="この論点にメモを追加（Markdown）" value={blockDraft.text} disabled={busy} rows={2} onChange={(event) => blockDraft.update(event.target.value)} />
-      <button className="btn" type="submit" disabled={busy || !blockDraft.text.trim()}>メモを追加</button>
-    </form>
-    {blockDraft.storageError && <p role="alert">追加中のメモを端末に保存できませんでした。画面を閉じずに追加してください。</p>}
-  </section>;
-}
-function Suggestion({ suggestion, busy, resolve }: { suggestion: LiveSuggestion; busy: boolean; resolve: (action: string) => void }) {
-  return <aside className="live-note-conflict" role="note"><strong>AIの保留提案 · 手動編集を保護しました</strong><p>{suggestion.reason}</p>
-    <details><summary>提案の内容を確認</summary><OperationDetails value={suggestion.operation || suggestion.proposed_operation || parseJson(suggestion.suggested_operation_json)} /></details>
-    <button className="btn" disabled={busy} onClick={() => resolve("accept")}>内容を確認して採用</button> <button className="btn btn-ghost" disabled={busy} onClick={() => resolve("dismiss")}>見送る</button>
-  </aside>;
 }
 
 function parseJson(value: string | undefined): unknown {

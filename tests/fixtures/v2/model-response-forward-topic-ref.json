@@ -1,0 +1,138 @@
+{
+  "schema_version": 2,
+  "batch_id": "synthetic-tech-meeting-001:11:15",
+  "base_revision": 3,
+  "reason": "全体を「設定ファイルの保存場所」と「NRI共通部品の生成・受け渡し／接続状況」に整理し、既存の保護内容を維持しながら、用語訂正・新しい設定メモ・未確定の接続方針を反映する。",
+  "operations": [
+    {
+      "op_id": "synthetic-tech-meeting-001:11:15:1",
+      "type": "UPSERT_KNOWLEDGE",
+      "topic_id": "new:1",
+      "title": null,
+      "block_id": null,
+      "question_id": null,
+      "target_id": null,
+      "semantic_role": "fact",
+      "epistemic_state": "supported",
+      "resolution_state": "not_applicable",
+      "content_md": "設定はユーザーのホーム配下にある `config.yaml` に保存される。",
+      "expected_revision": null,
+      "source_block_ids": [],
+      "target_block_id": null,
+      "expected_revisions": {},
+      "expected_topic_revisions": {},
+      "target_topic_id": null,
+      "source_topic_ids": [],
+      "block_order": [],
+      "target_type": null,
+      "aliases": [],
+      "canonical_terms": [
+        "設定ファイル",
+        "config.yaml"
+      ],
+      "confidence": 0.99,
+      "verified_against_source": false,
+      "source_segments": [
+        12
+      ]
+    },
+    {
+      "op_id": "synthetic-tech-meeting-001:11:15:2",
+      "type": "CREATE_TOPIC",
+      "topic_id": "new:1",
+      "title": "設定ファイルの保存場所",
+      "block_id": null,
+      "question_id": null,
+      "target_id": null,
+      "semantic_role": null,
+      "epistemic_state": null,
+      "resolution_state": null,
+      "content_md": null,
+      "expected_revision": null,
+      "source_block_ids": [],
+      "target_block_id": null,
+      "expected_revisions": {},
+      "expected_topic_revisions": {},
+      "target_topic_id": null,
+      "source_topic_ids": [],
+      "block_order": [],
+      "target_type": null,
+      "aliases": [],
+      "canonical_terms": [],
+      "confidence": 0.99,
+      "verified_against_source": null,
+      "source_segments": [
+        11,
+        12
+      ]
+    },
+    {
+      "op_id": "synthetic-tech-meeting-001:11:15:3",
+      "type": "UPSERT_KNOWLEDGE",
+      "topic_id": "1ea2b216185b479eafa39afa2f117f81",
+      "title": null,
+      "block_id": "653d4bd59b824f94969350f8e3b2f9dc",
+      "question_id": null,
+      "target_id": null,
+      "semantic_role": "option",
+      "epistemic_state": "tentative",
+      "resolution_state": "not_applicable",
+      "content_md": "接続案として、`NriDependencies`を使って`NewGRPCServer`で依存を保持し、`NewNriPoint`へ渡してハンドラーから利用する形が候補に挙がった。方針は未決定で、コード確認も担当者・期限も決まっていない。",
+      "expected_revision": 0,
+      "source_block_ids": [],
+      "target_block_id": null,
+      "expected_revisions": {},
+      "expected_topic_revisions": {},
+      "target_topic_id": null,
+      "source_topic_ids": [],
+      "block_order": [],
+      "target_type": null,
+      "aliases": [
+        "NriDeps"
+      ],
+      "canonical_terms": [
+        "NriDependencies",
+        "NewGRPCServer",
+        "NewNriPoint"
+      ],
+      "confidence": 0.99,
+      "verified_against_source": false,
+      "source_segments": [
+        14,
+        15
+      ]
+    },
+    {
+      "op_id": "synthetic-tech-meeting-001:11:15:4",
+      "type": "UPDATE_TAKEAWAY",
+      "topic_id": null,
+      "title": null,
+      "block_id": null,
+      "question_id": null,
+      "target_id": null,
+      "semantic_role": null,
+      "epistemic_state": null,
+      "resolution_state": null,
+      "content_md": "説明された経路では、`main`で作成したNRI共通部品（画面表記は`NriDependencies`）は`NewGRPCServer`に渡されるが、実際には使われず、引数なしの`NewNriPoint`にも渡されていないため、受付ハンドラーに接続されていない。接続方針は候補段階で、コード確認と担当者・期限は未定。設定はユーザーのホーム配下の`config.yaml`に保存される。",
+      "expected_revision": null,
+      "source_block_ids": [],
+      "target_block_id": null,
+      "expected_revisions": {},
+      "expected_topic_revisions": {},
+      "target_topic_id": null,
+      "source_topic_ids": [],
+      "block_order": [],
+      "target_type": null,
+      "aliases": [],
+      "canonical_terms": [],
+      "confidence": 0.99,
+      "verified_against_source": null,
+      "source_segments": [
+        12,
+        13,
+        14,
+        15
+      ]
+    }
+  ]
+}

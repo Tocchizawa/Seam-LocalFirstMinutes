@@ -13,7 +13,17 @@ export interface LiveTopic {
 }
 export interface LiveSuggestion {
   suggested_operation_json?: string;
-  id: string; reason?: string; status?: string; operation?: Record<string, unknown>; proposed_operation?: Record<string, unknown>;
+  id: string; reason?: string; status?: string; operation?: Record<string, unknown> | Record<string, unknown>[]; proposed_operation?: Record<string, unknown> | Record<string, unknown>[];
+  presentation?: LiveSuggestionPresentation;
+}
+export interface LiveSuggestionSource { seq?: number; start?: number; start_sec?: number; end?: number; timestamp?: string; text?: string }
+export interface LiveSuggestionPresentation {
+  summary?: string; reason_code?: string; target_title?: string; current_md?: string; proposed_md?: string;
+  source_segments?: Array<number | LiveSuggestionSource>;
+}
+export interface LiveSuggestionReview {
+  summary: string; reason: string; targetTitle: string; currentMarkdown: string; proposedMarkdown: string;
+  sources: Array<{ label: string; text?: string }>;
 }
 export interface LiveSnapshot {
   session_id: string; minutes_id?: string | null; provider: string; status: string;
@@ -21,6 +31,42 @@ export interface LiveSnapshot {
   last_error?: string | null; topics: LiveTopic[]; suggestions: LiveSuggestion[];
   stopped?: boolean; queue_age_sec?: number;
   pending_segments: number; processing: boolean; llm_calls: number; model?: string;
+}
+
+/** Converts both current presentation metadata and legacy operation JSON into review copy. */
+export function getLiveSuggestionReview(suggestion: LiveSuggestion, snapshot: LiveSnapshot): LiveSuggestionReview {
+  const presentation = suggestion.presentation ?? {};
+  let raw: unknown = suggestion.operation ?? suggestion.proposed_operation ?? suggestion.suggested_operation_json;
+  if (typeof raw === "string") { try { raw = JSON.parse(raw); } catch { raw = null; } }
+  const operation = Array.isArray(raw) ? raw[0] : raw;
+  const record = operation && typeof operation === "object" ? operation as Record<string, unknown> : {};
+  const fields = (record.fields && typeof record.fields === "object" ? record.fields : record) as Record<string, unknown>;
+  const targetId = [record.target_id, record.block_id, record.id, fields.target_id, fields.block_id, fields.id, record.topic_id, fields.topic_id].find((value) => typeof value === "string") as string | undefined;
+  const topic = snapshot.topics.find((item) => item.id === targetId);
+  const block = snapshot.topics.flatMap((item) => item.blocks).find((item) => item.id === targetId);
+  const parent = block ? snapshot.topics.find((item) => item.id === block.topic_id) : undefined;
+  const targetTitle = presentation.target_title || (topic?.title ?? parent?.title) || (targetId ? "関連する議論" : "対象の議論");
+  const proposedValue = [presentation.proposed_md, fields.proposed_md, fields.markdown, fields.content_md, fields.title, record.proposed_md].find((value) => typeof value === "string") as string | undefined;
+  const currentMarkdown = presentation.current_md ?? topic?.title ?? block?.content_md ?? "現在の内容を取得できませんでした。";
+  const proposedMarkdown = proposedValue ?? "提案された内容を確認してください。";
+  const operationName = String(record.op ?? record.action ?? record.operation ?? record.type ?? "").toLowerCase();
+  const verb = operationName.includes("delete") ? "削除" : operationName.includes("create") || operationName.includes("add") ? "追加" : "更新";
+  const summary = presentation.summary || (proposedValue ? `「${targetTitle}」を${verb}する提案です。` : "議論ノートへの変更提案があります。内容を確認してください。");
+  const reasonLabels: Record<string, string> = {
+    user_edit: "この範囲に手動編集があるため、確認が必要です。",
+    newer_ai_update: "この範囲に新しいAI更新があるため、確認が必要です。",
+    closed_question: "この論点は解決済みとして扱われているため、確認が必要です。",
+  };
+  const reason = suggestion.reason || reasonLabels[presentation.reason_code ?? ""] || "変更の理由は特定できません。現在の内容と提案を確認してください。";
+  const rawSources = presentation.source_segments ?? block?.source_segment_seqs ?? [];
+  const sources = rawSources.map((source) => {
+    if (typeof source === "number") return { label: `発話 ${source}` };
+    const seq = source.seq == null ? "" : `発話 ${source.seq}`;
+    const seconds = source.start_sec ?? source.start;
+    const time = source.timestamp ?? (seconds == null ? "" : `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`);
+    return { label: [seq, time].filter(Boolean).join(" · ") || "関連する発話", text: source.text };
+  });
+  return { summary, reason: reasonLabels[presentation.reason_code ?? ""] && !suggestion.reason ? reasonLabels[presentation.reason_code!] : reason, targetTitle, currentMarkdown, proposedMarkdown, sources };
 }
 export interface LiveEvent {
   operation_json?: string; undo_json?: string;
@@ -68,6 +114,16 @@ export async function liveRequest<T>(path: string, method = "GET", body?: unknow
 }
 export const sessionPath = (id: string) => `/${encodeURIComponent(id)}`;
 export const getLiveSnapshot = (id: string) => liveRequest<LiveSnapshot>(sessionPath(id));
+const snapshotCacheKey = (id: string) => `seam:live-note-snapshot:v1:${id}`;
+function readSnapshotCache(id: string | null | undefined): { snapshot: LiveSnapshot | null; failed: boolean } {
+  if (!id) return { snapshot: null, failed: false };
+  try {
+    const value = JSON.parse(localStorage.getItem(snapshotCacheKey(id)) || "null");
+    return value?.session_id === id && Number.isFinite(value.note_revision) && Array.isArray(value.topics)
+      ? { snapshot: value as LiveSnapshot, failed: false }
+      : { snapshot: null, failed: false };
+  } catch { return { snapshot: null, failed: true }; }
+}
 export interface LiveSessionListItem {
   session_id: string; project_id: string; minutes_id?: string | null; status: string; started_at: string; last_error?: string | null; note_revision: number;
 }
@@ -87,21 +143,27 @@ export async function downloadLiveMarkdown(sessionId: string) {
  * Server revisions never replace a newer local snapshot. Editors own their durable drafts.
  */
 export function useLiveNotes(sessionId: string | null | undefined) {
-  const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(() => readSnapshotCache(sessionId).snapshot);
   const [error, setError] = useState<string | null>(null);
+  const [storageError, setStorageError] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const [connected, setConnected] = useState(true);
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   const sessionRef = useRef(sessionId); sessionRef.current = sessionId;
-  const knownRevision = useRef(-1), mutationGeneration = useRef(0);
+  const knownRevision = useRef(snapshot?.note_revision ?? -1), mutationGeneration = useRef(0);
   const accept = useCallback((next: LiveSnapshot) => {
     if (next.session_id !== sessionRef.current) return;
+    if (next.note_revision < knownRevision.current) return;
     knownRevision.current = Math.max(knownRevision.current, next.note_revision);
     setSnapshot((previous) => !previous || previous.session_id !== next.session_id || next.note_revision >= previous.note_revision ? next : previous);
+    try { localStorage.setItem(snapshotCacheKey(next.session_id), JSON.stringify(next)); setStorageError(false); }
+    catch { setStorageError(true); }
     setError(null); setUnavailable(false);
   }, []);
   useEffect(() => {
-    setSnapshot(null); setError(null); setUnavailable(false); knownRevision.current = -1;
+    const cached = readSnapshotCache(sessionId);
+    setSnapshot(cached.snapshot); setStorageError(cached.failed); setError(null); setUnavailable(false);
+    knownRevision.current = cached.snapshot?.note_revision ?? -1;
     if (!sessionId) { refreshRef.current = async () => {}; return; }
     let stopped = false, running = false, requested = false;
     const refresh = async () => {
@@ -152,12 +214,13 @@ export function useLiveNotes(sessionId: string | null | undefined) {
   const mutate = useCallback(async (path: string, method: string, body: Record<string, unknown>) => {
     if (!sessionId) throw new Error("セッションがありません");
     try {
-      const next = await liveRequest<LiveSnapshot>(`${sessionPath(sessionId)}${path}`, method, body);
+      const result = await liveRequest<LiveSnapshot | { snapshot: LiveSnapshot; id_map?: Record<string, string> }>(`${sessionPath(sessionId)}${path}`, method, body);
+      const next = "snapshot" in result ? result.snapshot : result;
       mutationGeneration.current++;
       accept(next); return next;
     } catch (cause) { void refreshRef.current(); throw cause; }
   }, [sessionId, accept]);
-  return { snapshot, error, unavailable, connected, refresh: () => refreshRef.current(), mutate };
+  return { snapshot, error, storageError, unavailable, connected, refresh: () => refreshRef.current(), mutate };
 }
 export type LiveNotesController = ReturnType<typeof useLiveNotes>;
 

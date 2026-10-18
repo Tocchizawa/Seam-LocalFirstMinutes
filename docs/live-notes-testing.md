@@ -94,3 +94,8 @@ CLIが存在する、helpが表示できる、スタブ契約試験が成功す�
 - バックアップは通常終了後の `~/.seam` 全体を対象とする。稼働中DBの単独コピーはWALを取り逃す可能性がある。
 - ノートは発話認識とLLMの誤りを含み得る。決定・担当・期限を会議参加者が確認し、必要に応じて手動修正する。
 - セクションをまたぐ一括リッチテキスト編集や共同編集は対象外。全体の持ち出しはMarkdown出力を使う。
+
+
+## v2意味品質シナリオ
+
+[v2 synthetic fixture](../tests/fixtures/live_notes_v2_scenario.json) は5/12/18分相当と終了時の逐次チェックポイント、比較会議、provider outage/recoveryを含む。これはテスト入力と評価観点であり、モデルの期待出力を固定したgolden provider responseではない。各チェックポイントを同じ基準でbaseline/candidate比較し、実モデルを使った場合はprovider/model・実行日・実際に見た出力を記録する。provider stubによるoperation schema・永続化・再生の成功は意味品質の合格を意味しない。実音声やクラウドモデルをこの準備作業で実行したという意味でもない。現在の契約試験・実モデル評価の実績と未達項目は [v2実装レポート](./live-notes-v2-report.md) に記録する。将来の比較用テンプレートは [implementation-notes-v2-docs.md](../implementation-notes-v2-docs.md) を参照する。

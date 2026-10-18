@@ -19,8 +19,11 @@ const legacyMinutes: Minutes = {
   id: "legacy-minutes", session_id: "legacy-session", project_id: "test-project", title: "従来の議事録", date: "2026-10-17", started_at: "2026-10-17T09:00:00", duration_sec: 0,
   transcript: [{start:0,end:10,text:"従来の文字起こし本文"}], summary:"## 従来の要約\n既存の議事録を表示します。", created_at:"2026-10-17T09:00:00", llm_model:"ollama:test",
 };
-let offline = false, delay = false, snapshotDelay = false, history: LiveEvent[] = [], previous: LiveSnapshot | null = null;
+let offline = sessionStorage.getItem("seam:test-offline") === "true", delay = false, snapshotDelay = false, rejectSuggestionResolution = false, history: LiveEvent[] = [], previous: LiveSnapshot | null = null;
+Object.defineProperty(window, "__seamFixture", { configurable: true, get: () => snapshot });
 const requests = new Map<string, LiveSnapshot>();
+const requestLog: Array<{ method: string; path: string; status?: number; error?: string }> = [];
+Object.defineProperty(window, "__seamFixtureActions", { configurable: true, value: { aiUpdate, requestLog: () => requestLog, seedThreeUnits, deleteMiddleAndUpdateLast, seedSuggestion, rejectNextSuggestionResolution } });
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const publish = () => window.dispatchEvent(new CustomEvent("recording-ws:live_note_patch", { detail: { session_id: snapshot.session_id, revision: snapshot.note_revision } }));
 const commit = (action: string, actor = "human") => {
@@ -32,6 +35,8 @@ const commit = (action: string, actor = "human") => {
 window.fetch = async (input, init) => {
   const url = new URL(String(input));
   if (url.hostname !== "127.0.0.1" || url.port !== "18900") throw new Error("Test fixture blocks non-local API calls");
+  const request: { method: string; path: string; status?: number; error?: string } = { method: init?.method || "GET", path: url.pathname };
+  requestLog.push(request);
   if (!url.pathname.startsWith("/api/live-notes")) {
     let result: unknown = {};
     if (url.pathname.endsWith("/pipelines")) result = [];
@@ -43,12 +48,12 @@ window.fetch = async (input, init) => {
     return new Response(JSON.stringify(result), {headers:{"Content-Type":"application/json"}});
   }
   if (url.pathname === "/api/live-notes/legacy-session") return new Response(JSON.stringify({detail:"No live note"}), {status:404,headers:{"Content-Type":"application/json"}});
-  if (offline) throw new TypeError("Synthetic network disconnected");
+  if (offline) { request.error = "Synthetic network disconnected"; throw new TypeError("Synthetic network disconnected"); }
   const method = init?.method || "GET";
   const path = url.pathname.replace("/api/live-notes/test-session", "");
   const body = init?.body ? JSON.parse(String(init.body)) : {};
   if (method !== "GET" && delay) await new Promise((resolve) => setTimeout(resolve, 2000));
-  const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
+  const json = (value: unknown, status = 200) => { request.status = status; return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); };
   if (url.pathname.endsWith("/preflight")) return json({ ok: true, test_fixture: true });
   if (method === "GET") {
     if (path === "/history") return json({ events: history.slice(Number(url.searchParams.get("offset") || 0), Number(url.searchParams.get("offset") || 0) + 50), total: history.length });
@@ -57,8 +62,34 @@ window.fetch = async (input, init) => {
     if (snapshotDelay) { snapshotDelay = false; await new Promise((resolve) => setTimeout(resolve, 400)); }
     return json(captured);
   }
-  if (body.request_id && requests.has(body.request_id)) return json(requests.get(body.request_id));
+  if (body.request_id && requests.has(body.request_id)) return path === "/document/edits" ? json({ snapshot: requests.get(body.request_id), id_map: {} }) : json(requests.get(body.request_id));
+  if (path.startsWith("/suggestions/") && path.endsWith("/resolve")) {
+    if (rejectSuggestionResolution) { rejectSuggestionResolution = false; return json({ detail: { code: "REVISION_CONFLICT", message: "版数が更新されました" } }, 409); }
+    const suggestionId = path.split("/")[2];
+    const suggestion = snapshot.suggestions.find((item) => item.id === suggestionId);
+    if (suggestion) suggestion.status = body.action === "accept" ? "accepted" : "dismissed";
+    commit(`resolve_suggestion_${body.action}`);
+    if (body.request_id) requests.set(body.request_id, clone(snapshot));
+    return json(clone(snapshot));
+  }
   previous = clone(snapshot);
+  if (path === "/document/edits") {
+    const idMap: Record<string, string> = {};
+    for (const operation of body.operations || []) {
+      const targetTopic = snapshot.topics.find((row) => row.id === operation.id);
+      const targetBlock = snapshot.topics.flatMap((row) => row.blocks).find((row) => row.id === operation.id);
+      if (operation.op === "update_topic" && targetTopic) { targetTopic.title = operation.title; targetTopic.title_owner = "human"; targetTopic.revision++; }
+      else if (operation.op === "update_block" && targetBlock) { targetBlock.content_md = operation.markdown; targetBlock.owner = "human"; targetBlock.revision++; }
+      else if (operation.op === "delete_block" && targetBlock) snapshot.topics.forEach((row) => { row.blocks = row.blocks.filter((entry) => entry.id !== targetBlock.id); });
+      else if (operation.op === "delete_topic" && targetTopic) snapshot.topics = snapshot.topics.filter((row) => row.id !== targetTopic.id);
+      else if (operation.op === "create_topic") { const id = `topic-${operation.client_id}`; idMap[operation.client_id] = id; snapshot.topics.push({ id, title: operation.title, title_owner: "human", revision: 0, position: Number(operation.position ?? snapshot.topics.length), blocks: [] }); }
+      else if (operation.op === "create_block") { const topicId = operation.topic_id || idMap[operation.client_topic_id]; const parent = snapshot.topics.find((row) => row.id === topicId); if (parent) { const id = `block-${operation.client_id}`; idMap[operation.client_id] = id; parent.blocks.push({ id, topic_id: topicId, content_md: operation.markdown, kind: operation.kind, owner: "human", revision: 0, position: Number(operation.position ?? parent.blocks.length), source_segment_seqs: [] }); } }
+      else if (operation.op === "reorder_topics") snapshot.topics.forEach((row) => { row.position = operation.ids.indexOf(row.id); });
+    }
+    commit("document_edit");
+    if (body.request_id) requests.set(body.request_id, clone(snapshot));
+    return json({ snapshot: clone(snapshot), id_map: idMap });
+  }
   const id = path.split("/")[2];
   const topic = snapshot.topics.find((row) => row.id === id);
   const block = snapshot.topics.flatMap((row) => row.blocks).find((row) => row.id === id);
@@ -91,6 +122,43 @@ function aiUpdate(same = false) {
   snapshot.llm_calls++; snapshot.last_processed_segment_seq++;
   commit("add_block", "ai");
 }
+function seedThreeUnits() {
+  previous = clone(snapshot);
+  const topic = snapshot.topics.find((row) => row.id === "topic-a")!;
+  topic.blocks = [
+    topic.blocks[0],
+    { id: "remote-b", topic_id: topic.id, kind: "point", owner: "ai", revision: 0, position: 1, content_md: "中間のメモ", source_segment_seqs: [3] },
+    { id: "remote-c", topic_id: topic.id, kind: "point", owner: "ai", revision: 0, position: 2, content_md: "最後のメモ", source_segment_seqs: [4] },
+  ];
+  commit("seed_remote_units", "ai");
+}
+function deleteMiddleAndUpdateLast() {
+  previous = clone(snapshot);
+  const topic = snapshot.topics.find((row) => row.id === "topic-a")!;
+  topic.blocks = topic.blocks.filter((block) => block.id !== "remote-b");
+  const last = topic.blocks.find((block) => block.id === "remote-c")!;
+  last.content_md = "更新された最後のメモ";
+  last.revision++;
+  topic.blocks.forEach((block, index) => { block.position = index; });
+  commit("delete_and_update_remote_units", "ai");
+}
+function seedSuggestion() {
+  previous = clone(snapshot);
+  snapshot.suggestions = [{
+    id: "suggestion-review-a", status: "pending", reason: "この範囲に新しいAI更新があるため、確認が必要です。",
+    suggested_operation_json: JSON.stringify({ op: "update_block", topic_id: "topic-a", block_id: "block-a", markdown: "推奨する認証方式を比較して決める。" }),
+    presentation: { summary: "認証方式のメモを更新する提案です。", reason_code: "newer_ai_update", target_title: "認証方式", proposed_md: "推奨する認証方式を比較して決める。", source_segments: [{ seq: 7, start_sec: 24, text: "候補を比較してから方式を決めましょう。" }] },
+  }];
+  commit("seed_suggestion", "ai");
+}
+function rejectNextSuggestionResolution() { rejectSuggestionResolution = true; }
+function setRichMarkdown() {
+  previous = clone(snapshot);
+  const block = snapshot.topics[0].blocks[0];
+  block.content_md = "**要点**を整理します。\n\n- 確認済み\n- 保留中\n\n```ts\nconst ready = true\n```\n\n| 部品 | 役割 |\n| --- | --- |\n| NriDeps | 共通依存 |\n| NewNriPoint | 受付 |";
+  block.revision++;
+  commit("update_block", "ai");
+}
 function addTopic(title = "運用・監視") {
   previous = clone(snapshot);
   snapshot.topics.push({ id: `topic-ai-${snapshot.note_revision}`, title, title_owner: "ai", revision: 0, position: snapshot.topics.length, blocks: [] });
@@ -105,8 +173,11 @@ function Fixture() {
     <div style={{ display: "flex", flexWrap: "wrap", gap: 5, padding: 6, background: "#f0f0f0" }} aria-label="合成試験の操作">
       <button className="btn" onClick={() => addTopic()}>新話題</button><button className="btn" onClick={() => aiUpdate()}>話題復帰 / 別ブロック更新</button>
       <button className="btn" onClick={() => aiUpdate(true)}>同一ブロック競合</button>
-      <button className="btn" onClick={() => { offline = true; publish(); }}>接続断</button>
-      <button className="btn" onClick={() => { offline = false; window.dispatchEvent(new CustomEvent("recording-ws:__open")); }}>再接続</button>
+      <button className="btn" onClick={seedSuggestion}>提案レビューfixture</button>
+      <button className="btn" onClick={rejectNextSuggestionResolution}>次の提案操作で409</button>
+      <button className="btn" onClick={setRichMarkdown}>Markdown構造fixture</button>
+      <button className="btn" onClick={() => { offline = true; sessionStorage.setItem("seam:test-offline", "true"); publish(); }}>接続断</button>
+      <button className="btn" onClick={() => { offline = false; sessionStorage.removeItem("seam:test-offline"); window.dispatchEvent(new CustomEvent("recording-ws:__open")); }}>再接続</button>
       <button className="btn" onClick={() => { delay = !delay; }}>応答遅延切替</button>
       <button className="btn" onClick={() => { snapshot.status = "completed"; snapshot.processing = false; snapshot.minutes_id = "minutes-test"; commit("stop"); }}>停止</button>
       <button className="btn" onClick={() => { for (let i = 0; i < 21; i++) addTopic(`論点 ${i + 1}`); for (let i = 0; i < 39; i++) aiUpdate(); }}>60分相当リプレイ</button>
