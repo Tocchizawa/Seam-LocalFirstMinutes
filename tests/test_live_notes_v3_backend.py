@@ -169,7 +169,7 @@ def test_manual_consolidation_without_segments_and_fast_topic_merge_rejected(sto
 
 def test_v3_schema_adds_only_two_operations_and_keeps_v2_parser_compatibility():
     schema=semantic_operation_plan_schema(version=3)
-    assert schema["properties"]["schema_version"]["const"]==3
+    assert schema["properties"]["schema_version"]["enum"]==[3]
     for version in (2,3):
         assert SemanticOperationPlan(schema_version=version,batch_id="b",base_revision=0,operations=[])
     with pytest.raises(ValidationError):

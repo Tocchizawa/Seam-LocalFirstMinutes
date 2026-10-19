@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -246,6 +246,27 @@ class SemanticOperation(BaseModel):
     conversation_state: Literal["open", "answered_in_discussion", "reopened", "deferred", "not_applicable"] | None = None
     verification_state: Literal["unverified", "needs_verification", "verified_against_source"] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_revision_entries(cls, value: Any):
+        """Accept the strict-output wire form for revision maps."""
+        if not isinstance(value, dict):
+            return value
+        result = dict(value)
+        for name in ("expected_revisions", "expected_topic_revisions"):
+            entries = result.get(name)
+            if isinstance(entries, list):
+                normalized = {}
+                for entry in entries:
+                    if not isinstance(entry, dict) or set(entry) != {"id", "revision"}:
+                        return value
+                    key = entry["id"]
+                    if not isinstance(key, str) or key in normalized:
+                        return value
+                    normalized[key] = entry["revision"]
+                result[name] = normalized
+        return result
+
     @model_validator(mode="after")
     def fields_for_type(self):
         allowed = {
@@ -363,8 +384,9 @@ def semantic_operation_plan_schema(version: int = 2) -> dict:
     if version not in (2, 3):
         raise ValueError("semantic schema version must be 2 or 3")
     schema = SemanticOperationPlan.model_json_schema()
-    schema["properties"]["schema_version"] = {"type": "integer", "const": version}
-    schema["required"] = ["schema_version", "batch_id", "base_revision", "reason", "operations"]
+    schema["properties"]["schema_version"] = {"type": "integer", "enum": [version]}
+    # Strict structured output requires every property, including nullable ones.
+    schema["required"] = list(schema["properties"])
     schema["properties"]["context_request"] = {
         "anyOf": [
             {"type":"object", "additionalProperties":False,
@@ -378,6 +400,10 @@ def semantic_operation_plan_schema(version: int = 2) -> dict:
             {"type":"null"},
         ]
     }
+    # Reuse the strict definition rather than leaving Pydantic's optional-field
+    # definition in $defs, where providers can validate it independently.
+    schema["$defs"]["ContextRequest"] = schema["properties"]["context_request"]["anyOf"][0]
+    schema["properties"]["context_request"]["anyOf"][0] = {"$ref": "#/$defs/ContextRequest"}
     base = schema["$defs"]["SemanticOperation"]["properties"]
     field_names = [name for name in base if name not in ("type", "op_id")]
     allowed = {
@@ -411,8 +437,23 @@ def semantic_operation_plan_schema(version: int = 2) -> dict:
         "SET_ITEM_STATUS": {"block_id", "expected_revision"},
     }
     variants = []
+    def revision_entries_schema(max_items: int) -> dict:
+        return {
+            "type": "array",
+            "maxItems": max_items,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "maxLength": 160},
+                    "revision": {"type": "integer", "minimum": 0},
+                },
+                "required": ["id", "revision"],
+                "additionalProperties": False,
+            },
+        }
+
     for kind in (SEMANTIC_TYPES_V3 if version == 3 else SEMANTIC_TYPES):
-        props = {"op_id": base["op_id"], "type": {"type": "string", "const": kind}}
+        props = {"op_id": base["op_id"], "type": {"type": "string", "enum": [kind]}}
         for name in field_names:
             prop = deepcopy(base[name])
             if name not in allowed[kind]:
@@ -422,21 +463,23 @@ def semantic_operation_plan_schema(version: int = 2) -> dict:
                     props[name] = deepcopy(base[name])
                     props[name]["maxItems"] = 0
                 elif name in {"expected_revisions", "expected_topic_revisions"}:
-                    props[name] = deepcopy(base[name])
-                    props[name]["maxProperties"] = 0
+                    props[name] = revision_entries_schema(0)
                 elif name == "confidence":
                     props[name] = deepcopy(base[name])
                 else:
                     props[name] = {"type": "null"}
             else:
-                if version == 3 and kind == "SET_ITEM_STATUS" and name == "verification_state":
-                    choices = prop.get("anyOf", [])
-                    for choice in choices:
-                        if choice.get("type") == "string":
-                            choice["enum"] = [value for value in choice.get("enum", []) if value != "verified_against_source"]
-                props[name] = prop
-                if name in required[kind] and "anyOf" in prop:
-                    prop["anyOf"] = [part for part in prop["anyOf"] if part.get("type") != "null"]
+                if name in {"expected_revisions", "expected_topic_revisions"}:
+                    props[name] = revision_entries_schema(100)
+                else:
+                    if version == 3 and kind == "SET_ITEM_STATUS" and name == "verification_state":
+                        choices = prop.get("anyOf", [])
+                        for choice in choices:
+                            if choice.get("type") == "string":
+                                choice["enum"] = [value for value in choice.get("enum", []) if value != "verified_against_source"]
+                    if name in required[kind] and "anyOf" in prop:
+                        prop["anyOf"] = [part for part in prop["anyOf"] if part.get("type") != "null"]
+                    props[name] = prop
         variant = {"type": "object", "properties": props, "required": ["op_id", "type", *field_names], "additionalProperties": False}
         if kind == "UPSERT_KNOWLEDGE":
             create_variant = deepcopy(variant)
@@ -448,8 +491,6 @@ def semantic_operation_plan_schema(version: int = 2) -> dict:
             variants.extend([create_variant, update_variant])
         else:
             variants.append(variant)
-        if kind == "RESTRUCTURE_TOPIC":
-            variants[-1]["properties"]["expected_topic_revisions"]["minProperties"] = 1
     schema["$defs"]["SemanticOperation"] = {"anyOf": variants}
     return schema
 

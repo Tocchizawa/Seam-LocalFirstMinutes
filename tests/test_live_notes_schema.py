@@ -12,9 +12,28 @@ from src.live_notes.models import (
     LiveSettings,
     OperationPlan,
     operation_plan_schema,
+    semantic_operation_plan_schema,
     validation_issue_summary,
 )
 from src.live_notes.repository import LiveNoteStore
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_live_cli_schema_requires_every_object_property_including_nullable_fields(version):
+    # Strict structured output rejects otherwise-valid JSON Schema when an
+    # optional/nullable property is absent from required, even inside $defs.
+    def visit(node, path="$"):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") is False, path
+                assert set(node.get("required", [])) == set(node["properties"]), path
+            for key, value in node.items():
+                visit(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                visit(value, f"{path}[{index}]")
+
+    visit(semantic_operation_plan_schema(version))
 
 
 def plan():

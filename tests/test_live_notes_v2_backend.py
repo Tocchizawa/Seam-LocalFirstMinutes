@@ -26,6 +26,20 @@ MODEL_RESPONSE_FIXTURE = Path(__file__).parent / "fixtures/v2/model-response-can
 FORWARD_TOPIC_FIXTURE = Path(__file__).parent / "fixtures/v2/model-response-forward-topic-ref.json"
 
 
+def provider_wire_plan(plan):
+    """Encode internal revision maps in the strict CLI schema's pair-list form."""
+    wire = json.loads(json.dumps(plan))
+    for operation in wire["operations"]:
+        for name in ("expected_revisions", "expected_topic_revisions"):
+            values = operation.get(name)
+            if isinstance(values, dict):
+                operation[name] = [
+                    {"id": key, "revision": revision}
+                    for key, revision in values.items()
+                ]
+    return wire
+
+
 @pytest.fixture
 def store(tmp_path):
     db = LiveNoteStore(tmp_path / "v2.sqlite")
@@ -52,7 +66,7 @@ def apply_v2_to(store, sid, batch, context, *ops):
         reason="synthetic contract test",
         operations=[SemanticOperation(op_id=f"{batch['id']}:{i}", source_segments=[batch["seq_to"]], **op) for i, op in enumerate(ops, 1)],
     ).model_dump()
-    jsonschema.validate(raw, semantic_operation_plan_schema())
+    jsonschema.validate(provider_wire_plan(raw), semantic_operation_plan_schema())
     return store.apply(sid, batch, context, raw)
 
 
@@ -197,8 +211,9 @@ def test_v2_schema_requires_type_specific_payload_and_rejects_unused_fields():
     valid = SemanticOperationPlan(schema_version=2, batch_id="b", base_revision=0, operations=[
         SemanticOperation(op_id="b:1", type="UPDATE_TAKEAWAY", content_md="結論", source_segments=[1])
     ]).model_dump()
-    jsonschema.validate(valid, schema)
-    invalid = json.loads(json.dumps(valid))
+    valid_wire = provider_wire_plan(valid)
+    jsonschema.validate(valid_wire, schema)
+    invalid = json.loads(json.dumps(valid_wire))
     invalid["operations"][0]["title"] = "不要"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(invalid, schema)
@@ -208,16 +223,19 @@ def test_v2_schema_requires_type_specific_payload_and_rejects_unused_fields():
         SemanticOperation(op_id="b:1", type="UPSERT_KNOWLEDGE", topic_id="t", block_id="existing",
             expected_revision=3, semantic_role="fact", content_md="updated")
     ]).model_dump()
-    jsonschema.validate(update, schema)
-    update["operations"][0]["expected_revision"] = None
+    update_wire = provider_wire_plan(update)
+    jsonschema.validate(update_wire, schema)
+    update_wire["operations"][0]["expected_revision"] = None
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(update, schema)
+        jsonschema.validate(update_wire, schema)
 
 
 def test_captured_cli_response_uses_canonical_terms_on_resolve_and_takeaway():
     raw = json.loads(MODEL_RESPONSE_FIXTURE.read_text())
     plan = SemanticOperationPlan.model_validate(raw)
-    jsonschema.validate(plan.model_dump(), semantic_operation_plan_schema())
+    wire = provider_wire_plan(plan.model_dump())
+    jsonschema.validate(wire, semantic_operation_plan_schema())
+    assert SemanticOperationPlan.model_validate(wire).operations
     assert any(op.type == "RESOLVE_QUESTION" and op.canonical_terms for op in plan.operations)
     assert any(op.type == "UPDATE_TAKEAWAY" and op.canonical_terms for op in plan.operations)
 
@@ -263,10 +281,11 @@ def test_unused_collection_fields_are_empty_in_model_schema():
     schema = semantic_operation_plan_schema()
     raw = SemanticOperationPlan(schema_version=2,batch_id="b",base_revision=0,operations=[
         SemanticOperation(op_id="b:1",type="NO_CHANGE")]).model_dump()
-    jsonschema.validate(raw,schema)
-    raw["operations"][0]["aliases"] = ["unexpected"]
+    wire = provider_wire_plan(raw)
+    jsonschema.validate(wire,schema)
+    wire["operations"][0]["aliases"] = ["unexpected"]
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(raw,schema)
+        jsonschema.validate(wire,schema)
 
 
 def test_prompt_requires_document_structure_and_pass_specific_review():
@@ -297,7 +316,7 @@ def test_each_semantic_operation_has_a_valid_typed_schema_variant(payload):
     raw=SemanticOperationPlan(schema_version=2,batch_id="b",base_revision=0,reason="test",operations=[
         SemanticOperation(op_id="b:1",source_segments=[1],**payload)
     ]).model_dump()
-    jsonschema.validate(raw,semantic_operation_plan_schema())
+    jsonschema.validate(provider_wire_plan(raw),semantic_operation_plan_schema())
 
 
 def test_v1_migration_is_non_destructive_and_idempotent(tmp_path):
