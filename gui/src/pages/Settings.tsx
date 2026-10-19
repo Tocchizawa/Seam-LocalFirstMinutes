@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { LiveNotesSettings } from "../components/live-notes/LiveNotesSettings";
+import { LIVE_DEFAULTS, normalizeLiveConfig, type LiveNotesConfig } from "../lib/live-notes";
 import {
   X, MoonStars, Sun, Monitor, CheckCircle, ArrowsClockwise,
   Play, Pause, MagnifyingGlass, Trash, Check, UsersThree, DownloadSimple,
@@ -95,6 +97,7 @@ function settingsFormSnapshot(data: Record<string, any>): string {
   };
 
   return JSON.stringify({
+    liveNotes: normalizeLiveConfig(data.live_notes),
     wm: String(whisper.model || "medium"),
     perfMode: perf.mode === "full" || perf.mode === "eco" ? perf.mode : "auto",
     perfCpuThreshold: Math.max(30, Math.min(95, Math.round(readNumber(perf.cpu_high_threshold, 75)))),
@@ -147,6 +150,7 @@ export function SettingsModal({ onClose }: Props) {
   const [closing, setClosing] = useState(false);
   const [settings, setSettings] = useState<Record<string, any> | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
+  const [liveNotes, setLiveNotes] = useState<LiveNotesConfig>(LIVE_DEFAULTS);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
@@ -348,6 +352,7 @@ export function SettingsModal({ onClose }: Props) {
       setStopForgetSilenceSec(Number(reminder.silence_sec ?? 300));
       setStopForgetLevelThreshold(Number(reminder.level_threshold ?? 0.02));
 
+      setLiveNotes(normalizeLiveConfig(s.live_notes as Partial<LiveNotesConfig>));
       // ─── 要約 AI 設定 ロード ───
       const ai = (s.minutes_ai as any) || {};
       const validProviders: SummarizeProvider[] = [
@@ -492,6 +497,7 @@ export function SettingsModal({ onClose }: Props) {
     && (!defaultPrompt || promptValue.trim() !== defaultPrompt.trim());
 
   const currentSettingsSnapshot = useMemo(() => settingsFormSnapshot({
+    live_notes: liveNotes,
     whisper: {
       model: wm,
       performance: {
@@ -547,7 +553,7 @@ export function SettingsModal({ onClose }: Props) {
     },
     debug: { enabled: debugEnabled },
   }), [
-    wm, perfMode, perfCpuThreshold, perfMemoryThreshold, perfThrottleRatio,
+    liveNotes, wm, perfMode, perfCpuThreshold, perfMemoryThreshold, perfThrottleRatio,
     perfMaxThrottleSec, perfWorkerNice, perfMlxMemoryRatio, diarizationEnabled,
     speakerMemoryEnabled, speakerMatchThreshold, speakerMinAudioSec, diarProvider,
     diarDevice, diarMinSpeakers, diarMaxSpeakers, lm, aiProvider, aiAutoGenerate,
@@ -584,6 +590,7 @@ export function SettingsModal({ onClose }: Props) {
     const customPromptToSave = promptIsCustom ? promptValue : "";
     try {
       const u = await updateSettings({
+        live_notes: liveNotes,
         whisper: {
           model: wm,
           performance: {
@@ -1520,6 +1527,7 @@ export function SettingsModal({ onClose }: Props) {
 
                 {category === "ai" && (
                   <>
+                    <LiveNotesSettings value={liveNotes} onChange={setLiveNotes} inheritedProvider={aiProvider} recording={recording} codexModels={codexModelChoices} claudeModels={claudeCodeChoices} inheritedModels={{ codex: aiCodexModel, claude_code: aiClaudeCodeModel }} />
                     <SGroup
                       title="要約プロバイダ"
                       hint="議事録要約を生成するモデル/サービス。録音停止時に自動実行。"

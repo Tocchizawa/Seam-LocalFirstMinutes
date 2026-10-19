@@ -47,6 +47,9 @@ async def trigger_summarize(
     """
     if db.get_minutes(minutes_id) is None:
         raise not_found("MINUTES_NOT_FOUND", f"minutes '{minutes_id}' が見つかりません")
+    if db.has_live_note(minutes_id=minutes_id):
+        from src.api.errors import conflict
+        raise conflict("LIVE_NOTE_MANAGED", "議論ノートの残りを整理・再試行してください")
     if provider and not is_known_provider(provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {provider}")
     # cloud provider なら consent チェック

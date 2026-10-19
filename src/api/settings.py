@@ -69,7 +69,34 @@ async def update_settings(data: dict[str, Any], request: Request) -> dict[str, A
         raise forbidden("ORIGIN_NOT_ALLOWED", "origin is not allowed")
 
     _validate_launcher_settings(data)
+    if "live_notes" in data:
+        from pydantic import ValidationError
+        from src.live_notes.models import LiveSettings
+        from copy import deepcopy
+        current = deepcopy(config.get("live_notes") or {})
+        incoming = data["live_notes"]
+        if not isinstance(incoming, dict):
+            raise bad_request("INVALID_LIVE_SETTINGS", "live_notes must be an object")
+        for key in ("consent", "models"):
+            if key in incoming and isinstance(incoming[key], dict):
+                current[key] = {**current.get(key, {}), **incoming[key]}
+            elif key in incoming:
+                current[key] = incoming[key]
+        current.update({k:v for k,v in incoming.items() if k not in ("consent", "models")})
+        try:
+            data["live_notes"] = LiveSettings.model_validate(current).model_dump()
+        except ValidationError:
+            raise bad_request("INVALID_LIVE_SETTINGS", "ライブノートの設定値・更新間隔を確認してください")
     config.update(data)
+    if "live_notes" in data:
+        # A revoked grant must also interrupt a pending/running CLI invocation.
+        from src.live_notes import coordinator as live_module
+        coordinator = live_module._coordinator
+        if coordinator and not coordinator.closed:
+            for sid, cancellation in list(coordinator.cancellations.items()):
+                session = await coordinator.call("session", sid)
+                if not bool(config.get("live_notes", "consent", default={}).get(session["provider"])):
+                    cancellation.set()
     log_cfg = config.get("logging") or {}
     level = str(log_cfg.get("level", "INFO")).upper()
     if config.get("debug", "enabled", default=False):

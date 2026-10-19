@@ -525,6 +525,26 @@ with tempfile.TemporaryDirectory() as td:
 
 ok("PATH refresh resolves fresh binary", argv is not None and argv[0] == str(exe))
 
+with tempfile.TemporaryDirectory() as td:
+    app_cli_dir = Path(td) / "CodexCLI.app" / "Contents" / "MacOS"
+    app_cli_dir.mkdir(parents=True)
+    exe = app_cli_dir / "codex"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    with patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=False):
+        with patch("src.summarize.cli_launcher._read_login_shell_path", return_value=""):
+            with patch(
+                "src.summarize.cli_launcher._MACOS_APP_CLI_PATHS",
+                (str(app_cli_dir),),
+            ):
+                argv, _label = build_command_argv(
+                    {"binary_path": "codex"},
+                    default_binary="codex",
+                    command_args=["--version"],
+                )
+
+ok("ChatGPT app Codex CLI path resolves", argv is not None and argv[0] == str(exe))
+
 
 # ─── Summary ───
 print()

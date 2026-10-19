@@ -197,6 +197,8 @@ app.include_router(projects_router)
 app.include_router(settings_router)
 app.include_router(minutes_router)
 app.include_router(ws_router)
+from src.api.live_notes import router as live_notes_router
+app.include_router(live_notes_router)
 app.include_router(devices_router)
 app.include_router(recording_router)
 app.include_router(debug_router)
@@ -337,6 +339,22 @@ def main() -> None:
         port=server_cfg.get("port", 18900),
         reload=reload_enabled,
     )
+
+
+
+
+
+@app.on_event("startup")
+async def _restore_live_notes():
+    from src.live_notes.coordinator import get_coordinator
+    from src.config import APP_DIR
+    await get_coordinator().restore(APP_DIR / "sessions")
+
+
+@app.on_event("shutdown")
+async def _stop_live_notes():
+    from src.live_notes.coordinator import get_coordinator
+    await get_coordinator().close()
 
 
 if __name__ == "__main__":

@@ -362,7 +362,14 @@ fn augmented_path() -> String {
         prefixes.push(format!("{home}/.bun/bin"));
         prefixes.push(format!("{home}/.deno/bin"));
         prefixes.push(format!("{home}/.npm-global/bin"));
+        prefixes.push(format!(
+            "{home}/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
+        ));
     }
+    prefixes.push(
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
+            .into(),
+    );
 
     let existing = std::env::var("PATH").unwrap_or_default();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();

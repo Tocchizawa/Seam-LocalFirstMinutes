@@ -3,6 +3,8 @@ import { ArrowDown, ArrowsIn } from "@phosphor-icons/react";
 import { useRecording, type StreamStatus } from "../lib/recording-context";
 import { Spinner } from "../components/Spinner";
 import { ModelDownloadProgress } from "../components/ModelDownloadProgress";
+import { LiveNotesPanel } from "../components/live-notes/LiveNotesPanel";
+import { useLiveNotes } from "../lib/live-notes";
 
 function fmtTs(s: number) {
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
@@ -22,7 +24,17 @@ interface Props {
  * 録音中のリアルタイム文字起こしを表示する画面。
  * MainView の旧 LiveTranscript と等価だが、context の liveSegments を読むだけ。
  */
-export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
+export function LiveView(props: Props) {
+  const { activeSessionId } = useRecording();
+  const notes = useLiveNotes(activeSessionId);
+  if (notes.snapshot) return <div className="relative h-full min-h-0">
+    <LiveNotesPanel key={notes.snapshot.session_id} controller={notes} transcript={<TranscriptLiveView showStreamStatusBar={props.showStreamStatusBar} />} />
+    {props.onClose && <button type="button" className="btn absolute right-4 bottom-4" title="縮小して一覧へ戻る" onClick={props.onClose}><ArrowsIn size={14} /></button>}
+  </div>;
+  return <TranscriptLiveView {...props} />;
+}
+
+function TranscriptLiveView({ showStreamStatusBar = false, onClose }: Props) {
   const {
     liveSegments, streamStatus, recording, modelLoadLog, modelDownload,
   } = useRecording();

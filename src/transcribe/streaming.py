@@ -1190,6 +1190,8 @@ class StreamingTranscriber:
         self._running = False
         self._segments: list[dict] = []
         self._segments_lock = threading.Lock()
+        self._emit_lock = threading.Lock()
+        self._segment_seq = 0
         self._total_audio_sec = 0.0
         self._repo: str | None = None
         self._model_error: str | None = None
@@ -1877,10 +1879,15 @@ class StreamingTranscriber:
                 self._pending_audio_sec = max(0.0, self._pending_audio_sec - chunk_dur)
 
     def _emit(self, segment: dict) -> None:
-        if self._on_segment is None or self._loop is None:
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(self._on_segment(segment), self._loop)
-        except RuntimeError:
-            # ループが閉じている可能性
-            pass
+        import uuid
+        with self._emit_lock:
+            self._segment_seq += 1
+            segment.setdefault("segment_id", uuid.uuid4().hex)
+            segment.setdefault("segment_seq", self._segment_seq)
+            if self._on_segment is None or self._loop is None:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(self._on_segment(segment), self._loop)
+            except RuntimeError:
+                # ループが閉じている可能性
+                pass

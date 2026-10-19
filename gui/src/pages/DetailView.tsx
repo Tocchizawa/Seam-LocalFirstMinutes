@@ -17,6 +17,8 @@ import {
 import { Spinner } from "../components/Spinner";
 import { Waveform } from "../components/Waveform";
 import { MarkdownEditor } from "../components/MarkdownEditor";
+import { LiveNotesPanel } from "../components/live-notes/LiveNotesPanel";
+import { useLiveNotes } from "../lib/live-notes";
 import { MarkdownView } from "../components/MarkdownView";
 import { Select } from "../components/Select";
 import { useImeSafeEnter } from "../lib/ime";
@@ -183,6 +185,7 @@ export function DetailView(props: Props) {
   const liveResult = pipeline?.transcript;
   const minutes = currentMinutes;
   const sessionId = props.sessionId ?? minutes?.session_id ?? "";
+  const liveNotes = useLiveNotes(sessionId);
   const duration = minutes?.duration_sec ?? pipeline?.result?.duration_sec ?? 0;
   // 録音停止 pipeline 中はバックエンドから送られた transcript_chunk が
   // liveSegments に蓄積されているのでそれを優先表示。
@@ -528,6 +531,14 @@ export function DetailView(props: Props) {
   );
 
   /* in-document find */
+  const liveNotesTabSession = useRef<string | null>(null);
+  useEffect(() => {
+    if (liveNotes.snapshot && liveNotesTabSession.current !== sessionId) {
+      liveNotesTabSession.current = sessionId;
+      if (!initialTab) setTab("summary");
+    }
+  }, [liveNotes.snapshot?.session_id, sessionId, initialTab]);
+
   const [findOpen, setFindOpen] = useState<boolean>(!!initialQuery);
   const [findQuery, setFindQuery] = useState<string>(initialQuery || "");
   const [findIndex, setFindIndex] = useState(0);
@@ -868,7 +879,7 @@ export function DetailView(props: Props) {
   const tabs: Array<["summary" | "transcript", string, number | null]> = [
     [
       "summary",
-      "Summary",
+      liveNotes.snapshot ? "議論ノート" : "Summary",
       isSearching ? summaryMatchCount : (summary ? null : 0),
     ],
     [
@@ -1219,7 +1230,7 @@ export function DetailView(props: Props) {
       {/* Content */}
       <div className="flex-1 flex overflow-hidden min-h-0">
         <div ref={transcriptScrollRef} className="flex-1 overflow-y-auto">
-        {tab === "summary" && (
+        {tab === "summary" && (liveNotes.snapshot ? <LiveNotesPanel key={liveNotes.snapshot.session_id} controller={liveNotes} /> :
           <SummaryPanel
             minutesId={minutesId}
             savedSummary={summary || ""}

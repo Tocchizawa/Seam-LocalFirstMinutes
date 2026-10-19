@@ -1,5 +1,34 @@
 # Seam - データモデル設計書
 
+## リアルタイム議論ノートの正本
+
+録音開始時の `session_id` を正本キーとし、既存 `minutes` と同じSQLiteへ追加型マイグレーションで保存する。
+マイグレーションは繰り返し実行可能とし、既存minutes・FTSを維持する。
+詳細DDLとAPI契約は [ライブノート設計書 第6・11章](./SEAM_REALTIME_AGENTIC_NOTES_DESIGN.md) を参照。
+
+| テーブル群 | 保持するもの |
+|---|---|
+| `live_note_sessions` | 会議ID、project/minutes関連、固定provider/model、状態、note revision、処理済みseq |
+| `live_note_segments` | 確定発話の安定ID・会議内seq・時刻・テキスト・話者 |
+| `live_note_topics` / `live_note_blocks` | stable ID、順序、所有者human/ai、局所revision、論理削除、Markdown、種別、根拠発話 |
+| `live_note_batches` | 未処理の連続seq範囲、実行状態、試行回数、失敗理由 |
+| `live_note_events` / `live_note_suggestions` | コミット単位の履歴・Undo情報、保留した競合案と解決状態 |
+| 操作・リクエストの一意キー | AI再試行・手動保存再送による二重適用防止 |
+
+`minutes.id` は停止後に関連付ける。ライブ議事録の `minutes.summary` はtopic/blockから生成した
+検索・従来エクスポート互換用の派生Markdownであり、編集正本ではない。
+関連するminutesへの投影とライブノート更新は同じトランザクションで行う。
+既存のライブノートなし議事録では `minutes.summary` を従来どおり編集する。
+
+手動編集は `request_id` と `expected_revision` を指定し、人間所有へ変更する。
+削除は論理削除とし履歴からUndoできる。AIに削除権限は与えず、存在しない発話根拠も受理しない。
+ライブノートはセッション作業ディレクトリの削除対象から独立して永続保持する。
+
+設定は独立した `live_notes` キーに保存する。初期値は `enabled: false`、`provider: inherit`。
+既定のバッチ間隔20/35/60秒、最大6000文字・20操作・90呼び出し/時、タイムアウト120秒、
+構造修復1回、手動保存debounce500ms。provider/modelは会議開始時に固定する。
+送信同意がない会議ではAI呼び出しを開始しない。
+
 ## 1. 設定ファイル (YAML)
 
 ### 1.1 グローバル設定 (`~/.seam/config.yaml`)
@@ -269,7 +298,7 @@ def build_transcript_text(transcript: list[dict]) -> str:
 
 ---
 
-## 4. Markdown 出力（正本）
+## 4. Markdown 出力（SQLiteからの投影）
 
 プロジェクト設定の `output_dir` に保存（存在しなければ自動作成）。
 
@@ -367,3 +396,23 @@ def build_transcript_text(transcript: list[dict]) -> str:
   │
   └── セッションディレクトリ全削除                   [一時データ全消去]
 ```
+
+## v2意味状態・表示snapshot
+
+Canonical storageはSQLiteの既存topic/block rows。additive migrationはblocksに `semantic_role`, `epistemic_state`, `resolution_state`, evidence, aliases/canonical terms, source-verification flag, human ownership/protection, supersession, semantic-v2 marker, takeaway flagを追加し、question rowsにはstate、answer node、resolution evidence、sequence、revisionを保持する。sessionにはbatch kindとfinalization stateを追加する。既存minutesとtranscript本文をmigrationで再構成しない。v1 kind/type/APIは旧ノートとreplay互換のため残る。
+
+schema v2 operation planと10個のsemantic operation名、question/evidence state、atomic transaction規則の詳細は [v2 implementation contract](./live-notes-v2-report.md) に記録する。Snapshotの `document.nodes[]` はcanonical topic/block IDとper-entity revisionを持つprojectionであり、独立した保存正本ではない。`document.markdown`、document revision、questions、takeawayもsnapshotの派生値を含む。手動編集はentity単位のrevisionとprotectionを使い、複数unitの変更はexpected note revision付き `/document/edits` deltaとして原子的に適用する。
+
+評価シナリオは [live_notes_v2_scenario.json](../tests/fixtures/live_notes_v2_scenario.json) を参照。これは入力データであり、正解ノートやprovider応答fixtureではない。
+
+## v3意味メモリ
+
+v3も既存SQLite topic/blockを正本とし、追加migrationでblockに `canonical_key`、`content_digest`、`item_status`、質問に `conversation_state` と `verification_state` を加える。`live_note_item_relations` は answers/supersedes/duplicates/supports/contradicts/related の安定ID関係を保持し、`live_note_intents` は人間が削除・却下した意味内容の再生成を抑止する。検索はFTS5 trigramが利用できる環境ではtrigram indexを使い、利用できない場合は正規化token検索へフォールバックする。新旧行は起動時に安全に再索引され、migrationはminutes/transcriptを変更しない。
+
+topic digestは意味を持つ短い要約としてtopic行に保存し、outlineと話題検索に使う。未設定の旧topicだけ本文からfallbackを作る。既存回答blockの改訂はquestion revisionに加え `expected_revisions[block_id]` でblock revisionも検証する。質問状態変更はblock revisionと独立した `expected_question_revision` を必要とする。項目状態はrole固有で、質問の会話・検証状態はitem statusに混在させない。意味操作のsupports/contradicts/related関係は同じsession内のstable block IDと期待revisionを指定し、同じevent transaction/undo履歴で保存される。
+
+`SET_ITEM_STATUS` では質問をansweredにできず、本文・根拠とrelationを伴う `RESOLVE_QUESTION` を使う。外部検証のattestation経路は未実装のため、semantic status操作で `verified_against_source` へ遷移できない。自動consolidationはcooldownと最低fast-batch数に加え、重複・解決・topic departure/switch・情報密度など、fast batchに保存されたsemantic triggerを要求し、未処理発話があれば待つ。手動consolidateはこのtrigger条件を迂回できる。
+
+構造化操作はschema v3で `MERGE_TOPICS` と `SET_ITEM_STATUS` を追加する。v1/v2保存済みoperationは引き続き読み込み可能。会話で質問が回答された状態は `answered_in_discussion`、外部資料での確認は独立した `verification_state` であり、会話発話だけでverifiedにはできない。fast batchはtopic merge/restructureを実行せず、consolidation/finalizeのみが行う。
+
+snapshotの `document` はtitleと編集revision、takeaway、未解決質問数、外部確認要件数を含む表示projection。質問一覧は会話状態と検証状態を両方返す。タイトルと要点はrevision付き `/document/edits` で編集され、手動変更はAI保護される。

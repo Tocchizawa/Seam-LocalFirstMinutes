@@ -1,0 +1,514 @@
+{
+  "schema_version": 1,
+  "case_id": "synthetic_11m",
+  "notes": "Synthetic evaluator example only; contains no transcript text.",
+  "snapshots": [
+    {
+      "minute": 2,
+      "topics": [
+        {
+          "id": "topic_alpha-stable-id",
+          "semantic_key": "topic_alpha",
+          "title": "Synthetic theme 1",
+          "block_keys": [
+            "fact_01",
+            "fact_02"
+          ]
+        }
+      ],
+      "claims": [
+        {
+          "key": "fact_01",
+          "text": "Synthetic note item fact_01",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_01"
+          ]
+        },
+        {
+          "key": "fact_02",
+          "text": "Synthetic note item fact_02",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_02"
+          ]
+        }
+      ],
+      "question_states": {
+        "q_alpha": "open",
+        "q_beta": "open",
+        "q_gamma": "open"
+      },
+      "open_question_ids": [
+        "q_alpha",
+        "q_beta",
+        "q_gamma"
+      ]
+    },
+    {
+      "minute": 4,
+      "topics": [
+        {
+          "id": "topic_alpha-stable-id",
+          "semantic_key": "topic_alpha",
+          "title": "Synthetic theme 1",
+          "block_keys": [
+            "fact_01",
+            "fact_02",
+            "fact_03",
+            "fact_04",
+            "fact_05"
+          ]
+        },
+        {
+          "id": "topic_beta-stable-id",
+          "semantic_key": "topic_beta",
+          "title": "Synthetic theme 2",
+          "block_keys": []
+        }
+      ],
+      "claims": [
+        {
+          "key": "fact_01",
+          "text": "Synthetic note item fact_01",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_01"
+          ]
+        },
+        {
+          "key": "fact_02",
+          "text": "Synthetic note item fact_02",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_02"
+          ]
+        },
+        {
+          "key": "fact_03",
+          "text": "Synthetic note item fact_03",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_03"
+          ]
+        },
+        {
+          "key": "fact_04",
+          "text": "Synthetic note item fact_04",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_04"
+          ]
+        },
+        {
+          "key": "fact_05",
+          "text": "Synthetic note item fact_05",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_05"
+          ]
+        }
+      ],
+      "question_states": {
+        "q_alpha": "open",
+        "q_beta": "open",
+        "q_gamma": "open"
+      },
+      "open_question_ids": [
+        "q_alpha",
+        "q_beta",
+        "q_gamma"
+      ]
+    },
+    {
+      "minute": 6,
+      "topics": [
+        {
+          "id": "topic_alpha-stable-id",
+          "semantic_key": "topic_alpha",
+          "title": "Synthetic theme 1",
+          "block_keys": [
+            "fact_01",
+            "fact_02",
+            "fact_03",
+            "fact_04",
+            "fact_05"
+          ]
+        },
+        {
+          "id": "topic_beta-stable-id",
+          "semantic_key": "topic_beta",
+          "title": "Synthetic theme 2",
+          "block_keys": [
+            "fact_06",
+            "fact_07",
+            "fact_08"
+          ]
+        }
+      ],
+      "claims": [
+        {
+          "key": "fact_01",
+          "text": "Synthetic note item fact_01",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_01"
+          ]
+        },
+        {
+          "key": "fact_02",
+          "text": "Synthetic note item fact_02",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_02"
+          ]
+        },
+        {
+          "key": "fact_03",
+          "text": "Synthetic note item fact_03",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_03"
+          ]
+        },
+        {
+          "key": "fact_04",
+          "text": "Synthetic note item fact_04",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_04"
+          ]
+        },
+        {
+          "key": "fact_05",
+          "text": "Synthetic note item fact_05",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_05"
+          ]
+        },
+        {
+          "key": "fact_06",
+          "text": "Synthetic note item fact_06",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_06"
+          ]
+        },
+        {
+          "key": "fact_07",
+          "text": "Synthetic note item fact_07",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_07"
+          ]
+        },
+        {
+          "key": "fact_08",
+          "text": "Synthetic note item fact_08",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_08"
+          ]
+        }
+      ],
+      "question_states": {
+        "q_alpha": "answered_in_discussion",
+        "q_beta": "open",
+        "q_gamma": "open"
+      },
+      "open_question_ids": [
+        "q_beta",
+        "q_gamma"
+      ]
+    },
+    {
+      "minute": 9,
+      "topics": [
+        {
+          "id": "topic_alpha-stable-id",
+          "semantic_key": "topic_alpha",
+          "title": "Synthetic theme 1",
+          "block_keys": [
+            "fact_01",
+            "fact_02",
+            "fact_03",
+            "fact_04",
+            "fact_05"
+          ]
+        },
+        {
+          "id": "topic_beta-stable-id",
+          "semantic_key": "topic_beta",
+          "title": "Synthetic theme 2",
+          "block_keys": [
+            "fact_06",
+            "fact_07",
+            "fact_08",
+            "fact_09",
+            "fact_10"
+          ]
+        },
+        {
+          "id": "topic_gamma-stable-id",
+          "semantic_key": "topic_gamma",
+          "title": "Synthetic theme 3",
+          "block_keys": [
+            "fact_11"
+          ]
+        }
+      ],
+      "claims": [
+        {
+          "key": "fact_01",
+          "text": "Synthetic note item fact_01",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_01"
+          ]
+        },
+        {
+          "key": "fact_02",
+          "text": "Synthetic note item fact_02",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_02"
+          ]
+        },
+        {
+          "key": "fact_03",
+          "text": "Synthetic note item fact_03",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_03"
+          ]
+        },
+        {
+          "key": "fact_04",
+          "text": "Synthetic note item fact_04",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_04"
+          ]
+        },
+        {
+          "key": "fact_05",
+          "text": "Synthetic note item fact_05",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_05"
+          ]
+        },
+        {
+          "key": "fact_06",
+          "text": "Synthetic note item fact_06",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_06"
+          ]
+        },
+        {
+          "key": "fact_07",
+          "text": "Synthetic note item fact_07",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_07"
+          ]
+        },
+        {
+          "key": "fact_08",
+          "text": "Synthetic note item fact_08",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_08"
+          ]
+        },
+        {
+          "key": "fact_09",
+          "text": "Synthetic note item fact_09",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_09"
+          ]
+        },
+        {
+          "key": "fact_10",
+          "text": "Synthetic note item fact_10",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_10"
+          ]
+        },
+        {
+          "key": "fact_11",
+          "text": "Synthetic note item fact_11",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_11"
+          ]
+        }
+      ],
+      "question_states": {
+        "q_alpha": "answered_in_discussion",
+        "q_beta": "answered_in_discussion",
+        "q_gamma": "open"
+      },
+      "open_question_ids": [
+        "q_gamma"
+      ]
+    },
+    {
+      "minute": 11,
+      "topics": [
+        {
+          "id": "topic_alpha-stable-id",
+          "semantic_key": "topic_alpha",
+          "title": "Synthetic theme 1",
+          "block_keys": [
+            "fact_01",
+            "fact_02",
+            "fact_03",
+            "fact_04",
+            "fact_05"
+          ]
+        },
+        {
+          "id": "topic_beta-stable-id",
+          "semantic_key": "topic_beta",
+          "title": "Synthetic theme 2",
+          "block_keys": [
+            "fact_06",
+            "fact_07",
+            "fact_08",
+            "fact_09",
+            "fact_10"
+          ]
+        },
+        {
+          "id": "topic_gamma-stable-id",
+          "semantic_key": "topic_gamma",
+          "title": "Synthetic theme 3",
+          "block_keys": [
+            "fact_11",
+            "fact_12",
+            "fact_13"
+          ]
+        }
+      ],
+      "claims": [
+        {
+          "key": "fact_01",
+          "text": "Synthetic note item fact_01",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_01"
+          ]
+        },
+        {
+          "key": "fact_02",
+          "text": "Synthetic note item fact_02",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_02"
+          ]
+        },
+        {
+          "key": "fact_03",
+          "text": "Synthetic note item fact_03",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_03"
+          ]
+        },
+        {
+          "key": "fact_04",
+          "text": "Synthetic note item fact_04",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_04"
+          ]
+        },
+        {
+          "key": "fact_05",
+          "text": "Synthetic note item fact_05",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_05"
+          ]
+        },
+        {
+          "key": "fact_06",
+          "text": "Synthetic note item fact_06",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_06"
+          ]
+        },
+        {
+          "key": "fact_07",
+          "text": "Synthetic note item fact_07",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_07"
+          ]
+        },
+        {
+          "key": "fact_08",
+          "text": "Synthetic note item fact_08",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_08"
+          ]
+        },
+        {
+          "key": "fact_09",
+          "text": "Synthetic note item fact_09",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_09"
+          ]
+        },
+        {
+          "key": "fact_10",
+          "text": "Synthetic note item fact_10",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_10"
+          ]
+        },
+        {
+          "key": "fact_11",
+          "text": "Synthetic note item fact_11",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_11"
+          ]
+        },
+        {
+          "key": "fact_12",
+          "text": "Synthetic note item fact_12",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_12"
+          ]
+        },
+        {
+          "key": "fact_13",
+          "text": "Synthetic note item fact_13",
+          "epistemic_state": "supported_in_discussion",
+          "evidence_segment_ids": [
+            "s11_13"
+          ]
+        }
+      ],
+      "question_states": {
+        "q_alpha": "answered_in_discussion",
+        "q_beta": "answered_in_discussion",
+        "q_gamma": "needs_verification"
+      },
+      "open_question_ids": [
+        "q_gamma"
+      ]
+    }
+  ]
+}

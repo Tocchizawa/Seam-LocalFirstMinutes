@@ -220,6 +220,10 @@ class SummaryRunner:
 
         同一minutes_idの既存ジョブがあれば cancel して新ジョブで上書き。
         """
+        from src.storage.db import db
+        if db.has_live_note(minutes_id=minutes_id):
+            logger.info("[summary] live note owns document; skipping enqueue: %s", minutes_id)
+            return
         existing = self._jobs.get(minutes_id)
         if existing is not None:
             existing.cancel_event.set()
@@ -925,6 +929,9 @@ def recover_drafts() -> int:
                 pass
             continue
 
+        if db.has_live_note(minutes_id=minutes_id):
+            # A legacy recovery draft must never become the live document.
+            continue
         existing_summary = str(record.get("summary") or "").strip()
         if existing_summary:
             # 既に summary 入っている → draft破棄

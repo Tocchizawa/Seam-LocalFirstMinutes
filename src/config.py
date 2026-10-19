@@ -6,10 +6,13 @@ from typing import Any
 
 import yaml
 
+from src.live_notes.models import DEFAULTS as LIVE_NOTE_DEFAULTS
+
 APP_DIR = Path("~/.seam").expanduser()
 
 DEFAULTS: dict[str, Any] = {
     "schema_version": 1,
+    "live_notes": LIVE_NOTE_DEFAULTS,
     "ollama": {
         # context expansion agent 用 (要約とは別 feature)
         "base_url": "http://localhost:11434",

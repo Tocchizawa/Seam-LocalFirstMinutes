@@ -86,6 +86,8 @@ class Database:
         conn.executescript(SCHEMA_SQL)
         conn.executescript(FTS_SQL)
         conn.executescript(TRIGGERS_SQL)
+        from src.live_notes.repository import migrate
+        migrate(conn)
         conn.commit()
         logger.info("Database initialized: %s", self._path)
 
@@ -212,6 +214,8 @@ class Database:
     def update_summary(self, minutes_id: str, summary: str,
                        llm_model: str | None = None) -> bool:
         conn = self._get_conn()
+        if self.has_live_note(minutes_id=minutes_id):
+            raise ValueError("LIVE_NOTE_MANAGED: 議論ノート専用APIで編集してください")
         if llm_model is None:
             result = conn.execute(
                 "UPDATE minutes SET summary = ?, updated_at = datetime('now') WHERE id = ?",
@@ -224,6 +228,14 @@ class Database:
             )
         conn.commit()
         return result.rowcount > 0
+
+    def has_live_note(self, *, session_id: str | None = None, minutes_id: str | None = None) -> bool:
+        if session_id is not None:
+            return self._get_conn().execute("SELECT 1 FROM live_note_sessions WHERE session_id=?", (session_id,)).fetchone() is not None
+        return self._get_conn().execute(
+            "SELECT 1 FROM live_note_sessions l JOIN minutes m ON m.session_id=l.session_id WHERE m.id=?",
+            (minutes_id,),
+        ).fetchone() is not None
 
     def update_project(self, minutes_id: str, project_id: str) -> bool:
         conn = self._get_conn()
