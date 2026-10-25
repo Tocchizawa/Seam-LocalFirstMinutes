@@ -181,5 +181,6 @@ SKIP_GUI_BUILD=1 ./scripts/oss_preflight.sh
 ## 開発・運用
 
 - コントリビュート: [CONTRIBUTING.md](./CONTRIBUTING.md)
+- ブランチ / リリース運用: [docs/repository-governance.md](./docs/repository-governance.md)
 - セキュリティ: [SECURITY.md](./SECURITY.md)
 - ライセンス: [Apache 2.0](./LICENSE)
