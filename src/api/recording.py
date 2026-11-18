@@ -20,7 +20,7 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from src.api.errors import bad_request, conflict, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.api.ws import ws_manager
 from src.audio.converter import convert_audio_to_mp3
 from src.audio.mixer import RealtimeMixer
@@ -1125,6 +1125,16 @@ async def _start_recording(req: StartRequest) -> dict:
             "LOCAL_MODEL_BUSY",
             "別のローカルAI処理中のため、処理完了後に録音を開始してください",
         )
+    except Exception as e:
+        streamer.cleanup()
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
+        logger.exception("Failed to initialize streaming transcriber [%s]", session_id)
+        raise internal_error(
+            "TRANSCRIBER_START_FAILED",
+            f"文字起こしの準備に失敗したため録音を開始できません: {e}",
+        )
     rec_cfg = config.get("recording", default={}) or {}
     mix_writer = RealtimeMixedAudioWriter(_session_dir(session_id))
     try:
@@ -1134,9 +1144,14 @@ async def _start_recording(req: StartRequest) -> dict:
             streamer.cleanup()
         except Exception:
             pass
+        try:
+            mix_writer.close()
+        except Exception:
+            pass
         _cleanup_session(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
         raise conflict("MIXED_AUDIO_WRITER_FAILED", f"録音音声の保存準備に失敗: {e}")
 
     def _on_mixed_chunk(samples) -> None:
@@ -1154,10 +1169,21 @@ async def _start_recording(req: StartRequest) -> dict:
         on_chunk=_on_mixed_chunk,
         audio_leveling=rec_cfg.get("audio_leveling"),
     )
-    mixer.start(has_system=req.capture_system)
     _streamers[session_id] = streamer
     _mixers[session_id] = mixer
     _mix_writers[session_id] = mix_writer
+    try:
+        mixer.start(has_system=req.capture_system)
+    except Exception as e:
+        _cleanup_session(session_id)
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
+        logger.exception("Failed to initialize realtime audio mixer [%s]", session_id)
+        raise internal_error(
+            "AUDIO_MIXER_START_FAILED",
+            f"音声入力の準備に失敗したため録音を開始できません: {e}",
+        )
 
     try:
         result = recorder.start(
@@ -1178,6 +1204,7 @@ async def _start_recording(req: StartRequest) -> dict:
         _cleanup_session(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
         raise conflict(code, message)
     if req.capture_system and not result.get("has_system_audio"):
         system_error = str(result.get("system_error") or "内部音声を開始できませんでした")
@@ -1188,6 +1215,7 @@ async def _start_recording(req: StartRequest) -> dict:
         _cleanup_session(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
         raise conflict("SYSTEM_AUDIO_START_FAILED", f"内部音声の録音開始失敗: {system_error}")
 
     _active_session_id = session_id

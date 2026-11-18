@@ -1317,41 +1317,41 @@ class StreamingTranscriber:
         if not model_resource_gate.try_acquire_whisper():
             raise ResourceBusyError("Whisper resource is busy with a local LLM")
         self._resource_lease = True
-        self._loop = loop
-        self._running = True
-        with self._segments_lock:
-            self._segments = []
-        self._total_audio_sec = 0.0
-        # 既存の chunker パラメータを保持して再構築
-        prev = self._chunker
-        kwargs: dict = {
-            "sample_rate": prev.sample_rate,
-            "silence_duration_ms": prev.silence_duration_ms,
-            "min_chunk_ms": prev.min_chunk_ms,
-            "max_chunk_ms": prev.max_chunk_ms,
-        }
-        if hasattr(prev, "rms_threshold"):
-            kwargs["rms_threshold"] = prev.rms_threshold
-        if hasattr(prev, "threshold"):
-            kwargs["threshold"] = prev.threshold
-        if hasattr(prev, "smart_cut_lookback_ms"):
-            kwargs["smart_cut_lookback_ms"] = prev.smart_cut_lookback_ms
-        self._chunker = self._build_chunker(kwargs)
-        self._model_loaded.clear()
-        self._model_error = None
-        self._recent_ratios = []
-        self._pending_audio_sec = 0.0
-        self._last_processed_at = 0.0
-        self._last_feed_at = 0.0
-        self._worker_restarts = 0
-        self._last_restart_reason = None
-        self._last_restart_at = 0.0
-        self._dropped_chunks = 0
-        self._dropped_audio_sec = 0.0
-        self._transcribe_errors = 0
-        self._filtered_segments = 0
-        self._clear_queue()
         try:
+            self._loop = loop
+            self._running = True
+            with self._segments_lock:
+                self._segments = []
+            self._total_audio_sec = 0.0
+            # 既存の chunker パラメータを保持して再構築
+            prev = self._chunker
+            kwargs: dict = {
+                "sample_rate": prev.sample_rate,
+                "silence_duration_ms": prev.silence_duration_ms,
+                "min_chunk_ms": prev.min_chunk_ms,
+                "max_chunk_ms": prev.max_chunk_ms,
+            }
+            if hasattr(prev, "rms_threshold"):
+                kwargs["rms_threshold"] = prev.rms_threshold
+            if hasattr(prev, "threshold"):
+                kwargs["threshold"] = prev.threshold
+            if hasattr(prev, "smart_cut_lookback_ms"):
+                kwargs["smart_cut_lookback_ms"] = prev.smart_cut_lookback_ms
+            self._chunker = self._build_chunker(kwargs)
+            self._model_loaded.clear()
+            self._model_error = None
+            self._recent_ratios = []
+            self._pending_audio_sec = 0.0
+            self._last_processed_at = 0.0
+            self._last_feed_at = 0.0
+            self._worker_restarts = 0
+            self._last_restart_reason = None
+            self._last_restart_at = 0.0
+            self._dropped_chunks = 0
+            self._dropped_audio_sec = 0.0
+            self._transcribe_errors = 0
+            self._filtered_segments = 0
+            self._clear_queue()
             if not self._spawn_worker(reason="start", force=True):
                 raise RuntimeError("Whisper worker could not be started")
         except Exception:
