@@ -1,22 +1,49 @@
-/// A display transition expressed in graphemes so composed characters and emoji
-/// stay intact. Previously visible text is preserved when a draft is revised.
+/// Schedules only the changed suffix. Unsettled characters in the common
+/// prefix keep their original timing when another partial result arrives.
 public struct TranscriptReveal: Sendable {
-    public let stableCount: Int
-    public let totalCount: Int
-    public let duration: Double
+    public struct Cue: Hashable, Sendable {
+        public let start: Double
+        public let settle: Double
 
-    public init(previous: String, next: String, maximumDuration: Double) {
-        stableCount = zip(previous, next).prefix(while: { $0 == $1 }).count
-        totalCount = next.count
-        let added = totalCount - stableCount
-        duration = added == 0 ? 0 : max(0, min(maximumDuration, Double(added) * 0.014))
+        public func progress(at time: Double) -> Double {
+            min(1, max(0, (time - start) / (settle - start)))
+        }
     }
 
-    public func visibleCount(elapsed: Double) -> Int {
-        guard duration > 0 else { return totalCount }
-        let fraction = max(0, min(1, elapsed / duration))
-        let added = totalCount - stableCount
-        let visible = 1 + Int(Double(added - 1) * fraction)
-        return stableCount + visible
+    public private(set) var text = ""
+    public private(set) var cues: [Int: Cue] = [:]
+
+    public init() {}
+
+    public var settlesAt: Double? { cues.values.map(\.settle).max() }
+
+    public mutating func update(_ next: String, at time: Double, window: Double) {
+        let shared = zip(text, next).prefix(while: { $0 == $1 }).count
+        text = next
+        guard window > 0 else {
+            finish()
+            return
+        }
+
+        cues = cues.filter { $0.key < shared && $0.value.settle > time }
+        let added = next.count - shared
+        guard added > 0 else { return }
+        // Backfill or a large correction should be readable immediately.
+        guard added <= 96 else {
+            finish()
+            return
+        }
+
+        let landingDuration = min(0.185, window * 0.72)
+        let latestStart = cues.values.map(\.start).max() ?? time
+        let firstStart = max(time, latestStart)
+        let availableSpread = max(0, time + window - landingDuration - firstStart)
+        let spacing = added > 1 ? min(0.023, availableSpread / Double(added - 1)) : 0
+        for offset in 0..<added {
+            let start = firstStart + Double(offset) * spacing
+            cues[shared + offset] = Cue(start: start, settle: start + landingDuration)
+        }
     }
+
+    public mutating func finish() { cues.removeAll() }
 }

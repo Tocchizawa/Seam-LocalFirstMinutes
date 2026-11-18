@@ -4,6 +4,12 @@ import PackageDescription
 let package = Package(
     name: "SeamMac",
     platforms: [.macOS(.v13)],
-    products: [.library(name: "SeamCore", targets: ["SeamCore"])],
-    targets: [.target(name: "SeamCore")]
+    products: [
+        .library(name: "SeamCore", targets: ["SeamCore"]),
+        .library(name: "SeamUI", targets: ["SeamUI"]),
+    ],
+    targets: [
+        .target(name: "SeamCore"),
+        .target(name: "SeamUI", dependencies: ["SeamCore"]),
+    ]
 )
