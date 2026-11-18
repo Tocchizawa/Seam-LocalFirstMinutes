@@ -53,9 +53,20 @@ private final class SettingsEditor: ObservableObject {
     }
 }
 
-private enum SettingsPage: String, CaseIterable, Identifiable {
+public enum NativeSettingsPage: String, CaseIterable, Identifiable {
     case input = "録音", transcription = "文字起こし", summary = "要約", speakers = "話者", appearance = "外観", advanced = "詳細"
-    var id: Self { self }
+    public var id: Self { self }
+
+    var symbol: String {
+        switch self {
+        case .input: "mic"
+        case .transcription: "waveform"
+        case .summary: "doc.text"
+        case .speakers: "person.2"
+        case .appearance: "circle.lefthalf.filled"
+        case .advanced: "slider.horizontal.3"
+        }
+    }
 }
 
 private enum SummaryProvider: String, CaseIterable, Identifiable {
@@ -93,10 +104,13 @@ private enum SummaryProvider: String, CaseIterable, Identifiable {
 public struct NativeSettings<Appearance: View>: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var selection
     @StateObject private var editor: SettingsEditor
-    @Stored private var page: SettingsPage = .transcription
+    @ObservedObject private var downloads: WhisperDownloads
+    @Binding private var page: NativeSettingsPage
     @Stored private var devices: [AudioDevice] = []
-    @Stored private var catalog: WhisperModels?
     @Stored private var cliOptions: [CLIModel] = []
     @Stored private var hasProviderKey = false
     @Stored private var hasDiarizationToken = false
@@ -121,16 +135,18 @@ public struct NativeSettings<Appearance: View>: View {
         let label: String
     }
 
-    private let baseWhisperModels = [
-        ("tiny", "Tiny"), ("base", "Base"), ("small", "Small"), ("medium", "Medium"),
-        ("large-v1", "Large v1"), ("large-v2", "Large v2"), ("large-v3", "Large v3"),
-        ("large-v3-turbo", "Large v3 Turbo"),
-    ]
-
-    public init(api: SeamAPI?, compact: Bool = false, @ViewBuilder appearance: @escaping () -> Appearance) {
+    public init(api: SeamAPI?, downloads: WhisperDownloads, page: Binding<NativeSettingsPage>, compact: Bool = false,
+                @ViewBuilder appearance: @escaping () -> Appearance) {
         _editor = StateObject(wrappedValue: SettingsEditor(api: api))
+        self.downloads = downloads
+        self._page = page
         self.compact = compact
         self.appearance = appearance
+    }
+
+    private var motion: Animation? { reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.93) }
+    private var accent: Color {
+        colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
     }
 
     private var provider: SummaryProvider {
@@ -140,25 +156,31 @@ public struct NativeSettings<Appearance: View>: View {
     public var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("設定").font(.system(size: 26, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                Text("設定").font(.system(size: compact ? 24 : 29, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button(editor.saving ? "保存中" : "保存") {
-                    Task { await editor.save() }
+                if !editor.changes.isEmpty || editor.saving {
+                    Button(editor.saving ? "保存中" : "変更を保存") {
+                        Task { await editor.save() }
+                    }
+                    .keyboardShortcut("s")
+                    .buttonStyle(.borderedProminent)
+                    .tint(accent)
+                    .disabled(editor.loading || editor.saving || busy)
                 }
-                .keyboardShortcut("s")
-                .buttonStyle(.borderedProminent)
-                .disabled(editor.changes.isEmpty || editor.loading || editor.saving || busy)
             }
+            .frame(minHeight: 34)
             .padding(.horizontal, compact ? 15 : 32)
             .padding(.top, 23)
-            .padding(.bottom, 13)
+            .padding(.bottom, 14)
 
-            Group {
-                if compact { categoryPicker }
-                else { categoryPicker.pickerStyle(.segmented) }
+            ViewThatFits(in: .horizontal) {
+                tabRow.fixedSize(horizontal: true, vertical: false)
+                categoryPicker
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, compact ? 15 : 32)
-            .padding(.bottom, 8)
+            .padding(.bottom, 12)
+            Divider().padding(.horizontal, compact ? 15 : 32)
 
             Form {
                 switch page {
@@ -176,12 +198,13 @@ public struct NativeSettings<Appearance: View>: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             .disabled(editor.loading || editor.saving || busy)
+            .id(page)
         }
         .task { await editor.load() }
         .task(id: page) { await refreshPage() }
         .task(id: provider) { await refreshProvider() }
-        .task(id: catalog?.download.state) { await watchModelDownload() }
         .onDisappear { speakerAudio.clear() }
         .alert(item: $confirmation) { item in
             Alert(title: Text("\(item.label)を削除しますか"),
@@ -201,7 +224,35 @@ public struct NativeSettings<Appearance: View>: View {
 
     private var categoryPicker: some View {
         Picker("設定カテゴリ", selection: $page) {
-            ForEach(SettingsPage.allCases) { Text($0.rawValue).tag($0) }
+            ForEach(NativeSettingsPage.allCases) { Label($0.rawValue, systemImage: $0.symbol).tag($0) }
+        }
+        .pickerStyle(.menu)
+    }
+
+    private var tabRow: some View {
+        HStack(spacing: 5) {
+            ForEach(NativeSettingsPage.allCases) { item in
+                let active = page == item
+                Button {
+                    withAnimation(motion) { page = item }
+                } label: {
+                    Label(item.rawValue, systemImage: item.symbol)
+                        .font(.system(size: 12, weight: active ? .semibold : .medium))
+                        .foregroundStyle(active ? accent : .secondary)
+                        .padding(.horizontal, 11)
+                        .frame(height: 33)
+                        .contentShape(Rectangle())
+                        .background {
+                            if active {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(accent.opacity(0.11))
+                                    .matchedGeometryEffect(id: "settingsTab", in: selection)
+                            }
+                        }
+                }
+                .buttonStyle(ReaderHoverStyle(tint: accent, motion: motion))
+                .accessibilityAddTraits(active ? .isSelected : [])
+            }
         }
     }
 
@@ -226,41 +277,20 @@ public struct NativeSettings<Appearance: View>: View {
 
     @ViewBuilder
     private var transcriptionSettings: some View {
+        Section("Whisperモデル") {
+            WhisperModelRows(downloads: downloads, selection: text("whisper.model", fallback: "medium"),
+                             compact: compact, tint: accent) { model in
+                confirmation = .init(target: .model, id: model.name, label: model.label)
+            }
+            if let failure = downloads.failure {
+                Text(failure).font(.callout).foregroundStyle(.secondary)
+            }
+        }
         Section("認識") {
-            choose("Whisperモデル", "whisper.model", fallback: "medium",
-                   options: catalog?.models.map { ($0.name, $0.label) } ?? baseWhisperModels)
             choose("言語", "whisper.language", fallback: "ja",
                    options: [("ja", "日本語"), ("auto", "自動"), ("en", "英語"), ("zh", "中国語"), ("ko", "韓国語")])
             choose("発話の検出", "whisper.streaming.vad_provider", fallback: "silero",
                    options: [("silero", "Silero"), ("energy", "音量")])
-        }
-        if let api = editor.api, let catalog {
-            Section("ダウンロード済みモデル") {
-                ForEach(catalog.models) { model in
-                    HStack {
-                        Text(model.label)
-                        Spacer()
-                        if model.state == "downloading" {
-                            if let percent = catalog.download.percent {
-                                ProgressView(value: min(100, max(0, percent)), total: 100).frame(width: 90)
-                            } else { ProgressView().controlSize(.small) }
-                        } else if model.downloaded {
-                            Button("削除") {
-                                confirmation = .init(target: .model, id: model.name, label: model.label)
-                            }
-                            .disabled(model.state == "loaded")
-                        } else {
-                            Button("ダウンロード") {
-                                act { _ in
-                                    try await api.downloadWhisper(model.name)
-                                    self.catalog = try await api.whisperModels()
-                                }
-                            }
-                        }
-                    }
-                }
-                if let error = catalog.download.error { Text(error).foregroundStyle(.secondary) }
-            }
         }
         Section("パフォーマンス") {
             choose("動作モード", "whisper.performance.mode", fallback: "auto",
@@ -498,25 +528,12 @@ public struct NativeSettings<Appearance: View>: View {
         do {
             switch page {
             case .input: devices = try await api.devices().devices
-            case .transcription:
-                catalog = try await api.whisperModels()
+            case .transcription: await downloads.refresh()
             case .speakers:
                 hasDiarizationToken = try await api.diarizationStatus().hasHfToken
                 try await loadProfiles(api)
             default:
                 speakerAudio.clear()
-            }
-        } catch is CancellationError {} catch {
-            editor.feedback = error.localizedDescription
-        }
-    }
-
-    private func watchModelDownload() async {
-        guard let api = editor.api else { return }
-        do {
-            while catalog?.download.state == "downloading" && !Task.isCancelled {
-                try await Task.sleep(for: .seconds(1))
-                catalog = try await api.whisperModels()
             }
         } catch is CancellationError {} catch {
             editor.feedback = error.localizedDescription
@@ -548,12 +565,14 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     private func remove(_ entry: Removal) {
-        act { api in
-            switch entry.target {
-            case .model:
-                try await api.removeWhisper(entry.id)
-                catalog = try await api.whisperModels()
-            case .speaker:
+        switch entry.target {
+        case .model:
+            Task {
+                do { try await downloads.remove(entry.id) }
+                catch { editor.feedback = error.localizedDescription }
+            }
+        case .speaker:
+            act { api in
                 try await api.removeSpeaker(entry.id)
                 try await loadProfiles(api)
             }

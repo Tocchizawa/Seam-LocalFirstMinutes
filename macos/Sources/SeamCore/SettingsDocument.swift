@@ -85,20 +85,40 @@ public struct SettingsDocument: Codable, Equatable, Sendable {
 }
 
 public struct WhisperModels: Decodable, Sendable {
-    public struct Model: Decodable, Identifiable, Sendable {
+    public struct Model: Decodable, Equatable, Identifiable, Sendable {
         public let name: String
         public let label: String
         public let state: String
         public let downloaded: Bool
         public let sizeBytes: Int
         public var id: String { name }
+
+        public init(name: String, label: String, state: String, downloaded: Bool, sizeBytes: Int = 0) {
+            self.name = name
+            self.label = label
+            self.state = state
+            self.downloaded = downloaded
+            self.sizeBytes = sizeBytes
+        }
     }
 
-    public struct Download: Decodable, Sendable {
+    public struct Download: Decodable, Equatable, Sendable {
         public let state: String
         public let model: String?
         public let percent: Double?
         public let error: String?
+        public let currentBytes: Int?
+        public let totalBytes: Int?
+
+        public init(state: String, model: String?, percent: Double? = nil, error: String? = nil,
+                    currentBytes: Int? = nil, totalBytes: Int? = nil) {
+            self.state = state
+            self.model = model
+            self.percent = percent
+            self.error = error
+            self.currentBytes = currentBytes
+            self.totalBytes = totalBytes
+        }
     }
 
     public let models: [Model]
@@ -141,8 +161,10 @@ extension SeamAPI {
         try await request(["api", "models", "whisper"])
     }
 
-    public func downloadWhisper(_ model: String) async throws {
-        let _: SettingsDocument = try await request(["api", "models", "whisper", model, "download"], method: "POST")
+    public func downloadWhisper(_ model: String) async throws -> WhisperModels.Download {
+        struct Started: Decodable { let download: WhisperModels.Download }
+        let result: Started = try await request(["api", "models", "whisper", model, "download"], method: "POST")
+        return result.download
     }
 
     public func removeWhisper(_ model: String) async throws {
