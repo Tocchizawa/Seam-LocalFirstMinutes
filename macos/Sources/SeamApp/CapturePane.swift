@@ -17,31 +17,9 @@ struct CapturePane: View {
     var body: some View {
         if let capture = session.capture {
             VStack(spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            Circle().fill(capture.phase == .running ? red : .secondary)
-                                .frame(width: 6, height: 6)
-                                .accessibilityHidden(true)
-                            Text(status(capture.phase))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(capture.phase == .running ? red : .secondary)
-                                .contentTransition(.opacity)
-                        }
-                        Text("文字起こし")
-                            .font(.system(size: expanded ? 27 : 19, weight: .semibold))
-                            .accessibilityAddTraits(.isHeader)
-                    }
-                    Spacer()
-                    let label = expanded ? "並行表示に戻す" : "文字起こしを全体表示"
-                    control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                            name: label, size: 32) {
-                        withAnimation(transition) { expanded.toggle() }
-                    }
-                }
-
                 CaptureTranscript(rows: session.transcript.segments + session.transcript.draftSegments,
                                   expanded: expanded, deferred: capture.deferred, tint: red)
+                    .scrollEdgeBar { header(capture) }
 
                 ZStack(alignment: .bottom) {
                     CaptureWaveform(levels: session.levels, tint: red, running: capture.phase == .running)
@@ -53,11 +31,37 @@ struct CapturePane: View {
                 }
             }
             .padding(.horizontal, expanded ? 34 : 19)
-            .padding(.top, 26)
             .padding(.bottom, 19)
             .frame(maxWidth: expanded ? 850 : .infinity, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func header(_ capture: WorkspaceSession.Capture) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Circle().fill(capture.phase == .running ? red : .secondary)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                    Text(status(capture.phase))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(capture.phase == .running ? red : .secondary)
+                        .contentTransition(.opacity)
+                }
+                Text("文字起こし")
+                    .font(.system(size: expanded ? 27 : 19, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+            }
+            Spacer()
+            let label = expanded ? "並行表示に戻す" : "文字起こしを全体表示"
+            control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    name: label, size: 32) {
+                withAnimation(transition) { expanded.toggle() }
+            }
+        }
+        .padding(.top, 26)
+        .padding(.bottom, 12)
     }
 
     private func status(_ phase: WorkspaceSession.Capture.Phase) -> String {

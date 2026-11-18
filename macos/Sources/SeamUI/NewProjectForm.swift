@@ -51,11 +51,6 @@ public struct NewProjectForm: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("新規プロジェクト")
-                .font(.system(size: 21, weight: .semibold))
-                .accessibilityAddTraits(.isHeader)
-                .padding(.bottom, 19)
-
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     field("プロジェクト名") {
@@ -106,7 +101,14 @@ public struct NewProjectForm: View {
             }
             .defaultScrollAnchor(.top)
             .scrollBounceBehavior(.basedOnSize)
-            .frame(maxHeight: 325)
+            .scrollEdgeBar {
+                Text("新規プロジェクト")
+                    .font(.system(size: 21, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 19)
+            }
+            .frame(maxHeight: 369)
             .fixedSize(horizontal: false, vertical: true)
             .textFieldStyle(.roundedBorder)
             .disabled(saving)

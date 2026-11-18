@@ -171,8 +171,7 @@ private struct Workspace: View {
                     }
                     .transition(pageTransition)
                 } else {
-                    VStack(spacing: 0) {
-                        header(compact: compact)
+                    Group {
                         if let selected {
                             ArchiveDetail(session: session, item: selected, projects: projects, query: scope.term,
                                           compact: compact, expanded: $readerExpanded, showTranscript: $showTranscript,
@@ -183,6 +182,7 @@ private struct Workspace: View {
                             list(compact: compact).transition(pageTransition)
                         }
                     }
+                    .scrollEdgeBar { header(compact: compact) }
                     .transition(pageTransition)
                 }
             }
@@ -193,6 +193,14 @@ private struct Workspace: View {
     private func sidebar(narrow: Bool) -> some View {
         VStack(spacing: 10) {
             ScrollView {
+                ProjectOrderList(ids: Binding(get: { projects.map(\.id) }, set: reorder)) { id in
+                    if let project = projects.first(where: { $0.id == id }) {
+                        projectRow(project.name, id: project.id, symbol: "folder")
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .scrollEdgeBar {
                 VStack(alignment: .leading, spacing: 6) {
                     projectRow("すべての議事録", id: nil, symbol: "tray")
                         .frame(height: 34)
@@ -203,14 +211,9 @@ private struct Workspace: View {
                         .accessibilityAddTraits(.isHeader)
                         .padding(.leading, 9)
                         .padding(.top, 6)
-
-                    ProjectOrderList(ids: Binding(get: { projects.map(\.id) }, set: reorder)) { id in
-                        if let project = projects.first(where: { $0.id == id }) {
-                            projectRow(project.name, id: project.id, symbol: "folder")
-                        }
-                    }
                 }
-                .padding(.vertical, 7)
+                .padding(.top, 7)
+                .padding(.bottom, 4)
             }
             NewProjectButton { creatingProject = true }
                 .disabled(!session.connected)

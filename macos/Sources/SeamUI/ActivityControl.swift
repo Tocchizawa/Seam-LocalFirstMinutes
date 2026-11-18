@@ -87,39 +87,39 @@ public struct ActivityControl: View {
     }
 
     private var popover: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if let model = modelActivity {
+                    row(model)
+                    HStack {
+                        Button("文字起こしモデルを開く") {
+                            open = false
+                            openModels()
+                        }
+                        if downloads.failure != nil {
+                            Spacer()
+                            Button("閉じる") {
+                                downloads.dismissFailure()
+                                open = false
+                            }
+                        }
+                    }
+                    if !activities.isEmpty { Divider() }
+                }
+                ForEach(activities) { row($0) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollEdgeBar {
             Text("バックグラウンド処理")
                 .font(.system(size: 14, weight: .semibold))
                 .accessibilityAddTraits(.isHeader)
-            if let model = modelActivity {
-                row(model)
-                HStack {
-                    Button("文字起こしモデルを開く") {
-                        open = false
-                        openModels()
-                    }
-                    if downloads.failure != nil {
-                        Spacer()
-                        Button("閉じる") {
-                            downloads.dismissFailure()
-                            open = false
-                        }
-                    }
-                }
-                if !activities.isEmpty { Divider() }
-            }
-            if !activities.isEmpty {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(activities) { row($0) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 255)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 12)
         }
+        .frame(maxHeight: 348)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(17)
         .frame(minWidth: 275, maxWidth: 350, alignment: .leading)
     }
