@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from src.api.errors import bad_request, conflict, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.project.manager import project_manager
 from src.security import is_safe_session_id, resolve_existing_absolute_path
 from src.speakers import speaker_memory
@@ -263,8 +263,7 @@ def _enqueue_summary_if_empty(minutes_id: str) -> bool:
         return False
     from src.summarize.runner import get_runner
 
-    get_runner().enqueue(minutes_id)
-    return True
+    return get_runner().ensure_queued(minutes_id)
 
 
 @router.post("/import-audio")
@@ -289,11 +288,22 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
 
     try:
         stored_audio = _prepare_import_audio(source_audio, session_dir)
+        from src.api import recording as rec_mod
+
+        if not rec_mod._write_session_meta(
+            session_id,
+            project_id=body.project_id,
+            started_at=started_at,
+            state="importing",
+        ):
+            raise internal_error(
+                "RECOVERY_STATE_WRITE_FAILED",
+                "音声取り込みの復元情報を保存できなかったため、処理を開始できません",
+            )
         initial_transcript = _load_import_transcript(source_path)
 
         duration_sec = 0
         try:
-            from src.api import recording as rec_mod
             duration_sec = int(rec_mod._audio_duration_sec(stored_audio))
         except Exception:
             duration_sec = 0
@@ -342,6 +352,15 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
             summary_enqueued = _enqueue_summary_if_empty(minutes_id)
             if summary_enqueued:
                 logger.info("[import] auto-summary enqueued: %s", minutes_id)
+                rec_mod._delete_session_meta(session_id)
+            elif not bool(config.get("minutes_ai", "auto_generate", default=True)):
+                rec_mod._delete_session_meta(session_id)
+            else:
+                logger.warning(
+                    "[import] retaining recovery metadata until auto-summary "
+                    "is durably queued: %s",
+                    minutes_id,
+                )
         except Exception as e:
             logger.warning("[import] failed to enqueue auto-summary for %s: %s", minutes_id, e)
 
@@ -481,6 +500,17 @@ async def _start_retranscribe_minutes(
     existing = rec_mod._pipelines.get(session_id)
     if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
         raise conflict("ALREADY_RUNNING", "このセッションは現在処理中です")
+
+    if not rec_mod._write_session_meta(
+        session_id,
+        project_id=str(m.get("project_id") or ""),
+        state="retranscribing",
+        retry_minutes_id=minutes_id,
+    ):
+        raise internal_error(
+            "RECOVERY_STATE_WRITE_FAILED",
+            "再文字起こしの復元情報を保存できなかったため、処理を開始できません",
+        )
 
     cancel_event = threading.Event()
     _retranscribe_cancel_events[session_id] = cancel_event
@@ -1024,7 +1054,15 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 minutes_id, segments, clear_summary=clear_summary,
             ):
                 raise RuntimeError("議事録が削除されたため、再文字起こし結果を保存できませんでした")
-            rec_mod._delete_session_meta(session_id)
+            if not rec_mod._write_session_meta(
+                session_id,
+                state="retry_saved",
+                retry_minutes_id=minutes_id,
+            ):
+                logger.warning(
+                    "[retry] could not persist completion state for %s; recovery may repeat transcription",
+                    session_id,
+                )
 
             transcript_payload = rec_mod.build_pipeline_transcript_payload(segments)
             _set_retry_stage(Stage.DONE, "再文字起こし完了")
@@ -1044,15 +1082,40 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 },
             })
             await rec_mod._broadcast_pipeline(session_id)
-            if enqueue_summary_on_complete:
+            auto_generate = bool(
+                config.get("minutes_ai", "auto_generate", default=True)
+            )
+            summary_ready = True
+            if enqueue_summary_on_complete and auto_generate:
                 try:
-                    if _enqueue_summary_if_empty(minutes_id):
+                    current = db.get_minutes(minutes_id)
+                    if current is None:
+                        summary_ready = False
+                    elif str(current.get("summary") or "").strip():
+                        summary_ready = True
+                    else:
+                        summary_ready = _enqueue_summary_if_empty(minutes_id)
+                    if (
+                        summary_ready
+                        and current is not None
+                        and not str(current.get("summary") or "").strip()
+                    ):
                         logger.info("[import] auto-summary enqueued: %s", minutes_id)
                 except Exception as e:
                     logger.warning("[import] failed to enqueue auto-summary for %s: %s", minutes_id, e)
+                    summary_ready = False
+            if summary_ready:
+                rec_mod._delete_session_meta(session_id)
+            else:
+                logger.warning(
+                    "[retry] retaining recovery metadata until auto-summary is "
+                    "durably queued: %s",
+                    minutes_id,
+                )
             logger.info("Retranscribe done: %s (%d segments)", session_id, len(segments))
 
         except RetranscribeCancelledError:
+            rec_mod._delete_session_meta(session_id)
             await _publish_cancelled()
             logger.info("Retranscribe cancelled: %s", session_id)
         except asyncio.CancelledError:

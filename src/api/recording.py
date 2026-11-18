@@ -358,7 +358,7 @@ def _session_dir(session_id: str) -> Path:
     return SESSIONS_DIR / session_id
 
 
-def _write_session_meta(session_id: str, **fields) -> None:
+def _write_session_meta(session_id: str, **fields) -> bool:
     """セッションの永続メタ情報を atomic に上書き保存。
 
     クラッシュ後、起動時 recover_pending_sessions がこの meta を見て復元判定する。
@@ -379,8 +379,10 @@ def _write_session_meta(session_id: str, **fields) -> None:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
+        return True
     except Exception as e:
         logger.warning("session_meta write failed [%s]: %s", session_id, e)
+        return False
 
 
 def _delete_session_meta(session_id: str) -> None:
@@ -1650,6 +1652,52 @@ async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
             existing_segments = json.loads(existing_segments)
         except Exception:
             existing_segments = []
+
+    retry_minutes_id = str(meta.get("retry_minutes_id") or "").strip()
+    if retry_minutes_id:
+        if existing is None or str(existing.get("id") or "") != retry_minutes_id:
+            logger.warning(
+                "[recovery] retry target missing for session %s (minutes_id=%s)",
+                session_id,
+                retry_minutes_id,
+            )
+            return False
+        if state == "retry_saved":
+            summary = str(existing.get("summary") or "").strip()
+            auto_generate = bool(
+                config.get("minutes_ai", "auto_generate", default=True)
+            )
+            if auto_generate and not summary:
+                if not _enqueue_auto_summary(retry_minutes_id):
+                    return False
+                logger.info(
+                    "[recovery] re-queued summary after retranscription: %s",
+                    retry_minutes_id,
+                )
+            _delete_session_meta(session_id)
+            return True
+
+        try:
+            from src.api.minutes import _start_retranscribe_minutes
+
+            await _start_retranscribe_minutes(
+                retry_minutes_id,
+                enqueue_summary_on_complete=bool(
+                    config.get("minutes_ai", "auto_generate", default=True)
+                ),
+            )
+            logger.info(
+                "[recovery] resumed interrupted retranscription: %s",
+                retry_minutes_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "[recovery] retranscription resume deferred (%s): %s",
+                retry_minutes_id,
+                e,
+            )
+            return False
 
     # DB insert 完了前に落ちたセッションは音声から文字起こしを再実行する。
     # 先に空の minutes を作り、処理に失敗しても音声と復元メタデータを残す。
