@@ -387,6 +387,10 @@ async def update_summary(minutes_id: str, body: SummaryUpdateRequest) -> dict:
 
 @router.put("/{minutes_id}/project")
 async def reassign_project(minutes_id: str, body: dict) -> dict:
+    from src.summarize.runner import get_runner
+
+    if get_runner().is_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "処理中の議事録はプロジェクトを移動できません")
     project_id = body.get("project_id")
     if not project_id:
         from fastapi import HTTPException

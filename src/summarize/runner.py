@@ -394,8 +394,19 @@ class SummaryRunner:
         status = self._statuses.get(minutes_id)
         if status is not None and status.state in ("queued", "running"):
             return True
+        return self.is_phase_b_busy(minutes_id)
+
+    def is_phase_b_busy(self, minutes_id: str) -> bool:
         task = self._phase_b_tasks.get(minutes_id)
         return task is not None and not task.done()
+
+    def list_active_phase_b(self) -> list[str]:
+        """辞書整理中の議事録 ID 一覧を返す。"""
+        return [
+            minutes_id
+            for minutes_id, task in self._phase_b_tasks.items()
+            if not task.done()
+        ]
 
     def list_active(self) -> list[str]:
         """進行中 (queued / running) の minutes_id 一覧を返す。"""
@@ -944,6 +955,13 @@ class SummaryRunner:
         minutes_id: str,
         provider_name: str | None,
     ) -> None:
+        await self._broadcast({
+            "type": "dictionary_update_started",
+            "data": {
+                "minutes_id": minutes_id,
+                "stage_label": "用語辞書を整理中",
+            },
+        })
         try:
             await self._run_phase_b(minutes_id, provider_name)
         except asyncio.CancelledError:
@@ -953,6 +971,10 @@ class SummaryRunner:
             logger.exception("[phase-b] unexpected failure (%s)", minutes_id)
         self._durable_phase_b.pop(minutes_id, None)
         self._persist_pending_jobs()
+        await self._broadcast({
+            "type": "dictionary_update_finished",
+            "data": {"minutes_id": minutes_id},
+        })
 
     async def _run_phase_b(self, minutes_id: str, provider_name: str | None = None) -> None:
         """辞書整理 (Phase B) を fire-and-forget で実行する薄いラッパー。"""

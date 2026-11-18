@@ -446,6 +446,24 @@ export function DetailView(props: Props) {
           );
         }
         reload();
+      } else if (m.type === "dictionary_update_started") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId }),
+          state: "dictionary_update",
+          stage: "dictionary_update",
+          stage_label: String(m.data?.stage_label || "用語辞書を整理中"),
+        }));
+      } else if (m.type === "dictionary_update_finished") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => (
+          prev?.state === "dictionary_update"
+            ? { ...prev, state: "done", stage: null, stage_label: null }
+            : prev
+        ));
+        reload();
+      } else if (m.type === "transcript_corrected") {
+        reload();
       } else if (m.type === "minutes_title_updated") {
         // 別箇所からの更新 (一覧画面等) を反映
         setCurrentMinutes((prev) =>
@@ -479,7 +497,8 @@ export function DetailView(props: Props) {
       "__open", "pipeline_progress", "pipeline_done", "pipeline_error",
       "speaker_renamed", "summary_stage", "summary_activity", "summary_usage",
       "summary_chunk", "summary_done", "summary_failed", "summary_cancelled",
-      "summary_skipped", "minutes_title_updated",
+      "summary_skipped", "dictionary_update_started", "dictionary_update_finished",
+      "transcript_corrected", "minutes_title_updated",
     ];
     for (const type of eventTypes) {
       window.addEventListener(`recording-ws:${type}`, handle);
@@ -883,7 +902,12 @@ export function DetailView(props: Props) {
   };
 
   const canAct = !!minutesId;
-  const summaryInProgress = summaryJob?.state === "queued" || summaryJob?.state === "running";
+  const summaryInProgress = summaryJob?.state === "queued"
+    || summaryJob?.state === "running"
+    || summaryJob?.state === "dictionary_update";
+  const summaryBlockedLabel = summaryJob?.state === "dictionary_update"
+    ? "用語辞書の整理が終わってから操作できます"
+    : "要約が終わってから操作できます";
   const canRecoverSession = isLive && !minutesId && !!sessionId
     && (stateLive === "error" || stateLive === "done");
   const isRetranscribing = !!retryStatus && retryStatus.state !== "error";
@@ -985,7 +1009,7 @@ export function DetailView(props: Props) {
                 onClick={handleRetry}
                 loading={busy === "retry"}
                 disabled={summaryInProgress}
-                title={summaryInProgress ? "要約が終わってから再実行できます" : "文字起こしを再実行"}
+                title={summaryInProgress ? summaryBlockedLabel : "文字起こしを再実行"}
                 label="再実行"
               >
                 <ArrowsClockwise size={13} weight="regular" />
@@ -1001,7 +1025,7 @@ export function DetailView(props: Props) {
               onClick={handleDelete}
               loading={busy === "delete"}
               disabled={summaryInProgress}
-              title={summaryInProgress ? "要約が終わってから削除できます" : "削除"}
+              title={summaryInProgress ? summaryBlockedLabel : "削除"}
               danger
             >
               <Trash size={13} weight="regular" />
@@ -1415,6 +1439,8 @@ function SummaryPanel({
 }) {
   const state = job?.state;
   const isRunning = state === "queued" || state === "running";
+  const isDictionaryUpdating = state === "dictionary_update";
+  const isBusy = isRunning || isDictionaryUpdating;
   const isFailed = state === "failed";
   const isSkipped = state === "skipped";
   const isCancelled = state === "cancelled";
@@ -1428,7 +1454,7 @@ function SummaryPanel({
     : (savedSummary || job?.partial_text || "");
 
   // Status banner があるかどうか (生成中・失敗・skip・cancel)
-  const showBanner = isRunning || isFailed || isSkipped || isCancelled || Boolean(job?.usage);
+  const showBanner = isBusy || isFailed || isSkipped || isCancelled || Boolean(job?.usage);
 
   // 編集モード state
   const [editing, setEditing] = useState(false);
@@ -1440,7 +1466,7 @@ function SummaryPanel({
     if (!editing) setDraft(savedSummary);
   }, [savedSummary, editing]);
 
-  const canEdit = !isRunning && !!minutesId;
+  const canEdit = !isBusy && !!minutesId;
   const dirty = draft !== savedSummary;
 
   const startEdit = () => {
@@ -1526,7 +1552,7 @@ function SummaryPanel({
                 activeMatchIndex={activeMatchIndex}
                 onMatchesChange={onMatchesChange}
               />
-              {savedSummary && !isRunning && (
+              {savedSummary && !isBusy && (
                 <SummaryFooter
                   savedModel={savedModel}
                   canAct={canAct}
@@ -1538,7 +1564,7 @@ function SummaryPanel({
               )}
             </div>
           ) : (
-            !isRunning && !isFailed && (
+            !isBusy && !isFailed && (
               <SummaryEmpty
                 canAct={canAct}
                 busy={busy}
@@ -1564,6 +1590,20 @@ function SummaryStatusBanner({
     ? PROVIDER_LABELS[job.provider as SummarizeProvider] || job.provider
     : "";
   const modelLabel = job.model ? ` / ${job.model}` : "";
+
+  if (state === "dictionary_update") {
+    return (
+      <div className="summary-banner summary-banner-running" role="status" aria-live="polite">
+        <Spinner size={12} />
+        <div className="flex-1 min-w-0">
+          <p className="text-[12px] text-(--t1) font-medium">用語辞書を整理中</p>
+          <p className="text-[11px] text-(--t3) truncate">
+            文字起こしの表記を確認しています。この間は再実行や削除を一時停止しています。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (state === "queued" || state === "running") {
     const chars = (job.partial_text || "").length;

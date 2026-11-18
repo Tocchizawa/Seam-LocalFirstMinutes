@@ -269,6 +269,7 @@ export function MainView({
     window.addEventListener("recording-ws:session_recovery_progress", onRecoveryProgress);
     window.addEventListener("recording-ws:session_recovery_finished", onRecoveryFinished);
     window.addEventListener("recording-ws:summary_done", onMinutesMutated);
+    window.addEventListener("recording-ws:transcript_corrected", onMinutesMutated);
     window.addEventListener("recording-ws:summary_failed", onMinutesMutated);
     window.addEventListener("recording-ws:summary_cancelled", onMinutesMutated);
     window.addEventListener("recording-ws:summary_skipped", onMinutesMutated);
@@ -283,6 +284,7 @@ export function MainView({
       window.removeEventListener("recording-ws:session_recovery_progress", onRecoveryProgress);
       window.removeEventListener("recording-ws:session_recovery_finished", onRecoveryFinished);
       window.removeEventListener("recording-ws:summary_done", onMinutesMutated);
+      window.removeEventListener("recording-ws:transcript_corrected", onMinutesMutated);
       window.removeEventListener("recording-ws:summary_failed", onMinutesMutated);
       window.removeEventListener("recording-ws:summary_cancelled", onMinutesMutated);
       window.removeEventListener("recording-ws:summary_skipped", onMinutesMutated);

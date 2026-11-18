@@ -669,6 +669,7 @@ export const PROVIDER_LABELS: Record<SummarizeProvider, string> = {
 export type SummarizeJobState =
   | "queued"
   | "running"
+  | "dictionary_update"
   | "done"
   | "failed"
   | "cancelled"

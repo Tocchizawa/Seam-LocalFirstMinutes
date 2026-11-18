@@ -142,6 +142,13 @@ export function MinutesList({
   const importMenuRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const searchGenerationRef = useRef(0);
+  const processingSessionIds = useMemo(() => new Set(
+    processing
+      .filter((pipeline) => pipeline.state === "recording"
+        || pipeline.state === "stopping"
+        || pipeline.state === "transcribing")
+      .flatMap((pipeline) => pipeline.session_id ? [pipeline.session_id] : []),
+  ), [processing]);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
 
@@ -452,6 +459,8 @@ export function MinutesList({
           searching={searching}
           busyId={busyId}
           canMove={hasOtherProjects}
+          activeSummarizes={activeSummarizes}
+          processingSessionIds={processingSessionIds}
           onOpenMin={onOpenMin}
           onExport={handleExport}
           onDelete={handleDelete}
@@ -527,7 +536,7 @@ export function MinutesList({
 }
 
 function SearchResults({
-  query, results, searching, busyId, canMove,
+  query, results, searching, busyId, canMove, activeSummarizes, processingSessionIds,
   onOpenMin, onExport, onDelete, onStartMove,
 }: {
   query: string;
@@ -535,6 +544,8 @@ function SearchResults({
   searching: boolean;
   busyId: string | null;
   canMove: boolean;
+  activeSummarizes: Map<string, string>;
+  processingSessionIds: Set<string>;
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onExport: (e: React.MouseEvent, id: string) => void;
   onDelete: (e: React.MouseEvent, id: string) => void;
@@ -557,6 +568,13 @@ function SearchResults({
       <div className="flex flex-col gap-2">
         {results.map((r) => {
           const hl = r.highlights ?? { title: null, summary: null, transcript: null };
+          const summaryState = activeSummarizes.get(r.id);
+          const isProcessing = summaryState !== undefined || processingSessionIds.has(r.session_id);
+          const processingLabel = summaryState === "dictionary_update"
+            ? "用語辞書を整理中"
+            : summaryState === "queued"
+              ? "要約キュー待ち"
+              : summaryState ? "要約中" : "文字起こし中";
           const bestTab: "summary" | "transcript" | undefined =
             hasHighlight(hl.transcript) ? "transcript"
             : hasHighlight(hl.summary) ? "summary"
@@ -566,6 +584,8 @@ function SearchResults({
               key={r.id}
               r={r}
               busy={busyId === r.id}
+              processing={isProcessing}
+              processingLabel={processingLabel}
               canMove={canMove}
               onOpen={() => onOpenMin(r, { query, tab: bestTab })}
               onExport={(e) => onExport(e, r.id)}
@@ -580,10 +600,12 @@ function SearchResults({
 }
 
 function SearchResultCard({
-  r, busy, canMove, onOpen, onExport, onDelete, onStartMove,
+  r, busy, processing, processingLabel, canMove, onOpen, onExport, onDelete, onStartMove,
 }: {
   r: MinutesSearchResult;
   busy: boolean;
+  processing: boolean;
+  processingLabel: string;
   canMove: boolean;
   onOpen: () => void;
   onExport: (e: React.MouseEvent) => void;
@@ -621,6 +643,12 @@ function SearchResultCard({
           <span className="text-[10px] text-(--t3) mt-1 num">
             {fmtDate(r.date)} · {fmtTime(r.started_at)} · {fmtDur(r.duration_sec)}
           </span>
+          {processing && (
+            <span className="minutes-card-status mt-1">
+              <Spinner size={10} color="var(--accent)" />
+              <span>{processingLabel}</span>
+            </span>
+          )}
           {snippet && (
             <span className="mt-2 text-[12px] text-(--t2) leading-relaxed">
               {snippetLabel && (
@@ -635,10 +663,10 @@ function SearchResultCard({
           {canMove && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartMove(); }}
-              disabled={busy}
+              disabled={busy || processing}
               className="icon-btn !w-7 !h-7"
               aria-label="他のプロジェクトへ移動"
-              title="他のプロジェクトへ移動"
+              title={processing ? "処理中は移動できません" : "他のプロジェクトへ移動"}
             >
               <FolderOpen size={12} weight="regular" />
             </button>
@@ -647,8 +675,9 @@ function SearchResultCard({
             className="icon-btn !w-7 !h-7" aria-label="Markdown を書き出し" title="Markdown を書き出し">
             {busy ? <PhSpinner size={11} className="anim-spin" /> : <DownloadSimple size={12} weight="regular" />}
           </button>
-          <button onClick={onDelete} disabled={busy}
-            className="icon-btn !w-7 !h-7 hover:!text-(--danger)" aria-label="削除" title="削除">
+          <button onClick={onDelete} disabled={busy || processing}
+            className="icon-btn !w-7 !h-7 hover:!text-(--danger)" aria-label="削除"
+            title={processing ? "処理中は削除できません" : "削除"}>
             <Trash size={12} weight="regular" />
           </button>
       </div>
@@ -753,8 +782,10 @@ function MinutesRow({
     pipeline.state === "stopping" || pipeline.state === "transcribing"
   );
   const isError = pipeline?.state === "error";
+  const isDictionaryUpdating = summarizeState === "dictionary_update";
   const isSummarizing = !isProcessing && !isError && summarizeState !== null
-    && (summarizeState === "queued" || summarizeState === "running");
+    && (summarizeState === "queued" || summarizeState === "running" || isDictionaryUpdating);
+  const isProcessingRecord = Boolean(isProcessing || isSummarizing);
 
   const statusText = (() => {
     if (pipeline) {
@@ -763,6 +794,7 @@ function MinutesRow({
       if (pipeline.state === "transcribing") return pipeline.message || "文字起こし中";
     }
     if (isSummarizing) {
+      if (isDictionaryUpdating) return "用語辞書を整理中";
       return summarizeState === "queued" ? "要約キュー待ち" : "要約中";
     }
     return null;
@@ -784,7 +816,7 @@ function MinutesRow({
         <span className="minutes-card-title">{m.title}</span>
         {statusText ? (
           <span className={`minutes-card-status ${isError ? "is-error" : ""}`}>
-            {(isProcessing || isSummarizing) && <Spinner size={10} color="var(--accent)" />}
+            {isProcessingRecord && <Spinner size={10} color="var(--accent)" />}
             {isError && <WarningCircle size={11} weight="fill" />}
             <span className="truncate">{statusText}</span>
           </span>
@@ -799,8 +831,9 @@ function MinutesRow({
         {canMove && (
           <RowAction
             onClick={(e) => { e.stopPropagation(); onStartMove(); }}
-            title="他のプロジェクトへ移動"
+            title={isProcessingRecord ? "処理中は移動できません" : "他のプロジェクトへ移動"}
             busy={busy}
+            disabled={isProcessingRecord}
           >
             <FolderOpen size={12} weight="regular" />
           </RowAction>
@@ -808,7 +841,13 @@ function MinutesRow({
         <RowAction onClick={onExport} title="Markdown を書き出し" busy={busy}>
           <DownloadSimple size={12} weight="regular" />
         </RowAction>
-        <RowAction onClick={onDelete} title="削除" danger busy={busy}>
+        <RowAction
+          onClick={onDelete}
+          title={isProcessingRecord ? "処理中は削除できません" : "削除"}
+          danger
+          busy={busy}
+          disabled={isProcessingRecord}
+        >
           <Trash size={12} weight="regular" />
         </RowAction>
       </div>
@@ -817,16 +856,17 @@ function MinutesRow({
 }
 
 function RowAction({
-  children, onClick, title, danger, busy,
+  children, onClick, title, danger, busy, disabled,
 }: {
   children: React.ReactNode;
   onClick: (e: React.MouseEvent) => void;
   title: string;
   danger?: boolean;
   busy?: boolean;
+  disabled?: boolean;
 }) {
   return (
-    <button onClick={onClick} title={title} disabled={busy}
+    <button onClick={onClick} title={title} disabled={busy || disabled}
       aria-label={title}
       className={`icon-btn !w-7 !h-7 ${danger ? "hover:!text-(--danger)" : ""}`}>
       {busy ? <PhSpinner size={11} className="anim-spin" /> : children}

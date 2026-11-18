@@ -55,6 +55,9 @@ async def trigger_summarize(
         pipeline = rec_mod._pipelines.get(session_id)
         if pipeline and pipeline.get("state") in ("recording", "stopping", "transcribing"):
             raise conflict("MINUTES_BUSY", "この議事録の文字起こし中は要約できません")
+    runner = get_runner()
+    if runner.is_phase_b_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "用語辞書の整理が終わってから要約できます")
     if provider and not is_known_provider(provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {provider}")
     # cloud provider なら consent チェック
@@ -76,13 +79,22 @@ async def trigger_summarize(
         raise bad_request("PROVIDER_HEALTH_CHECK_FAILED", str(e))
     if not health.ok:
         raise bad_request(health.code, health.message)
-    get_runner().enqueue(minutes_id, provider_name=provider)
+    runner.enqueue(minutes_id, provider_name=provider)
     return {"job_id": minutes_id, "status": "queued"}
 
 
 @router.get("/api/minutes/{minutes_id}/summarize/status")
 async def summarize_status(minutes_id: str) -> dict:
-    status = get_runner().get_status(minutes_id)
+    runner = get_runner()
+    status = runner.get_status(minutes_id)
+    if runner.is_phase_b_busy(minutes_id):
+        payload = status.to_dict() if status is not None else {"minutes_id": minutes_id}
+        payload.update({
+            "state": "dictionary_update",
+            "stage": "dictionary_update",
+            "stage_label": "用語辞書を整理中",
+        })
+        return payload
     if status is None:
         return {"state": "none"}
     return status.to_dict()
@@ -102,7 +114,8 @@ async def summarize_active() -> list[dict]:
     """
     runner = get_runner()
     out: list[dict] = []
-    for mid in runner.list_active():
+    phase_b = set(runner.list_active_phase_b())
+    for mid in dict.fromkeys([*runner.list_active(), *phase_b]):
         m = db.get_minutes(mid)
         if m is None:
             continue
@@ -110,7 +123,9 @@ async def summarize_active() -> list[dict]:
         out.append({
             "minutes_id": mid,
             "project_id": m.get("project_id"),
-            "state": status.state if status is not None else None,
+            "state": "dictionary_update" if mid in phase_b else (
+                status.state if status is not None else None
+            ),
         })
     return out
 

@@ -351,6 +351,8 @@ function AppInner() {
       "recording-ws:pipeline_error",
       "recording-ws:recording_stopped",
       "recording-ws:summary_stage",
+      "recording-ws:dictionary_update_started",
+      "recording-ws:dictionary_update_finished",
       "recording-ws:summary_done",
       "recording-ws:summary_failed",
       "recording-ws:summary_skipped",
