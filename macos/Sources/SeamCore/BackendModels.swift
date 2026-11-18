@@ -90,6 +90,16 @@ public struct TranscriptSegment: Decodable, Equatable, Identifiable, Sendable {
     public let sessionId: String?
 
     public var id: Double { start }
+
+    public init(start: Double, end: Double, text: String, speakerId: String? = nil,
+                speakerLabel: String? = nil, sessionId: String? = nil) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.speakerId = speakerId
+        self.speakerLabel = speakerLabel
+        self.sessionId = sessionId
+    }
 }
 
 public struct TranscriptDraft: Decodable, Equatable, Sendable {
