@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 
@@ -305,6 +306,10 @@ class Database:
         safe = self._sanitize_fts_query(query)
         if not safe:
             return []
+        phrase = safe[1:-1]
+        if len(phrase) < 3:
+            # FTS5's trigram index cannot match a phrase shorter than three characters.
+            return self._search_short_phrase(phrase, project_id, limit)
 
         conn = self._get_conn()
         # ハイライト用に  /  をマーカーとして埋め込み、
@@ -334,6 +339,45 @@ class Database:
             ).fetchall()
         return [self._row_to_dict_with_highlights(r) for r in rows]
 
+    def _search_short_phrase(self, phrase: str, project_id: str | None, limit: int) -> list[dict]:
+        cols = self._list_columns_sql("m")
+        scope = "AND m.project_id = ?" if project_id else ""
+        args: list[str | int] = [phrase, phrase, phrase]
+        if project_id:
+            args.append(project_id)
+        args.append(limit)
+        rows = self._get_conn().execute(
+            f"""SELECT {cols}, m.summary AS full_summary, m.transcript_text
+                FROM minutes m
+                WHERE (instr(lower(m.title), lower(?)) > 0
+                    OR instr(lower(m.summary), lower(?)) > 0
+                    OR instr(lower(m.transcript_text), lower(?)) > 0)
+                {scope}
+                ORDER BY m.date DESC, m.started_at DESC, m.rowid DESC
+                LIMIT ?""",
+            args,
+        ).fetchall()
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        results: list[dict] = []
+        for row in rows:
+            data = dict(row)
+            data["hl_title"] = self._short_highlight(data["title"], pattern)
+            data["hl_summary"] = self._short_highlight(data.pop("full_summary"), pattern)
+            data["hl_transcript"] = self._short_highlight(data.pop("transcript_text"), pattern)
+            results.append(self._row_to_dict_with_highlights(data))
+        return results
+
+    @staticmethod
+    def _short_highlight(text: str, pattern: re.Pattern[str]) -> str | None:
+        match = pattern.search(text)
+        if match is None:
+            return None
+        start = max(0, match.start() - 18)
+        end = min(len(text), match.end() + 40)
+        prefix = "…" if start else ""
+        suffix = "…" if end < len(text) else ""
+        return f"{prefix}{text[start:match.start()]}\x01{match[0]}\x02{text[match.end():end]}{suffix}"
+
     @staticmethod
     def _sanitize_fts_query(q: str) -> str:
         # FTS5 の構文文字を排除して安全な phrase クエリにする。
@@ -351,7 +395,7 @@ class Database:
                 pass
         return d
 
-    def _row_to_dict_with_highlights(self, row: sqlite3.Row) -> dict:
+    def _row_to_dict_with_highlights(self, row: sqlite3.Row | dict) -> dict:
         d = dict(row)
         hl = {
             "title": d.pop("hl_title", None),
