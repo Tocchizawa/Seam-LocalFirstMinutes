@@ -75,7 +75,7 @@ export function DeviceSettingsModal({
         onClick={handleClose}
         style={{ background: "rgba(0,0,0,0.45)" }} />
 
-      <div className={`dialog-shell relative w-[420px] overflow-hidden ${
+      <div className={`dialog-shell device-settings-dialog relative w-[480px] max-w-[94vw] overflow-hidden ${
         closing ? "anim-modal-out" : "anim-modal-in"
       }`}>
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border)">
@@ -104,7 +104,7 @@ export function DeviceSettingsModal({
                 <p className="text-[11px] text-(--danger)">{error}</p>
               )}
               <div>
-                <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-(--t3) mb-2">
+                <label className="flex items-center gap-1.5 text-[12px] font-medium text-(--t2) mb-2">
                   <Microphone size={11} weight="regular" />
                   マイク
                 </label>
@@ -123,7 +123,7 @@ export function DeviceSettingsModal({
 
               {systemAudioAvailable && (
                 <div>
-                  <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-(--t3) mb-2">
+                  <label className="flex items-center gap-1.5 text-[12px] font-medium text-(--t2) mb-2">
                     <SpeakerHigh size={11} weight="regular" />
                     内部音声
                   </label>

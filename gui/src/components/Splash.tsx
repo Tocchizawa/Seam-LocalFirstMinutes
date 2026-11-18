@@ -154,8 +154,7 @@ export function Splash({ startupUpdate }: { startupUpdate?: SplashStartupUpdate 
               ].filter(Boolean).join(" ")}
               style={pct !== null ? { width: `${pct}%` } : undefined}
             />
-            {/* 完了前は常時走るシマー(画面に動きを残す) */}
-            {!isReady && !isError && <div className="splash-progress-shimmer" />}
+            {/* 不定進捗の区間だけを動かし、完了済みの進捗は静止させる */}
           </div>
           {!isReady && !isError && <Spinner size={11} color="var(--accent)" />}
           <span className="splash-progress-label num tabular-nums">

@@ -562,7 +562,7 @@ function SearchResults({
   }
   return (
     <div className="px-5 py-2">
-      <p className="text-[10px] font-semibold tracking-wider uppercase text-(--t3) mb-3">
+      <p className="text-[12px] font-medium text-(--t2) mb-3">
         検索結果 {results.length} 件
       </p>
       <div className="flex flex-col gap-2">

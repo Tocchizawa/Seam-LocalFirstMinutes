@@ -1848,7 +1848,7 @@ export function SettingsModal({ onClose }: Props) {
                     >
                       <div className="flex items-center gap-2 mt-3 mb-2">
                         <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold ${
+                          className={`text-[12px] px-2 py-1 rounded-md font-medium ${
                             promptIsCustom
                               ? "bg-(--accent-soft) text-(--accent)"
                               : "bg-(--surface-2) text-(--t3)"
@@ -2104,9 +2104,9 @@ function ProviderRadioRow({
   } else if (isCloud && !consented) {
     badge = { label: "未同意", variant: "warn" };
   } else if (isCli) {
-    badge = { label: "CLI", variant: "info" };
+    badge = { label: "コマンド", variant: "info" };
   } else if (isCloud) {
-    badge = { label: "Ready", variant: "ok" };
+    badge = { label: "利用可能", variant: "ok" };
   }
 
   return (
@@ -2120,7 +2120,7 @@ function ProviderRadioRow({
         <span className="s-radio-label flex items-center gap-1.5">
           {PROVIDER_LABELS[provider]}
           {recommended && (
-            <span className="text-[9px] px-1.5 py-0.5 rounded bg-(--accent-soft) text-(--accent) font-semibold uppercase tracking-wider">
+            <span className="text-[12px] px-2 py-1 rounded-md bg-(--accent-soft) text-(--accent) font-medium">
               推奨
             </span>
           )}
@@ -2128,7 +2128,7 @@ function ProviderRadioRow({
       </div>
       {badge && (
         <span
-          className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold shrink-0 ${
+          className={`text-[12px] px-2 py-1 rounded-md font-medium shrink-0 ${
             badge.variant === "ok"
               ? "bg-(--success-soft) text-(--success)"
               : badge.variant === "warn"
