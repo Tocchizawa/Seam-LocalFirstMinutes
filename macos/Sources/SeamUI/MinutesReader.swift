@@ -92,7 +92,8 @@ public struct MinutesReader: View {
     }
 
     private func paneTransition(x: CGFloat) -> AnyTransition {
-        motion == nil ? .identity : .opacity.combined(with: .offset(x: x))
+        guard let motion else { return .identity }
+        return .asymmetric(insertion: .opacity.combined(with: .offset(x: x)).animation(motion), removal: .identity)
     }
 
     private var header: some View {
