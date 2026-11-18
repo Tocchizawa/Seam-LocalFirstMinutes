@@ -112,7 +112,7 @@ public struct SeamAPI: Sendable {
         return BackendEventConnection(socket: socket)
     }
 
-    private func request<Value: Decodable>(
+    func request<Value: Decodable>(
         _ path: [String], query: [URLQueryItem] = [], method: String = "GET", body: Data? = nil
     ) async throws -> Value {
         var request = URLRequest(url: try endpoint(path, query: query))
@@ -132,7 +132,7 @@ public struct SeamAPI: Sendable {
         return try makeDecoder().decode(Value.self, from: data)
     }
 
-    private func write<Value: Decodable, Body: Encodable>(
+    func write<Value: Decodable, Body: Encodable>(
         _ path: [String], method: String, body: Body
     ) async throws -> Value {
         let encoder = JSONEncoder()
@@ -140,7 +140,7 @@ public struct SeamAPI: Sendable {
         return try await request(path, method: method, body: encoder.encode(body))
     }
 
-    private func endpoint(
+    func endpoint(
         _ path: [String], query: [URLQueryItem] = [], scheme: String = "http"
     ) throws -> URL {
         var components = URLComponents()
