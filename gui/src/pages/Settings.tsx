@@ -469,7 +469,7 @@ export function SettingsModal({ onClose }: Props) {
       if (cancelled) return;
       setCodexModelChoices(codexModels);
       setClaudeCodeChoices(claudeModels);
-      if (prompt) setDefaultPrompt(prompt.prompt);
+      if (typeof prompt?.prompt === "string") setDefaultPrompt(prompt.prompt);
       if (keys) setAiKeysPresent(keys.providers || {});
       if (recommended) setAiRecommended(recommended);
       setCodexUsage(usage);
