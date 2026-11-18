@@ -226,6 +226,20 @@ class SummaryRunner:
             await asyncio.gather(*phase_b_tasks, return_exceptions=True)
         self._phase_b_tasks.clear()
 
+    @staticmethod
+    def _sync_queue_directory() -> None:
+        """Rename/unlink 後のディレクトリエントリを可能なら同期する。"""
+        try:
+            directory_fd = os.open(SUMMARY_QUEUE_PATH.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception as exc:
+            # 一部ファイルシステムではディレクトリ fsync が未対応。
+            # キューファイル本体は fsync 済みで原子的に置換されている。
+            logger.debug("[summary] queue directory sync unavailable: %s", exc)
+
     def _persist_pending_jobs(self) -> bool:
         """要約と辞書整理の待機ジョブを保存し、再起動時に戻す。"""
         temporary_path = SUMMARY_QUEUE_PATH.with_suffix(".json.tmp")
@@ -234,11 +248,7 @@ class SummaryRunner:
                 existed = SUMMARY_QUEUE_PATH.exists()
                 SUMMARY_QUEUE_PATH.unlink(missing_ok=True)
                 if existed:
-                    directory_fd = os.open(SUMMARY_QUEUE_PATH.parent, os.O_RDONLY)
-                    try:
-                        os.fsync(directory_fd)
-                    finally:
-                        os.close(directory_fd)
+                    self._sync_queue_directory()
                 return True
             SUMMARY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
             jobs = [
@@ -258,11 +268,7 @@ class SummaryRunner:
                 queue_file.flush()
                 os.fsync(queue_file.fileno())
             os.replace(temporary_path, SUMMARY_QUEUE_PATH)
-            directory_fd = os.open(SUMMARY_QUEUE_PATH.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            self._sync_queue_directory()
             return True
         except Exception as exc:
             logger.warning("[summary] failed to persist pending queue: %s", exc)
@@ -364,6 +370,20 @@ class SummaryRunner:
 
         同一minutes_idの既存ジョブがあれば cancel して新ジョブで上書き。
         """
+        previous_provider = self._durable_jobs.get(minutes_id)
+        had_previous = minutes_id in self._durable_jobs
+        self._durable_jobs[minutes_id] = provider_name
+        if not self._persist_pending_jobs():
+            if had_previous:
+                self._durable_jobs[minutes_id] = previous_provider
+            else:
+                self._durable_jobs.pop(minutes_id, None)
+            logger.warning(
+                "[summary] enqueue rejected because restart queue could not be saved: %s",
+                minutes_id,
+            )
+            return False
+
         existing = self._jobs.get(minutes_id)
         if existing is not None:
             existing.cancel_event.set()
@@ -390,8 +410,6 @@ class SummaryRunner:
         self._jobs[minutes_id] = job
         self._statuses[minutes_id] = status
         self._queue.put_nowait(job)
-        self._durable_jobs[minutes_id] = provider_name
-        persisted = self._persist_pending_jobs()
         logger.info(
             "[summary] enqueued: %s (provider=%s)", minutes_id, provider_name or "default"
         )
@@ -411,7 +429,7 @@ class SummaryRunner:
             except RuntimeError:
                 # 起動時 (event loop 未稼働) は black hole 化、worker 開始後に再 broadcast される
                 pass
-        return persisted
+        return True
 
     def ensure_queued(self, minutes_id: str) -> bool:
         """実行中のジョブを止めずに、再起動用キューへの保存を確認する。"""

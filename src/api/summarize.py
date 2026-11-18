@@ -17,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.api.errors import bad_request, conflict, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.config import config
 from src.storage.db import db
 from src.summarize.base import SummaryError
@@ -79,7 +79,11 @@ async def trigger_summarize(
         raise bad_request("PROVIDER_HEALTH_CHECK_FAILED", str(e))
     if not health.ok:
         raise bad_request(health.code, health.message)
-    runner.enqueue(minutes_id, provider_name=provider)
+    if not runner.enqueue(minutes_id, provider_name=provider):
+        raise internal_error(
+            "SUMMARY_QUEUE_PERSIST_FAILED",
+            "要約キューを保存できなかったため、処理を開始できません",
+        )
     return {"job_id": minutes_id, "status": "queued"}
 
 
