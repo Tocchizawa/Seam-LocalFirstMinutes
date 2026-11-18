@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
@@ -223,12 +224,20 @@ class SummaryRunner:
             await asyncio.gather(*phase_b_tasks, return_exceptions=True)
         self._phase_b_tasks.clear()
 
-    def _persist_pending_jobs(self) -> None:
+    def _persist_pending_jobs(self) -> bool:
         """要約と辞書整理の待機ジョブを保存し、再起動時に戻す。"""
+        temporary_path = SUMMARY_QUEUE_PATH.with_suffix(".json.tmp")
         try:
             if not self._durable_jobs and not self._durable_phase_b:
+                existed = SUMMARY_QUEUE_PATH.exists()
                 SUMMARY_QUEUE_PATH.unlink(missing_ok=True)
-                return
+                if existed:
+                    directory_fd = os.open(SUMMARY_QUEUE_PATH.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                return True
             SUMMARY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
             jobs = [
                 {"minutes_id": minutes_id, "provider": provider}
@@ -238,14 +247,28 @@ class SummaryRunner:
                 {"minutes_id": minutes_id, "provider": provider}
                 for minutes_id, provider in sorted(self._durable_phase_b.items())
             ]
-            temporary_path = SUMMARY_QUEUE_PATH.with_suffix(".json.tmp")
-            temporary_path.write_text(
-                json.dumps({"jobs": jobs, "phase_b": phase_b}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            temporary_path.replace(SUMMARY_QUEUE_PATH)
+            with temporary_path.open("w", encoding="utf-8") as queue_file:
+                json.dump(
+                    {"jobs": jobs, "phase_b": phase_b},
+                    queue_file,
+                    ensure_ascii=False,
+                )
+                queue_file.flush()
+                os.fsync(queue_file.fileno())
+            os.replace(temporary_path, SUMMARY_QUEUE_PATH)
+            directory_fd = os.open(SUMMARY_QUEUE_PATH.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return True
         except Exception as exc:
             logger.warning("[summary] failed to persist pending queue: %s", exc)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
 
     def _restore_pending_jobs(self) -> None:
         try:
@@ -334,7 +357,7 @@ class SummaryRunner:
 
     def enqueue(
         self, minutes_id: str, *, provider_name: str | None = None
-    ) -> None:
+    ) -> bool:
         """要約ジョブを投入する。
 
         同一minutes_idの既存ジョブがあれば cancel して新ジョブで上書き。
@@ -366,7 +389,7 @@ class SummaryRunner:
         self._statuses[minutes_id] = status
         self._queue.put_nowait(job)
         self._durable_jobs[minutes_id] = provider_name
-        self._persist_pending_jobs()
+        persisted = self._persist_pending_jobs()
         logger.info(
             "[summary] enqueued: %s (provider=%s)", minutes_id, provider_name or "default"
         )
@@ -386,6 +409,17 @@ class SummaryRunner:
             except RuntimeError:
                 # 起動時 (event loop 未稼働) は black hole 化、worker 開始後に再 broadcast される
                 pass
+        return persisted
+
+    def ensure_queued(self, minutes_id: str) -> bool:
+        """実行中のジョブを止めずに、再起動用キューへの保存を確認する。"""
+        status = self._statuses.get(minutes_id)
+        if status is not None and status.state in ("queued", "running"):
+            job = self._jobs.get(minutes_id)
+            provider_name = job.provider_name if job is not None else status.provider
+            self._durable_jobs[minutes_id] = provider_name
+            return self._persist_pending_jobs()
+        return self.enqueue(minutes_id)
 
     def get_status(self, minutes_id: str) -> JobStatus | None:
         return self._statuses.get(minutes_id)

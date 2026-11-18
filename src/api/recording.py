@@ -390,6 +390,24 @@ def _delete_session_meta(session_id: str) -> None:
         pass
 
 
+def _enqueue_auto_summary(minutes_id: str) -> bool:
+    """要約を永続キューへ積む。同じ議事録が既に待機中なら再投入しない。"""
+    try:
+        from src.summarize.runner import get_runner
+
+        runner = get_runner()
+        if runner.ensure_queued(minutes_id):
+            return True
+        logger.warning(
+            "[summary] auto-summary is active but its restart queue could not be saved: %s",
+            minutes_id,
+        )
+        return False
+    except Exception as e:
+        logger.warning("[summary] failed to enqueue auto-summary for %s: %s", minutes_id, e)
+        return False
+
+
 def _remove_empty_session_dir(session_id: str) -> None:
     """初期化に失敗したセッションの空ディレクトリだけを片付ける。"""
     try:
@@ -926,7 +944,6 @@ async def _finalize_session(session_id: str) -> None:
                 raise RuntimeError("inserted minutes not found")
             minutes_id = new_id
             logger.info("Minutes saved: %s (%d segments)", session_id, len(transcript))
-            _delete_session_meta(session_id)
         except Exception as e:
             msg = f"DB保存に失敗しました: {e}"
             logger.error("Failed to save minutes [%s]: %s", session_id, e)
@@ -969,18 +986,17 @@ async def _finalize_session(session_id: str) -> None:
 
         # 自動要約トリガー (auto_generate=true 時のみ)
         auto_gen = bool(config.get("minutes_ai", "auto_generate", default=True))
+        summary_queued = False
         if minutes_id and auto_gen:
-            try:
-                from src.summarize.runner import get_runner
-
-                get_runner().enqueue(minutes_id)
+            summary_queued = _enqueue_auto_summary(minutes_id)
+            if summary_queued:
                 logger.info("[summary] auto-summary enqueued: %s", minutes_id)
-            except Exception as e:
-                logger.warning("[summary] failed to enqueue auto-summary: %s", e)
         elif not auto_gen:
             logger.info(
                 "[summary] auto_generate=false, skipping auto-summary for %s", session_id,
             )
+        if minutes_id and (not auto_gen or summary_queued):
+            _delete_session_meta(session_id)
 
     except Exception as e:
         logger.error("Streaming finalize failed [%s]: %s", session_id, e)
@@ -1565,20 +1581,20 @@ async def _materialize_session_minutes(
     if minutes is None:
         raise RuntimeError("minutes insert failed")
 
-    if remove_meta:
+    auto_summary_requested = (
+        enqueue_summary
+        and bool(transcript)
+        and bool(config.get("minutes_ai", "auto_generate", default=True))
+    )
+    summary_queued = _enqueue_auto_summary(minutes_id) if auto_summary_requested else False
+    if summary_queued:
+        logger.info("[recover] auto-summary enqueued: %s", minutes_id)
+
+    if remove_meta and (not auto_summary_requested or summary_queued):
         try:
             (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
         except Exception:
             pass
-
-    if enqueue_summary and transcript and bool(config.get("minutes_ai", "auto_generate", default=True)):
-        try:
-            from src.summarize.runner import get_runner
-
-            get_runner().enqueue(minutes_id)
-            logger.info("[recover] auto-summary enqueued: %s", minutes_id)
-        except Exception as e:
-            logger.warning("[recover] failed to enqueue auto-summary for %s: %s", minutes_id, e)
 
     return minutes, {
         "created": True,
@@ -1641,6 +1657,20 @@ async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
         existing is None or not isinstance(existing_segments, list) or not existing_segments
     )
     if existing is not None and not should_retranscribe:
+        if (
+            isinstance(existing_segments, list)
+            and existing_segments
+            and not str(existing.get("summary") or "").strip()
+            and bool(config.get("minutes_ai", "auto_generate", default=True))
+        ):
+            if not _enqueue_auto_summary(str(existing["id"])):
+                return False
+            logger.info(
+                "[recovery] re-queued auto-summary for saved minutes: %s",
+                existing["id"],
+            )
+            _delete_session_meta(session_id)
+            return True
         _delete_session_meta(session_id)
         return False
 
