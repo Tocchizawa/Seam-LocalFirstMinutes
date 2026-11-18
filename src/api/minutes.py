@@ -483,10 +483,12 @@ async def _start_retranscribe_minutes(
     if get_runner().is_busy(minutes_id):
         raise conflict("MINUTES_BUSY", "この議事録は要約または後処理中のため再文字起こしできません")
 
+    from src.api import recording as rec_mod
+
     # 音声ファイルを探す
     session_dir = APP_DIR / "sessions" / session_id
     wav_path: Path | None = None
-    for name in ("combined.flac", "combined.wav", "system.wav", "mic.wav"):
+    for name in rec_mod.AUDIO_FILE_PRIORITY:
         cand = session_dir / name
         if cand.exists() and cand.stat().st_size > 44:
             wav_path = cand
@@ -496,9 +498,11 @@ async def _start_retranscribe_minutes(
                         "音声ファイルが見つかりません(セッションが既に削除されている可能性)")
 
     # 同じ session_id で何かが走っていれば拒否(再実行は1セッションにつき1度ずつ)
-    from src.api import recording as rec_mod
     existing = rec_mod._pipelines.get(session_id)
-    if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
+    handing_off = rec_mod._finalize_tasks.get(session_id) is asyncio.current_task()
+    if session_id in _retranscribe_tasks or (
+        not handing_off and existing and existing.get("state") in ("recording", "stopping", "transcribing")
+    ):
         raise conflict("ALREADY_RUNNING", "このセッションは現在処理中です")
 
     if not rec_mod._write_session_meta(
@@ -653,6 +657,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
     from src.pipeline.state import Stage, STAGE_LABELS, RETRANSCRIBE_PIPELINE
 
     # pipeline 登録(キュー待ち)
+    previous = rec_mod._pipelines.get(session_id) or {}
     rec_mod._pipelines[session_id] = {
         "session_id": session_id,
         "project_id": project_id,
@@ -662,10 +667,10 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
         "stage_step": 1,
         "stage_total": len(RETRANSCRIBE_PIPELINE),
         "message": "キューで待機中...",
-        "result": None,
+        "result": previous.get("result"),
         "transcript": None,
         "error": None,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": previous.get("started_at") or datetime.now(timezone.utc).isoformat(),
     }
     rec_mod._evict_completed_pipelines()
     await rec_mod._broadcast_pipeline(session_id)

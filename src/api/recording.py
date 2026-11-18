@@ -588,6 +588,7 @@ async def _stream_levels() -> None:
                     "elapsed_sec": round(recorder.elapsed_sec, 1),
                     "session_id": sid,
                     "paused": _recording_paused,
+                    "transcription_deferred": bool((_pipelines.get(sid) or {}).get("transcription_deferred")),
                 },
             })
             last_status = now
@@ -789,10 +790,10 @@ async def _finalize_session(session_id: str) -> None:
                     error=msg,
                     wav_path=result.get("wav_path") if isinstance(result, dict) else None,
                 )
-                await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": msg}})
-                await _broadcast_pipeline(session_id)
                 _cleanup_session(session_id)
                 _active_session_id = None
+                await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": msg}})
+                await _broadcast_pipeline(session_id)
                 return
 
         # ここで recorder は free → 次の録音開始可能
@@ -801,15 +802,18 @@ async def _finalize_session(session_id: str) -> None:
     except Exception as e:
         logger.error("recorder.stop failed [%s]: %s", session_id, e)
         _set_state(session_id, state="error", message=str(e), error=str(e))
-        await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": str(e)}})
-        await _broadcast_pipeline(session_id)
         _cleanup_session(session_id)
         _active_session_id = None
+        await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": str(e)}})
+        await _broadcast_pipeline(session_id)
         return
 
     # 2) Mixer を停止 → streamer flush
     _set_state(session_id, state="transcribing")
-    _set_record_stage(Stage.WHISPER_FLUSH, "残りの文字起こしを処理中...")
+    deferred = bool(p.get("transcription_deferred"))
+    _set_record_stage(
+        Stage.WHISPER_FLUSH, "音声を保存中" if deferred else "残りの文字起こしを処理中...",
+    )
     _write_session_meta(session_id, state="transcribing")
     await _broadcast_pipeline(session_id)
 
@@ -830,6 +834,29 @@ async def _finalize_session(session_id: str) -> None:
             "type": "recording_stopped",
             "data": {**result, "session_id": session_id},
         })
+
+        if deferred:
+            from src.api.minutes import _start_retranscribe_minutes
+
+            _mixers.pop(session_id, None)
+            _write_session_meta(session_id, duration_sec=result.get("duration_sec", 0))
+            minutes, _ = await _materialize_session_minutes(
+                session_id,
+                prefer_project_id=p["project_id"],
+                title_prefix="",
+                enqueue_summary=False,
+                remove_meta=False,
+                diarize_segments=False,
+            )
+            await _start_retranscribe_minutes(
+                str(minutes["id"]),
+                enqueue_summary_on_complete=True,
+            )
+            await ws_manager.broadcast({
+                "type": "minutes_saved",
+                "data": {"session_id": session_id, "minutes_id": minutes["id"]},
+            })
+            return
 
         segments: list[dict] = []
         streamer_error: str | None = None
@@ -1030,46 +1057,13 @@ def _cleanup_session(session_id: str) -> None:
 
 # ─── Endpoints ──────────────────────────────────────────────────────────
 
-@router.post("/start")
-async def start_recording(req: StartRequest) -> dict:
-    async with _recording_start_lock:
-        return await _start_recording(req)
-
-
-async def _start_recording(req: StartRequest) -> dict:
-    global _active_session_id, _level_task, _latest_level, _latest_system_level, _recording_paused
-    if recorder.is_recording or _active_session_id is not None:
-        raise conflict("ALREADY_RECORDING", "現在録音中です。停止してから新規録音してください")
+def _start_live_transcriber(
+    session_id: str, project_id: str, loop: asyncio.AbstractEventLoop,
+) -> StreamingTranscriber | None:
     if not model_resource_gate.can_acquire_whisper():
-        raise conflict(
-            "LOCAL_MODEL_BUSY",
-            "別のローカルAI処理中のため、処理完了後に録音を開始してください",
-        )
-
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 衝突回避: 同秒に再開した場合は連番付与
-    suffix = 0
-    sid = session_id
-    while sid in _pipelines or _session_dir(sid).exists():
-        suffix += 1
-        sid = f"{session_id}_{suffix}"
-    session_id = sid
-
-    pipeline = _new_pipeline(session_id, req.project_id, bool(req.capture_system))
-    _pipelines[session_id] = pipeline
-    _evict_completed_pipelines()
-
-    _write_session_meta(
-        session_id,
-        project_id=req.project_id,
-        started_at=pipeline["started_at"],
-        capture_system=bool(req.capture_system),
-        mic_device=req.mic_device,
-        state="recording",
-    )
-
+        return None
     # プロジェクトの用語集を取得 (initial_prompt として whisper に渡す)
-    project = project_manager.get(req.project_id)
+    project = project_manager.get(project_id)
     glossary = list(project.glossary) if project else []
     # corrections の正式表記 (correct 側) も Whisper の initial_prompt に混ぜ込む
     # これにより既知の誤転写を未然に防ぐ。
@@ -1094,7 +1088,6 @@ async def _start_recording(req: StartRequest) -> dict:
         chunker_kwargs["threshold"] = float(streaming_cfg.get("silero_threshold", 0.5))
     else:
         chunker_kwargs["rms_threshold"] = float(streaming_cfg.get("rms_threshold", 0.005))
-    loop = asyncio.get_running_loop()
     model_load_timeout_sec = max(
         900.0,
         float(streaming_cfg.get("model_load_timeout_sec", 900.0)),
@@ -1118,15 +1111,49 @@ async def _start_recording(req: StartRequest) -> dict:
     try:
         streamer.start(loop)
     except ResourceBusyError:
-        _pipelines.pop(session_id, None)
-        _delete_session_meta(session_id)
-        _remove_empty_session_dir(session_id)
-        raise conflict(
-            "LOCAL_MODEL_BUSY",
-            "別のローカルAI処理中のため、処理完了後に録音を開始してください",
-        )
-    except Exception as e:
+        return None
+    except Exception:
         streamer.cleanup()
+        raise
+    return streamer
+
+
+@router.post("/start")
+async def start_recording(req: StartRequest) -> dict:
+    async with _recording_start_lock:
+        return await _start_recording(req)
+
+
+async def _start_recording(req: StartRequest) -> dict:
+    global _active_session_id, _level_task, _latest_level, _latest_system_level, _recording_paused
+    if recorder.is_recording or _active_session_id is not None:
+        raise conflict("ALREADY_RECORDING", "現在録音中です。停止してから新規録音してください")
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 衝突回避: 同秒に再開した場合は連番付与
+    suffix = 0
+    sid = session_id
+    while sid in _pipelines or _session_dir(sid).exists():
+        suffix += 1
+        sid = f"{session_id}_{suffix}"
+    session_id = sid
+
+    pipeline = _new_pipeline(session_id, req.project_id, bool(req.capture_system))
+    _pipelines[session_id] = pipeline
+    _evict_completed_pipelines()
+
+    _write_session_meta(
+        session_id,
+        project_id=req.project_id,
+        started_at=pipeline["started_at"],
+        capture_system=bool(req.capture_system),
+        mic_device=req.mic_device,
+        state="recording",
+    )
+
+    loop = asyncio.get_running_loop()
+    try:
+        streamer = _start_live_transcriber(session_id, req.project_id, loop)
+    except Exception as e:
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
         _remove_empty_session_dir(session_id)
@@ -1135,15 +1162,16 @@ async def _start_recording(req: StartRequest) -> dict:
             "TRANSCRIBER_START_FAILED",
             f"文字起こしの準備に失敗したため録音を開始できません: {e}",
         )
+    # A busy model delays transcription while the mixer still saves the audio.
+    pipeline["transcription_deferred"] = streamer is None
+    if streamer is not None:
+        _streamers[session_id] = streamer
+
     rec_cfg = config.get("recording", default={}) or {}
     mix_writer = RealtimeMixedAudioWriter(_session_dir(session_id))
     try:
         mix_writer.start()
     except Exception as e:
-        try:
-            streamer.cleanup()
-        except Exception:
-            pass
         try:
             mix_writer.close()
         except Exception:
@@ -1163,13 +1191,13 @@ async def _start_recording(req: StartRequest) -> dict:
             mix_writer.feed(samples)
         except Exception as e:
             logger.error("Realtime mixed audio write failed [%s]: %s", session_id, e)
-        streamer.feed(samples)
+        if streamer is not None:
+            streamer.feed(samples)
 
     mixer = RealtimeMixer(
         on_chunk=_on_mixed_chunk,
         audio_leveling=rec_cfg.get("audio_leveling"),
     )
-    _streamers[session_id] = streamer
     _mixers[session_id] = mixer
     _mix_writers[session_id] = mix_writer
     try:
@@ -1224,6 +1252,7 @@ async def _start_recording(req: StartRequest) -> dict:
     _latest_system_level = 0.0
     result["project_id"] = req.project_id
     result["session_id"] = session_id
+    result["transcription_deferred"] = bool(pipeline.get("transcription_deferred"))
 
     _level_task = asyncio.create_task(_stream_levels())
     await _broadcast_pipeline(session_id)
@@ -1273,6 +1302,7 @@ async def recording_status() -> dict:
         **recorder.get_status(),
         "session_id": _active_session_id,
         "paused": _recording_paused,
+        "transcription_deferred": bool((_pipelines.get(_active_session_id) or {}).get("transcription_deferred")),
         "stopping": bool(
             _active_session_id
             and (_finalize_tasks.get(_active_session_id) is not None)
@@ -1567,7 +1597,12 @@ async def _materialize_session_minutes(
             logger.warning("[recover] rediarize failed for %s, using raw segments: %s", session_id, e)
             transcript = segments
 
-    duration_sec = _audio_duration_sec(audio_path) if audio_path else 0
+    try:
+        duration_sec = int(float(meta.get("duration_sec") or 0))
+    except (TypeError, ValueError, OverflowError):
+        duration_sec = 0
+    if duration_sec <= 0 and audio_path:
+        duration_sec = _audio_duration_sec(audio_path)
     if duration_sec <= 0 and transcript:
         try:
             duration_sec = int(max(float(seg.get("end", 0.0)) for seg in transcript))
