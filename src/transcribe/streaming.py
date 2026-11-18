@@ -1822,7 +1822,12 @@ class StreamingTranscriber:
                         preview_start = new_segments[0]["start"]
                         self._emit_preview({
                             "start": preview_start,
+                            "end": new_segments[-1]["end"],
                             "text": " ".join(segment["text"] for segment in new_segments),
+                            "segments": [
+                                {key: segment[key] for key in ("start", "end", "text")}
+                                for segment in new_segments
+                            ],
                         })
             try:
                 if new_segments:
