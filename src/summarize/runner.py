@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 DRAFTS_DIR = APP_DIR / "summary_drafts"
 SUMMARY_QUEUE_PATH = APP_DIR / "summary_queue.json"
 CODEX_USAGE_PATH = APP_DIR / "codex_usage.jsonl"
+MAX_RETAINED_SUMMARY_STATUSES = 100
 
 _USAGE_KEYS = (
     "input_tokens",
@@ -408,7 +409,7 @@ class SummaryRunner:
             status=status,
         )
         self._jobs[minutes_id] = job
-        self._statuses[minutes_id] = status
+        self._remember_status(status)
         self._queue.put_nowait(job)
         logger.info(
             "[summary] enqueued: %s (provider=%s)", minutes_id, provider_name or "default"
@@ -469,6 +470,27 @@ class SummaryRunner:
         """要約保存と辞書整理の間で落ちても後段処理を復元できるよう先に記録する。"""
         self._durable_phase_b[minutes_id] = provider_name
         return self._persist_pending_jobs()
+
+    def _remember_status(self, status: JobStatus) -> None:
+        self._statuses.pop(status.minutes_id, None)
+        self._statuses[status.minutes_id] = status
+        self._prune_statuses()
+
+    def _prune_statuses(self) -> None:
+        excess = sum(
+            1
+            for status in self._statuses.values()
+            if status.state not in ("queued", "running")
+        ) - MAX_RETAINED_SUMMARY_STATUSES
+        if excess <= 0:
+            return
+        for minutes_id, status in list(self._statuses.items()):
+            if status.state in ("queued", "running"):
+                continue
+            self._statuses.pop(minutes_id, None)
+            excess -= 1
+            if excess <= 0:
+                return
 
     def get_status(self, minutes_id: str) -> JobStatus | None:
         return self._statuses.get(minutes_id)
@@ -538,7 +560,8 @@ class SummaryRunner:
                         self._durable_jobs.pop(job.minutes_id, None)
                         self._persist_pending_jobs()
                     job.status.state = "cancelled"
-                    self._statuses[job.minutes_id] = job.status
+                    job.status.finished_at = time.time()
+                    self._remember_status(job.status)
                 continue
 
             self._current = job
@@ -557,6 +580,7 @@ class SummaryRunner:
                         if self._jobs.get(job.minutes_id) is job:
                             job.status.state = "cancelled"
                             job.status.finished_at = time.time()
+                            self._remember_status(job.status)
                             await self._broadcast({
                                 "type": "summary_cancelled",
                                 "data": {"minutes_id": job.minutes_id},
@@ -573,9 +597,21 @@ class SummaryRunner:
                     await self._process_job(job)
                 elif self._jobs.get(job.minutes_id) is job:
                     job.status.state = "cancelled"
-                    self._statuses[job.minutes_id] = job.status
+                    job.status.finished_at = time.time()
+                    self._remember_status(job.status)
             except Exception as e:
                 logger.exception("[summary] worker unhandled error: %s", e)
+                if (
+                    self._jobs.get(job.minutes_id) is job
+                    and not job.cancel_event.is_set()
+                    and job.status.state in ("queued", "running")
+                ):
+                    self._mark_failed(
+                        job.status,
+                        SummaryErrorCode.UNKNOWN.value,
+                        f"要約処理に失敗しました: {e}",
+                    )
+                    await self._broadcast_failed(job.status, job)
             finally:
                 if local_model_lease:
                     from src.audio.resource_monitor import model_resource_gate
@@ -588,6 +624,8 @@ class SummaryRunner:
                     if not self._shutdown:
                         self._durable_jobs.pop(job.minutes_id, None)
                         self._persist_pending_jobs()
+                if self._statuses.get(job.minutes_id) is job.status:
+                    self._remember_status(job.status)
 
     async def _process_job(self, job: _Job) -> None:
         from src.storage.db import db
