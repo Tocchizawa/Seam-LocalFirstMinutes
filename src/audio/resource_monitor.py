@@ -42,6 +42,11 @@ class ModelResourceGate:
             self._whisper_users += 1
             return True
 
+    def can_acquire_whisper(self) -> bool:
+        """重い録音セッション初期化の前に、LLM の待機状況を確認する。"""
+        with self._condition:
+            return not self._llm_active and self._llm_waiters == 0
+
     def release_whisper(self, before_release: Callable[[], None] | None = None) -> None:
         with self._condition:
             if self._whisper_users == 1 and before_release is not None:

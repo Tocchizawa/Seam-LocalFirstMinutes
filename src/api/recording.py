@@ -390,6 +390,15 @@ def _delete_session_meta(session_id: str) -> None:
         pass
 
 
+def _remove_empty_session_dir(session_id: str) -> None:
+    """初期化に失敗したセッションの空ディレクトリだけを片付ける。"""
+    try:
+        _session_dir(session_id).rmdir()
+    except OSError:
+        # 音声など何か残っていれば、救済できるようそのまま保持する。
+        pass
+
+
 def _append_transcript_segment(session_id: str, segment: dict) -> None:
     """確定 segment を transcript.jsonl に追記。finalize 中クラッシュ時のフォールバック用。"""
     try:
@@ -1013,6 +1022,11 @@ async def _start_recording(req: StartRequest) -> dict:
     global _active_session_id, _level_task, _latest_level, _latest_system_level, _recording_paused
     if recorder.is_recording or _active_session_id is not None:
         raise conflict("ALREADY_RECORDING", "現在録音中です。停止してから新規録音してください")
+    if not model_resource_gate.can_acquire_whisper():
+        raise conflict(
+            "LOCAL_MODEL_BUSY",
+            "別のローカルAI処理中のため、処理完了後に録音を開始してください",
+        )
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     # 衝突回避: 同秒に再開した場合は連番付与
@@ -1088,6 +1102,7 @@ async def _start_recording(req: StartRequest) -> dict:
     except ResourceBusyError:
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
         raise conflict(
             "LOCAL_MODEL_BUSY",
             "別のローカルAI処理中のため、処理完了後に録音を開始してください",
