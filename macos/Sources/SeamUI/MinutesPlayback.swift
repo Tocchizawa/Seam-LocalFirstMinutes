@@ -244,7 +244,7 @@ public struct MinutesAudioBar: View {
     }
 }
 
-func minutesTime(_ seconds: Double) -> String {
+public func minutesTime(_ seconds: Double) -> String {
     let total = seconds.isFinite ? Int(min(max(0, seconds), Double(Int32.max))) : 0
     if total >= 3600 {
         return String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)

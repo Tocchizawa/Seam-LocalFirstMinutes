@@ -7,9 +7,11 @@ let package = Package(
     products: [
         .library(name: "SeamCore", targets: ["SeamCore"]),
         .library(name: "SeamUI", targets: ["SeamUI"]),
+        .executable(name: "SeamApp", targets: ["SeamApp"]),
     ],
     targets: [
         .target(name: "SeamCore"),
         .target(name: "SeamUI", dependencies: ["SeamCore"]),
+        .executableTarget(name: "SeamApp", dependencies: ["SeamCore", "SeamUI"]),
     ]
 )
