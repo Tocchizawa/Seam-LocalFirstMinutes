@@ -79,6 +79,12 @@ export const updateProject = (id: string, data: Partial<ProjectCreate>) =>
     body: JSON.stringify(data),
   });
 
+export const reorderProjects = (projectIds: string[]) =>
+  request<Project[]>("/api/projects/order", {
+    method: "PUT",
+    body: JSON.stringify({ project_ids: projectIds }),
+  });
+
 export const deleteProject = (id: string, deleteOutput = false) =>
   request<{ status: string }>(`/api/projects/${id}?delete_output=${deleteOutput}`, {
     method: "DELETE",

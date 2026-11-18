@@ -116,6 +116,20 @@ class ProjectUpdate(BaseModel):
         return out
 
 
+class ProjectOrder(BaseModel):
+    project_ids: list[str]
+
+    @field_validator("project_ids")
+    @classmethod
+    def _validate_project_ids(cls, value: list[str]) -> list[str]:
+        ids = [str(project_id).strip() for project_id in value]
+        if any(not project_id for project_id in ids):
+            raise ValueError("project_ids must not contain empty IDs")
+        if len(ids) != len(set(ids)):
+            raise ValueError("project_ids must not contain duplicates")
+        return ids
+
+
 class Project(BaseModel):
     id: str
     name: str

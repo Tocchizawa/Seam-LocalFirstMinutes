@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ OUTPUT_DIR_SENTINEL = ".seam_output_dir"
 class ProjectManager:
     def __init__(self) -> None:
         self._path = PROJECTS_PATH
+        self._lock = threading.RLock()
         self._ensure_file()
 
     def _ensure_file(self) -> None:
@@ -27,12 +30,21 @@ class ProjectManager:
             self._save_raw({"schema_version": 1, "projects": []})
 
     def _load_raw(self) -> dict:
-        with open(self._path, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {"schema_version": 1, "projects": []}
+        with self._lock:
+            with open(self._path, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {"schema_version": 1, "projects": []}
 
     def _save_raw(self, data: dict) -> None:
-        with open(self._path, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+        with self._lock:
+            temporary_path = self._path.with_suffix(self._path.suffix + ".tmp")
+            try:
+                with open(temporary_path, "w", encoding="utf-8") as f:
+                    yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary_path, self._path)
+            finally:
+                temporary_path.unlink(missing_ok=True)
 
     def _mark_output_dir(self, output_dir: Path) -> None:
         try:
@@ -71,8 +83,9 @@ class ProjectManager:
         return True, ""
 
     def list(self) -> list[Project]:
-        raw = self._load_raw()
-        return [Project(**p) for p in raw.get("projects", [])]
+        with self._lock:
+            raw = self._load_raw()
+            return [Project(**p) for p in raw.get("projects", [])]
 
     def get(self, project_id: str) -> Project | None:
         for p in self.list():
@@ -81,6 +94,10 @@ class ProjectManager:
         return None
 
     def create(self, data: ProjectCreate) -> Project:
+        with self._lock:
+            return self._create_locked(data)
+
+    def _create_locked(self, data: ProjectCreate) -> Project:
         raw = self._load_raw()
         now = datetime.now(timezone.utc).isoformat()
         project = Project(
@@ -103,6 +120,10 @@ class ProjectManager:
         return project
 
     def update(self, project_id: str, data: ProjectUpdate) -> Project | None:
+        with self._lock:
+            return self._update_locked(project_id, data)
+
+    def _update_locked(self, project_id: str, data: ProjectUpdate) -> Project | None:
         raw = self._load_raw()
         projects = raw.get("projects", [])
         for i, p in enumerate(projects):
@@ -120,7 +141,27 @@ class ProjectManager:
                 return Project(**p)
         return None
 
+    def reorder(self, project_ids: list[str]) -> list[Project]:
+        """プロジェクトの表示順を指定された ID 順で保存する。"""
+        with self._lock:
+            raw = self._load_raw()
+            projects = raw.get("projects", [])
+            by_id = {str(project.get("id")): project for project in projects}
+            if len(project_ids) != len(by_id) or set(project_ids) != set(by_id):
+                raise ValueError(
+                    "プロジェクト一覧が更新されました。再読み込みしてから並べ替えてください"
+                )
+            ordered = [by_id[project_id] for project_id in project_ids]
+            raw["projects"] = ordered
+            self._save_raw(raw)
+            logger.info("Reordered %d projects", len(ordered))
+            return [Project(**project) for project in ordered]
+
     def delete(self, project_id: str, delete_output: bool = False) -> bool:
+        with self._lock:
+            return self._delete_locked(project_id, delete_output)
+
+    def _delete_locked(self, project_id: str, delete_output: bool = False) -> bool:
         raw = self._load_raw()
         projects = raw.get("projects", [])
         for i, p in enumerate(projects):

@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import {
   checkHealth, type Project, type Minutes, getSettings, listProjects,
-  getPipelines, getActiveSummarizes, listDevices,
+  getPipelines, getActiveSummarizes, listDevices, reorderProjects as saveProjectOrder,
 } from "./lib/api";
 import { initTheme } from "./lib/theme";
 import { Sidebar } from "./components/Sidebar";
@@ -54,6 +54,8 @@ function AppInner() {
   const [showProjectDialog, setShowProjectDialog] = useState(false);
   const [healthy, setHealthy] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
+  const projectsRef = useRef<Project[]>(projects);
+  projectsRef.current = projects;
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "main" });
   const [showDevicesGlobal, setShowDevicesGlobal] = useState(false);
@@ -234,6 +236,32 @@ function AppInner() {
     });
   }, []);
 
+  const handleProjectReorder = useCallback(async (projectIds: string[]) => {
+    const current = projectsRef.current;
+    const byId = new Map(current.map((project) => [project.id, project]));
+    if (projectIds.length !== current.length || projectIds.some((id) => !byId.has(id))) {
+      await refreshProjects();
+      return;
+    }
+
+    const optimistic = projectIds.map((id) => byId.get(id)!);
+    projectsRef.current = optimistic;
+    setProjects(optimistic);
+    try {
+      const saved = await saveProjectOrder(projectIds);
+      projectsRef.current = saved;
+      setProjects(saved);
+    } catch (error) {
+      await refreshProjects().catch(() => {});
+      showToast({
+        kind: "err",
+        text: "並び替えを保存できませんでした。一覧を最新の状態に戻しました。",
+        ttl: 6000,
+      });
+      console.warn("[projects] reorder failed", error);
+    }
+  }, [refreshProjects]);
+
   useEffect(() => {
     if (startupReady) refreshProjects();
   }, [startupReady, refreshProjects]);
@@ -393,6 +421,7 @@ function AppInner() {
             setMode({ kind: "main" });
           }}
           onNewProject={() => setShowProjectDialog(true)}
+          onReorder={handleProjectReorder}
           onOpenProjectSettings={(p) => setProjectSettingsTarget(p)}
           onOpenSettings={() => setShowSettings(true)}
         />
