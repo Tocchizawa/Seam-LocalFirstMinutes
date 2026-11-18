@@ -97,7 +97,7 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
           </div>
           <p aria-live="polite">
             {recordingStopping ? "録音を保存しています"
-              : recordingStarting ? waitingForModel ? "ローカル処理の完了を待っています" : "録音を準備しています"
+              : recordingStarting ? waitingForModel ? "文字起こしの準備をしています" : "録音を準備しています"
                 : recording ? paused ? "録音を一時停止中" : "会話を記録しています"
                   : "録音は停止しています"}
           </p>
@@ -203,11 +203,11 @@ function LiveWaitingState({
       <div className="flex items-center gap-3">
         <Spinner size={12} />
         <div className="flex flex-col items-start gap-0.5">
-          <p className="text-[11px] text-(--t2)">Whisper モデルを読み込み中</p>
+          <p className="text-[11px] text-(--t2)">音声認識を準備しています</p>
           <p className="text-[10px] text-(--t4)" title={modelLoadLog ?? undefined}>
             {modelDownload?.state === "ready"
-              ? "キャッシュ済みモデルをメモリに展開しています"
-              : "モデルのキャッシュを確認しています"}
+              ? "音声認識の準備をしています"
+              : "音声認識モデルを確認しています"}
           </p>
         </div>
       </div>
@@ -216,7 +216,7 @@ function LiveWaitingState({
   if (modelState === "error") {
     return (
       <>
-        <p className="text-[11px] text-(--danger)">モデルのロードに失敗しました</p>
+        <p className="text-[11px] text-(--danger)">音声認識を開始できませんでした</p>
         {modelError && (
           <p className="text-[10px] text-(--t4) max-w-[400px] truncate">{modelError}</p>
         )}
@@ -227,7 +227,7 @@ function LiveWaitingState({
   return (
     <>
       <Spinner size={12} />
-      <p className="text-[10px] text-(--t3)">発話を待機中...</p>
+      <p className="text-[10px] text-(--t3)">会話の音声を待っています</p>
     </>
   );
 }

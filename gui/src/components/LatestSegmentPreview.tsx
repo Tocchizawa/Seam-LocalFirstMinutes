@@ -40,8 +40,7 @@ export function LatestSegmentPreview({ onExpand }: Props) {
 
   return (
     <div
-      className="flex items-center gap-2 px-4 py-1.5 border-b border-(--border)"
-      style={{ background: "var(--surface)" }}
+      className="latest-segment-preview flex items-center gap-2 px-5 py-2 border-b border-(--border)"
     >
       <div className="flex-1 min-w-0 overflow-hidden">
         {displayed ? (
@@ -60,15 +59,15 @@ export function LatestSegmentPreview({ onExpand }: Props) {
           <ModelDownloadProgress status={modelDownload} compact />
         ) : streamStatus?.model_state === "loading" ? (
           <span className="text-[11px] text-(--t2) truncate min-w-0 flex-1">
-            Whisperモデルを読み込み中
-            <span className="text-(--t4)"> · キャッシュを確認しています</span>
+            音声認識を準備しています
+            <span className="text-(--t4)"> · 準備が整うと会話の記録を始めます</span>
           </span>
         ) : streamStatus?.model_state === "error" ? (
           <span className="text-[11px] text-(--danger) truncate min-w-0 flex-1">
-            モデルのロードに失敗
+            音声認識を開始できませんでした
           </span>
         ) : (
-          <span className="text-[11px] text-(--t4)">発話を待機中...</span>
+          <span className="text-[11px] text-(--t4)">会話の音声を待っています</span>
         )}
       </div>
       <button
