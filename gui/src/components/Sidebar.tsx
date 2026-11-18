@@ -151,6 +151,27 @@ export function Sidebar({
 
   return (
     <aside className="sidebar-shell">
+      <div className="sidebar-brand" data-tauri-drag-region>
+        <span className="sidebar-brand-mark" aria-hidden="true"><i /><i /><i /></span>
+        <span className="sidebar-brand-copy">
+          <strong>Seam</strong>
+          <span>会議の記録</span>
+        </span>
+      </div>
+
+      <div className="sidebar-project-heading">
+        <span>プロジェクト</span>
+        <button
+          type="button"
+          className="sidebar-add-project"
+          onClick={onNewProject}
+          title="新しいプロジェクト"
+          aria-label="新しいプロジェクト"
+        >
+          <Plus size={15} weight="regular" />
+        </button>
+      </div>
+
       {/* search */}
       <div className="px-3 pt-3 pb-2 relative">
         <MagnifyingGlass size={12} weight="regular"
@@ -158,7 +179,8 @@ export function Sidebar({
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="プロジェクト検索"
+          placeholder="プロジェクトを検索"
+          aria-label="プロジェクトを検索"
           className="sidebar-search"
         />
       </div>
@@ -265,20 +287,17 @@ export function Sidebar({
         <span className="sr-only" aria-live="polite">{orderAnnouncement}</span>
       </div>
 
-      {/* footer: new project + global settings */}
-      <div className="border-t border-(--border) p-2 flex items-center gap-1">
-        <button
-          onClick={onNewProject}
-          className="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-[11px] text-(--t3) hover:text-(--t1) hover:bg-(--surface) rounded-md cursor-pointer transition-colors"
-          style={{ background: "transparent", border: "none" }}>
-          <Plus size={12} weight="bold" />
-          新規プロジェクト
-        </button>
+      {/* footer: global settings */}
+      <div className="sidebar-footer">
         <button
           onClick={onOpenSettings}
-          className={`icon-btn ${settingsActive ? "is-active" : ""}`}
-          title="全体設定">
-          <Gear size={14} weight={settingsActive ? "fill" : "regular"} />
+          className={`sidebar-settings ${settingsActive ? "is-active" : ""}`}
+          title="設定"
+          aria-label="設定"
+          aria-pressed={settingsActive}
+        >
+          <Gear size={16} weight={settingsActive ? "fill" : "regular"} />
+          <span>設定</span>
         </button>
       </div>
     </aside>

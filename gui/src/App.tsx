@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
+import "./design-system.css";
 import {
   checkHealth, type Project, type Minutes, getSettings, listProjects,
   getPipelines, getActiveSummarizes, listDevices, reorderProjects as saveProjectOrder,

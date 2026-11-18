@@ -20,29 +20,29 @@
 /* ─── ダーク(デフォルト)───────────────────────────────────── */
 :root,
 [data-theme="dark"] {
-  /* Warm graphite surfaces, with depth coming from small value steps. */
-  --bg: #171614;
-  --surface: #201f1b;
-  --surface-2: #292720;
-  --surface-3: #343129;
-  --surface-pressed: #403c32;
+  /* Graphite and paper: quiet surfaces, with a single recorder-red accent. */
+  --bg: #151613;
+  --surface: #1c1d1a;
+  --surface-2: #242521;
+  --surface-3: #2e2f2a;
+  --surface-pressed: #393a34;
 
   /* 線 */
-  --border: rgba(244, 239, 226, 0.09);
-  --border-hover: rgba(244, 239, 226, 0.15);
-  --border-strong: rgba(244, 239, 226, 0.22);
+  --border: rgba(240, 238, 231, 0.08);
+  --border-hover: rgba(240, 238, 231, 0.14);
+  --border-strong: rgba(240, 238, 231, 0.20);
 
   /* テキスト */
-  --t1: #f4f0e8;
-  --t2: rgba(244, 240, 232, 0.78);
-  --t3: rgba(244, 240, 232, 0.58);
-  --t4: rgba(244, 240, 232, 0.40);
+  --t1: #f0eee7;
+  --t2: #c2c0b7;
+  --t3: #a09e95;
+  --t4: #838178;
 
   /* アクセント: 暖かいオレンジ */
-  --accent: #e49a63;
-  --accent-bright: #efad78;
-  --accent-soft: rgba(228, 154, 99, 0.14);
-  --accent-line: rgba(228, 154, 99, 0.32);
+  --accent: #d27655;
+  --accent-bright: #e08765;
+  --accent-soft: rgba(210, 118, 85, 0.12);
+  --accent-line: rgba(210, 118, 85, 0.30);
   --blue: #60a5fa;
   --green: #34d399;
   --yellow: #fbbf24;
@@ -50,59 +50,59 @@
   /* 状態色 */
   --danger: #f87171;
   --warning: #f59e0b;
-  --success: #10b981;
-  --success-soft: rgba(16, 185, 129, 0.12);
+  --success: #42aa80;
+  --success-soft: rgba(66, 170, 128, 0.12);
 
   /* on-accent (オレンジ上にのる文字) */
-  --on-accent: #21180f;
+  --on-accent: #24150f;
 
   /* 影 */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.30);
+  --shadow-lg: 0 20px 56px rgba(0, 0, 0, 0.40);
 
   /* シェル */
-  --shell-bg: #171614;
-  --shell-border: rgba(244, 239, 226, 0.09);
-  --sidebar-bg: #141310;
-  --titlebar-bg: rgba(23, 22, 20, 0.92);
+  --shell-bg: #151613;
+  --shell-border: rgba(240, 238, 231, 0.08);
+  --sidebar-bg: #121310;
+  --titlebar-bg: #151613;
 
   /* dialog */
-  --dialog-bg: #24231f;
-  --dialog-border: rgba(244, 239, 226, 0.10);
+  --dialog-bg: #1c1d1a;
+  --dialog-border: rgba(240, 238, 231, 0.10);
 
   color-scheme: dark;
 }
 
 /* ─── ライト ───────────────────────────────────────────────── */
 [data-theme="light"] {
-  --bg: #f4f1e9;
-  --surface: #fbf9f4;
-  --surface-2: #f0ece3;
-  --surface-3: #e6e0d4;
-  --surface-pressed: #d8d0c1;
+  --bg: #f4f2ec;
+  --surface: #fbfaf6;
+  --surface-2: #efede6;
+  --surface-3: #e5e2d9;
+  --surface-pressed: #d9d6cc;
 
-  --border: rgba(48, 43, 32, 0.10);
-  --border-hover: rgba(48, 43, 32, 0.16);
-  --border-strong: rgba(48, 43, 32, 0.24);
+  --border: rgba(38, 37, 32, 0.10);
+  --border-hover: rgba(38, 37, 32, 0.16);
+  --border-strong: rgba(38, 37, 32, 0.24);
 
-  --t1: #29271f;
-  --t2: rgba(41, 39, 31, 0.78);
-  --t3: rgba(41, 39, 31, 0.61);
-  --t4: rgba(41, 39, 31, 0.43);
+  --t1: #25241f;
+  --t2: #5c5a51;
+  --t3: #716f65;
+  --t4: #858277;
 
-  --accent: #b85f36;
-  --accent-bright: #c97548;
-  --accent-soft: rgba(184, 95, 54, 0.11);
-  --accent-line: rgba(184, 95, 54, 0.30);
+  --accent: #a95237;
+  --accent-bright: #bb6043;
+  --accent-soft: rgba(169, 82, 55, 0.10);
+  --accent-line: rgba(169, 82, 55, 0.27);
   --blue: #2563eb;
   --green: #059669;
   --yellow: #d97706;
 
   --danger: #dc2626;
   --warning: #d97706;
-  --success: #059669;
-  --success-soft: rgba(5, 150, 105, 0.10);
+  --success: #16835e;
+  --success-soft: rgba(22, 131, 94, 0.10);
 
   --on-accent: #ffffff;
 
@@ -110,13 +110,13 @@
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.16);
 
-  --shell-bg: #f4f1e9;
-  --shell-border: rgba(48, 43, 32, 0.10);
-  --sidebar-bg: #ece8df;
-  --titlebar-bg: rgba(251, 249, 244, 0.94);
+  --shell-bg: #f4f2ec;
+  --shell-border: rgba(38, 37, 32, 0.10);
+  --sidebar-bg: #eceae2;
+  --titlebar-bg: #f4f2ec;
 
-  --dialog-bg: #fbf9f4;
-  --dialog-border: rgba(48, 43, 32, 0.12);
+  --dialog-bg: #fbfaf6;
+  --dialog-border: rgba(38, 37, 32, 0.12);
 
   color-scheme: light;
 }
@@ -2287,31 +2287,11 @@ button { font-family: inherit; }
   position: absolute;
   width: 40%;
   left: 0;
-  animation: splash-indeterminate 1.5s ease-in-out infinite;
+  animation: splash-indeterminate 1.35s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 @keyframes splash-indeterminate {
-  0%   { left: -40%; }
-  50%  { left: 50%; }
-  100% { left: 100%; }
-}
-/* 進捗値があっても常時走るシマー — 画面に必ず動きがある安心感を残す */
-.splash-progress-shimmer {
-  position: absolute;
-  top: 0; bottom: 0; left: 0;
-  width: 40%;
-  background: linear-gradient(
-    90deg,
-    rgba(255,255,255,0) 0%,
-    rgba(255,255,255,0.45) 50%,
-    rgba(255,255,255,0) 100%
-  );
-  animation: splash-shimmer 1.6s linear infinite;
-  pointer-events: none;
-  mix-blend-mode: overlay;
-}
-@keyframes splash-shimmer {
   0%   { transform: translateX(-100%); }
-  100% { transform: translateX(350%); }
+  100% { transform: translateX(250%); }
 }
 .splash-progress-label {
   font-size: 11px;
