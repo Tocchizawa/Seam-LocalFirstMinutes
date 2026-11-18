@@ -28,6 +28,7 @@ export function Sidebar({
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const [savingOrder, setSavingOrder] = useState(false);
+  const [orderAnnouncement, setOrderAnnouncement] = useState("");
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const previousRects = useRef<Map<string, DOMRect> | null>(null);
   const flipAnimations = useRef(new Map<string, Animation>());
@@ -105,6 +106,7 @@ export function Sidebar({
     const targetIndex = index + delta;
     if (index < 0 || targetIndex < 0 || targetIndex >= ids.length || !reorderable) return;
     [ids[index], ids[targetIndex]] = [ids[targetIndex], ids[index]];
+    setOrderAnnouncement(`${reordered[index].name} を ${targetIndex + 1} 番目に移動しました`);
     previewOrder(ids);
     void commitOrder(ids);
   };
@@ -186,7 +188,7 @@ export function Sidebar({
             {q ? "見つかりません" : "プロジェクトなし"}
           </p>
         ) : (
-          <div className="flex flex-col">
+          <div className="flex flex-col" role="list" aria-label="プロジェクト一覧">
             {filtered.map((p, index) => {
               const active = p.id === selected?.id;
               const editing = p.id === editingProjectId;
@@ -200,6 +202,7 @@ export function Sidebar({
                     else rowRefs.current.delete(p.id);
                   }}
                   draggable={reorderable}
+                  role="listitem"
                   onDragStart={(event) => {
                     if (!reorderable || (event.target as HTMLElement).closest(".project-row-action")) {
                       event.preventDefault();
@@ -259,6 +262,7 @@ export function Sidebar({
             })}
           </div>
         )}
+        <span className="sr-only" aria-live="polite">{orderAnnouncement}</span>
       </div>
 
       {/* footer: new project + global settings */}
