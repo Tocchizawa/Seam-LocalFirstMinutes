@@ -56,17 +56,6 @@ private final class SettingsEditor: ObservableObject {
 public enum NativeSettingsPage: String, CaseIterable, Identifiable {
     case input = "録音", transcription = "文字起こし", summary = "要約", speakers = "話者", appearance = "外観", advanced = "詳細"
     public var id: Self { self }
-
-    var symbol: String {
-        switch self {
-        case .input: "mic"
-        case .transcription: "waveform"
-        case .summary: "doc.text"
-        case .speakers: "person.2"
-        case .appearance: "circle.lefthalf.filled"
-        case .advanced: "slider.horizontal.3"
-        }
-    }
 }
 
 private enum SummaryProvider: String, CaseIterable, Identifiable {
@@ -101,12 +90,12 @@ private enum SummaryProvider: String, CaseIterable, Identifiable {
 
 /// An embedded settings panel. App preferences save only the edited fields
 /// through the original backend API, leaving unrelated config values intact.
+@available(macOS 15.0, *)
 public struct NativeSettings<Appearance: View>: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    @Namespace private var selection
     @StateObject private var editor: SettingsEditor
     @ObservedObject private var downloads: WhisperDownloads
     @Binding private var page: NativeSettingsPage
@@ -144,7 +133,7 @@ public struct NativeSettings<Appearance: View>: View {
         self.appearance = appearance
     }
 
-    private var motion: Animation? { reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.93) }
+    private var motion: Animation? { reduceMotion ? nil : .easeOut(duration: 0.18) }
     private var accent: Color {
         colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
     }
@@ -153,55 +142,39 @@ public struct NativeSettings<Appearance: View>: View {
         SummaryProvider(rawValue: editor.document["minutes_ai.provider"]?.text ?? "") ?? .ollama
     }
 
+    private var gutter: CGFloat { compact ? 16 : 32 }
+
     public var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("設定").font(.system(size: compact ? 24 : 29, weight: .semibold)).accessibilityAddTraits(.isHeader)
-                Spacer()
-                if !editor.changes.isEmpty || editor.saving {
-                    Button(editor.saving ? "保存中" : "変更を保存") {
-                        Task { await editor.save() }
+        ScrollView {
+            Group(sections: fields) { sections in
+                VStack(alignment: .leading, spacing: 24) {
+                    ForEach(sections) { section in
+                        VStack(alignment: .leading, spacing: 8) {
+                            section.header
+                                .font(.system(size: 14, weight: .semibold))
+                                .accessibilityAddTraits(.isHeader)
+                            SettingsRows { section.content }
+                                .background(alignment: .top) {
+                                    Rectangle()
+                                        .fill(Color.primary.opacity(0.09))
+                                        .frame(height: 1)
+                                        .allowsHitTesting(false)
+                                }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .keyboardShortcut("s")
-                    .buttonStyle(.borderedProminent)
-                    .tint(accent)
-                    .disabled(editor.loading || editor.saving || busy)
                 }
+                    .padding(.top, 16)
+                .padding(.bottom, 24)
+                .padding(.horizontal, gutter)
             }
-            .frame(minHeight: 34)
-            .padding(.horizontal, compact ? 15 : 32)
-            .padding(.top, 23)
-            .padding(.bottom, 14)
-
-            ViewThatFits(in: .horizontal) {
-                tabRow.fixedSize(horizontal: true, vertical: false)
-                categoryPicker
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, compact ? 15 : 32)
-            .padding(.bottom, 12)
-            Divider().padding(.horizontal, compact ? 15 : 32)
-
-            Form {
-                switch page {
-                case .input: inputSettings
-                case .transcription: transcriptionSettings
-                case .summary: summarySettings
-                case .speakers: speakerSettings
-                case .appearance: appearance()
-                case .advanced: advancedSettings
-                }
-                if let feedback = editor.feedback {
-                    Text(feedback)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("設定の状態 \(feedback)")
-                }
-            }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
-            .disabled(editor.loading || editor.saving || busy)
-            .id(page)
         }
+        .disabled(editor.loading || editor.saving || busy)
+        .id(page)
+        .transition(.identity)
+        .scrollEdgeBar { settingsHeader }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .tint(.primary)
         .task { await editor.load() }
         .task(id: page) { await refreshPage() }
         .task(id: provider) { await refreshProvider() }
@@ -222,35 +195,93 @@ public struct NativeSettings<Appearance: View>: View {
         }
     }
 
-    private var categoryPicker: some View {
-        Picker("設定カテゴリ", selection: $page) {
-            ForEach(NativeSettingsPage.allCases) { Label($0.rawValue, systemImage: $0.symbol).tag($0) }
+    private var settingsHeader: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Text("設定")
+                    .font(.system(size: compact ? 23 : 27, weight: .medium))
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 4)
+                if !editor.changes.isEmpty || editor.saving {
+                    Button(editor.saving ? "保存中" : "変更を保存") {
+                        Task { await editor.save() }
+                    }
+                    .keyboardShortcut("s")
+                    .buttonStyle(SettingsActionStyle(tint: accent))
+                    .disabled(editor.loading || editor.saving || busy)
+                }
+            }
+            .frame(minHeight: 44)
+            tabs
+            if let feedback = editor.feedback {
+                Text(feedback)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("設定の状態 \(feedback)")
+            }
         }
-        .pickerStyle(.menu)
+        .padding(.horizontal, gutter)
+        .padding(.top, compact ? 16 : 20)
+        .padding(.bottom, 8)
     }
 
-    private var tabRow: some View {
-        HStack(spacing: 5) {
-            ForEach(NativeSettingsPage.allCases) { item in
+    @ViewBuilder
+    private var fields: some View {
+        switch page {
+        case .input: inputSettings
+        case .transcription: transcriptionSettings
+        case .summary: summarySettings
+        case .speakers: speakerSettings
+        case .appearance: appearance()
+        case .advanced: advancedSettings
+        }
+    }
+
+    private var tabs: some View {
+        let pages = NativeSettingsPage.allCases
+        return ViewThatFits(in: .horizontal) {
+            tabRow(pages)
+            VStack(spacing: 4) {
+                tabRow(Array(pages.prefix(3)))
+                tabRow(Array(pages.suffix(3)))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(height: 1)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func tabRow(_ pages: [NativeSettingsPage]) -> some View {
+        HStack(spacing: 4) {
+            ForEach(pages) { item in
                 let active = page == item
                 Button {
-                    withAnimation(motion) { page = item }
+                    page = item
                 } label: {
-                    Label(item.rawValue, systemImage: item.symbol)
-                        .font(.system(size: 12, weight: active ? .semibold : .medium))
+                    Text(item.rawValue)
+                        .font(.system(size: 13, weight: active ? .semibold : .medium))
                         .foregroundStyle(active ? accent : .secondary)
-                        .padding(.horizontal, 11)
-                        .frame(height: 33)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
-                        .background {
+                        .overlay(alignment: .bottom) {
                             if active {
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(accent.opacity(0.11))
-                                    .matchedGeometryEffect(id: "settingsTab", in: selection)
+                                Capsule()
+                                    .fill(accent)
+                                    .frame(maxWidth: 72)
+                                    .frame(height: 2)
+                                    .padding(.horizontal, 8)
+                                    .allowsHitTesting(false)
                             }
                         }
                 }
-                .buttonStyle(ReaderHoverStyle(tint: accent, motion: motion))
+                .buttonStyle(ReaderHoverStyle(tint: .primary, motion: motion))
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
@@ -259,12 +290,18 @@ public struct NativeSettings<Appearance: View>: View {
     @ViewBuilder
     private var inputSettings: some View {
         Section("入力") {
-            Picker("マイク", selection: Binding(
-                get: { Int(editor.document["recording.mic_device"]?.number ?? -1) },
-                set: { editor.set("recording.mic_device", $0 == -1 ? .null : .number(Double($0))) }
-            )) {
-                Text("システムの既定").tag(-1)
-                ForEach(devices) { Text($0.name).tag($0.id) }
+            SettingsRow("マイク") {
+                Picker("マイク", selection: Binding(
+                    get: { Int(editor.document["recording.mic_device"]?.number ?? -1) },
+                    set: { editor.set("recording.mic_device", $0 == -1 ? .null : .number(Double($0))) }
+                )) {
+                    Text("システムの既定").tag(-1)
+                    ForEach(devices) { Text($0.name).tag($0.id) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.large)
+                .frame(maxWidth: 245, alignment: .trailing)
             }
             flag("システム音声も録音", "recording.last_capture_system", fallback: true)
         }
@@ -283,7 +320,7 @@ public struct NativeSettings<Appearance: View>: View {
                 confirmation = .init(target: .model, id: model.name, label: model.label)
             }
             if let failure = downloads.failure {
-                Text(failure).font(.callout).foregroundStyle(.secondary)
+                SettingsRow { Text(failure).font(.callout).foregroundStyle(.secondary) }
             }
         }
         Section("認識") {
@@ -299,7 +336,7 @@ public struct NativeSettings<Appearance: View>: View {
                 numeric("CPU使用率（%）", "whisper.performance.cpu_high_threshold", fallback: 75)
                 numeric("メモリ使用率（%）", "whisper.performance.memory_high_threshold", fallback: 85)
             }
-            DisclosureGroup("詳細") {
+            SettingsDisclosure(title: "詳細設定") {
                 numeric("抑制の強さ", "whisper.performance.throttle_ratio", fallback: 0.5)
                 numeric("休止の上限（秒）", "whisper.performance.max_throttle_sec", fallback: 3)
                 numeric("処理の優先度", "whisper.performance.worker_nice", fallback: 3)
@@ -314,17 +351,29 @@ public struct NativeSettings<Appearance: View>: View {
             choose("要約プロバイダ", "minutes_ai.provider", fallback: "ollama",
                    options: SummaryProvider.allCases.map { ($0.rawValue, $0.label) })
             let prefix = "minutes_ai." + provider.rawValue
-            TextField("要約モデル", text: text(prefix + ".model", fallback: provider.modelHint))
-            if !cliOptions.isEmpty {
-                Menu("利用可能なモデル") {
-                    ForEach(cliOptions) { option in
-                        Button(option.displayName) { editor.set(prefix + ".model", .text(option.slug)) }
+            SettingsRow("要約モデル") {
+                textInput("要約モデル", text(prefix + ".model", fallback: provider.modelHint))
+                if !cliOptions.isEmpty {
+                    Menu {
+                        ForEach(cliOptions) { option in
+                            Button(option.displayName) { editor.set(prefix + ".model", .text(option.slug)) }
+                        }
+                        if provider == .codex { Button("CLIの既定") { editor.set(prefix + ".model", .text("")) } }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                            .frame(width: 34, height: 34)
                     }
-                    if provider == .codex { Button("CLIの既定") { editor.set(prefix + ".model", .text("")) } }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .accessibilityLabel("利用可能なモデル")
+                    .help("利用可能なモデル")
                 }
             }
             if provider.isCLI {
-                TextField("起動コマンド", text: text(prefix + ".launcher_command"))
+                SettingsRow("起動コマンド") {
+                    textInput("起動コマンド", text(prefix + ".launcher_command"))
+                }
                 if provider == .codex {
                     choose("推論レベル", prefix + ".reasoning_effort", fallback: "low",
                            options: ["minimal", "low", "medium", "high", "xhigh"].map { ($0, $0) })
@@ -334,34 +383,45 @@ public struct NativeSettings<Appearance: View>: View {
                 numeric("コンテキスト長", prefix + ".num_ctx", fallback: 8192)
             }
             if provider.requiresKey, editor.api != nil {
-                SecureField(hasProviderKey ? "保存済みのAPIキーを更新" : "APIキー", text: $key)
-                HStack {
-                    Button("キーを保存") {
-                        let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let selectedProvider = provider
-                        act { api in
-                            try await api.setSummaryKey(value, provider: selectedProvider.rawValue)
-                            hasProviderKey = true
-                            key = ""
-                        }
-                    }
-                    .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if hasProviderKey {
-                        Button("キーを削除", role: .destructive) {
+                SettingsRow("APIキー") {
+                    SecureField(hasProviderKey ? "保存済みのAPIキーを更新" : "APIキー", text: $key)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.large)
+                        .frame(maxWidth: 245)
+                }
+                SettingsRow {
+                    actionsLayout {
+                        Button("キーを保存") {
+                            let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
                             let selectedProvider = provider
                             act { api in
-                                try await api.removeSummaryKey(provider: selectedProvider.rawValue)
-                                hasProviderKey = false
+                                try await api.setSummaryKey(value, provider: selectedProvider.rawValue)
+                                hasProviderKey = true
+                                key = ""
                             }
                         }
+                        .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if hasProviderKey {
+                            Button("キーを削除", role: .destructive) {
+                                let selectedProvider = provider
+                                act { api in
+                                    try await api.removeSummaryKey(provider: selectedProvider.rawValue)
+                                    hasProviderKey = false
+                                }
+                            }
+                        }
+                        Button("クラウド要約を許可") { confirmingCloud = true }
                     }
-                    Button("クラウド要約を許可") { confirmingCloud = true }
+                    .buttonStyle(SettingsActionStyle())
                 }
             }
             if editor.api != nil {
-                Button("接続をテスト") {
-                    let selectedProvider = provider
-                    act { api in editor.feedback = try await api.checkSummaryProvider(selectedProvider.rawValue).message }
+                SettingsRow {
+                    Button("接続をテスト") {
+                        let selectedProvider = provider
+                        act { api in editor.feedback = try await api.checkSummaryProvider(selectedProvider.rawValue).message }
+                    }
+                    .buttonStyle(SettingsActionStyle())
                 }
             }
         }
@@ -370,11 +430,18 @@ public struct NativeSettings<Appearance: View>: View {
             flag("議事録のタイトルも作成", "minutes_ai.generate_title", fallback: true)
             flag("プロジェクトの辞書を更新", "minutes_ai.auto_dictionary_update", fallback: true)
             numeric("タイムアウト（秒）", "minutes_ai.timeout_sec", fallback: 300)
-            DisclosureGroup("要約プロンプト") {
-                TextEditor(text: text("minutes_ai.custom_system_prompt"))
-                    .frame(minHeight: 112)
-                    .accessibilityLabel("要約プロンプト")
-                Button("既定のプロンプトに戻す") { editor.set("minutes_ai.custom_system_prompt", .text("")) }
+            SettingsDisclosure(title: "要約プロンプト") {
+                SettingsRow {
+                    TextEditor(text: text("minutes_ai.custom_system_prompt"))
+                        .font(.system(size: 13))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 112)
+                        .accessibilityLabel("要約プロンプト")
+                }
+                SettingsRow {
+                    Button("既定のプロンプトに戻す") { editor.set("minutes_ai.custom_system_prompt", .text("")) }
+                        .buttonStyle(SettingsActionStyle())
+                }
             }
         }
     }
@@ -392,25 +459,33 @@ public struct NativeSettings<Appearance: View>: View {
                 choose("デバイス", prefix + "pyannote_device", fallback: "auto",
                        options: [("auto", "自動"), ("cpu", "CPU"), ("mps", "Apple GPU")])
                 if editor.api != nil {
-                    SecureField(hasDiarizationToken ? "保存済みのトークンを更新" : "Hugging Faceトークン", text: $diarizationToken)
-                    HStack {
-                        Button("トークンを保存") {
-                            let value = diarizationToken
-                            act { api in
-                                try await api.setDiarizationToken(value)
-                                hasDiarizationToken = true
-                                diarizationToken = ""
+                    SettingsRow("Hugging Faceトークン") {
+                        SecureField(hasDiarizationToken ? "保存済みのトークンを更新" : "Hugging Faceトークン", text: $diarizationToken)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.large)
+                            .frame(maxWidth: 245)
+                    }
+                    SettingsRow {
+                        actionsLayout {
+                            Button("トークンを保存") {
+                                let value = diarizationToken
+                                act { api in
+                                    try await api.setDiarizationToken(value)
+                                    hasDiarizationToken = true
+                                    diarizationToken = ""
+                                }
+                            }
+                            .disabled(diarizationToken.isEmpty)
+                            if hasDiarizationToken {
+                                Button("トークンを削除", role: .destructive) {
+                                    act { api in try await api.removeDiarizationToken(); hasDiarizationToken = false }
+                                }
+                            }
+                            Button("接続をテスト") {
+                                act { api in editor.feedback = try await api.checkDiarization().message }
                             }
                         }
-                        .disabled(diarizationToken.isEmpty)
-                        if hasDiarizationToken {
-                            Button("トークンを削除", role: .destructive) {
-                                act { api in try await api.removeDiarizationToken(); hasDiarizationToken = false }
-                            }
-                        }
-                        Button("接続をテスト") {
-                            act { api in editor.feedback = try await api.checkDiarization().message }
-                        }
+                        .buttonStyle(SettingsActionStyle())
                     }
                 }
             }
@@ -420,48 +495,68 @@ public struct NativeSettings<Appearance: View>: View {
         }
         if let api = editor.api {
             Section("話者一覧") {
-                if profiles.isEmpty { Text("登録済みの話者はありません").foregroundStyle(.secondary) }
+                if profiles.isEmpty {
+                    SettingsRow { Text("登録済みの話者はありません").foregroundStyle(.secondary) }
+                }
                 ForEach(profiles) { profile in
-                    HStack {
-                        Toggle("統合する話者を選択", isOn: Binding(
-                            get: { profilesToMerge.contains(profile.id) },
-                            set: { selected in
-                                if selected { profilesToMerge.insert(profile.id) }
-                                else { profilesToMerge.remove(profile.id) }
+                    SettingsRow {
+                        actionsLayout {
+                            HStack(spacing: 8) {
+                                Toggle("統合する話者を選択", isOn: Binding(
+                                    get: { profilesToMerge.contains(profile.id) },
+                                    set: { selected in
+                                        if selected { profilesToMerge.insert(profile.id) }
+                                        else { profilesToMerge.remove(profile.id) }
+                                    }
+                                ))
+                                .toggleStyle(.checkbox)
+                                .labelsHidden()
+
+                                textInput("話者名", Binding(get: { profileNames[profile.id] ?? profile.label },
+                                                           set: { profileNames[profile.id] = $0 }))
                             }
-                        )).toggleStyle(.checkbox).labelsHidden()
-                        TextField("話者名", text: Binding(get: { profileNames[profile.id] ?? profile.label },
-                                                       set: { profileNames[profile.id] = $0 }))
-                        if profileNames[profile.id] != profile.label {
-                            Button("変更") {
-                                let label = profileNames[profile.id] ?? profile.label
-                                act { _ in try await api.renameSpeaker(profile.id, label: label); try await loadProfiles(api) }
-                            }
-                        }
-                        if profile.sampleAvailable {
-                            Button(speakerPlaying == profile.id && speakerAudio.isPlaying ? "停止" : "サンプル再生") {
-                                if let url = try? api.speakerAudio(for: profile.id) {
-                                    speakerPlaying = profile.id
-                                    speakerAudio.load(id: profile.id, url: url)
-                                    speakerAudio.toggle()
+                            HStack(spacing: 8) {
+                                if profileNames[profile.id] != profile.label {
+                                    Button("変更") {
+                                        let label = profileNames[profile.id] ?? profile.label
+                                        act { _ in
+                                            try await api.renameSpeaker(profile.id, label: label)
+                                            try await loadProfiles(api)
+                                        }
+                                    }
+                                }
+                                if profile.sampleAvailable {
+                                    Button(speakerPlaying == profile.id && speakerAudio.isPlaying ? "停止" : "サンプル再生") {
+                                        if let url = try? api.speakerAudio(for: profile.id) {
+                                            speakerPlaying = profile.id
+                                            speakerAudio.load(id: profile.id, url: url)
+                                            speakerAudio.toggle()
+                                        }
+                                    }
+                                }
+                                Button("削除", role: .destructive) {
+                                    confirmation = .init(target: .speaker, id: profile.id, label: profile.label)
                                 }
                             }
+                            .buttonStyle(SettingsActionStyle())
                         }
-                        Button("削除") { confirmation = .init(target: .speaker, id: profile.id, label: profile.label) }
                     }
                 }
                 if profilesToMerge.count > 1 {
-                    Menu("選択した話者を統合") {
-                        ForEach(profiles.filter { profilesToMerge.contains($0.id) }) { first in
-                            Button(first.label + "に統合") {
-                                let sources = Array(profilesToMerge.subtracting([first.id]))
-                                act { _ in
-                                    try await api.mergeSpeakers(into: first.id, sourceIds: sources)
-                                    profilesToMerge = []
-                                    try await loadProfiles(api)
+                    SettingsRow {
+                        Menu("選択した話者を統合") {
+                            ForEach(profiles.filter { profilesToMerge.contains($0.id) }) { first in
+                                Button(first.label + "に統合") {
+                                    let sources = Array(profilesToMerge.subtracting([first.id]))
+                                    act { _ in
+                                        try await api.mergeSpeakers(into: first.id, sourceIds: sources)
+                                        profilesToMerge = []
+                                        try await loadProfiles(api)
+                                    }
                                 }
                             }
                         }
+                        .controlSize(.large)
                     }
                 }
             }
@@ -484,12 +579,22 @@ public struct NativeSettings<Appearance: View>: View {
     private func choose(_ label: String, _ key: String, fallback: String,
                         options: [(value: String, label: String)]) -> some View {
         let selection = text(key, fallback: fallback)
-        return Picker(label, selection: selection) {
-            if !options.contains(where: { $0.value == selection.wrappedValue }) {
-                Text(selection.wrappedValue).tag(selection.wrappedValue)
+        return SettingsRow(label) {
+            Picker(label, selection: selection) {
+                if !options.contains(where: { $0.value == selection.wrappedValue }) {
+                    Text(selection.wrappedValue).tag(selection.wrappedValue)
+                }
+                ForEach(options, id: \.value) { option in Text(option.label).tag(option.value) }
             }
-            ForEach(options, id: \.value) { option in Text(option.label).tag(option.value) }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.large)
+            .frame(maxWidth: 245, alignment: .trailing)
         }
+    }
+
+    private var actionsLayout: AnyLayout {
+        compact ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 8))
     }
 
     private func text(_ key: String, fallback: String = "") -> Binding<String> {
@@ -497,20 +602,41 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     private func numeric(_ label: String, _ key: String, fallback: Double) -> some View {
-        TextField(label, value: Binding(get: { editor.document[key]?.number ?? fallback },
-                                       set: { editor.set(key, .number($0)) }), format: .number)
+        SettingsRow(label) {
+            TextField(label, value: Binding(get: { editor.document[key]?.number ?? fallback },
+                                           set: { editor.set(key, .number($0)) }), format: .number)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.large)
+                .multilineTextAlignment(.trailing)
+                .monospacedDigit()
+                .frame(width: 78)
+        }
     }
 
     private func optionalNumber(_ label: String, _ key: String) -> some View {
-        TextField(label, text: Binding(
-            get: { editor.document[key]?.number.map { String(Int($0)) } ?? "" },
-            set: { editor.set(key, Double($0).map(SettingValue.number) ?? .null) }
-        ))
+        SettingsRow(label) {
+            textInput(label, Binding(
+                get: { editor.document[key]?.number.map { String(Int($0)) } ?? "" },
+                set: { editor.set(key, Double($0).map(SettingValue.number) ?? .null) }
+            ), width: 78)
+            .multilineTextAlignment(.trailing)
+            .monospacedDigit()
+        }
+    }
+
+    private func textInput(_ label: String, _ value: Binding<String>, width: CGFloat = 245) -> some View {
+        TextField(label, text: value)
+            .labelsHidden()
+            .textFieldStyle(.roundedBorder)
+            .controlSize(.large)
+            .frame(maxWidth: width)
     }
 
     private func flag(_ label: String, _ key: String, fallback: Bool) -> some View {
-        Toggle(label, isOn: Binding(get: { editor.document[key]?.flag ?? fallback },
-                                   set: { editor.set(key, .flag($0)) }))
+        SettingsToggleRow(label, isOn: Binding(get: { editor.document[key]?.flag ?? fallback },
+                                              set: { editor.set(key, .flag($0)) }))
+            .tint(accent)
     }
 
     private func act(_ operation: @escaping @MainActor (SeamAPI) async throws -> Void) {

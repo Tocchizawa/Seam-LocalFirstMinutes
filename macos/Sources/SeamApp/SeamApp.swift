@@ -171,10 +171,16 @@ private struct Workspace: View {
                 if settingsOpen {
                     NativeSettings(api: session.api, downloads: downloads, page: $settingsPage, compact: compact) {
                         Section("表示") {
-                            Picker("外観", selection: $appearance) {
-                                Text("システム").tag("system")
-                                Text("ライト").tag("light")
-                                Text("ダーク").tag("dark")
+                            SettingsRow("外観") {
+                                Picker("外観", selection: $appearance) {
+                                    Text("システム").tag("system")
+                                    Text("ライト").tag("light")
+                                    Text("ダーク").tag("dark")
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .controlSize(.large)
+                                .frame(maxWidth: 245, alignment: .trailing)
                             }
                         }
                     }

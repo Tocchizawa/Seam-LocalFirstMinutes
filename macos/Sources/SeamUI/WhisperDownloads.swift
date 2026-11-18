@@ -146,6 +146,7 @@ public final class WhisperDownloads: ObservableObject {
     ]
 }
 
+@available(macOS 15.0, *)
 struct WhisperModelRows: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var downloads: WhisperDownloads
@@ -154,34 +155,37 @@ struct WhisperModelRows: View {
     let tint: Color
     let remove: (WhisperModels.Model) -> Void
 
-    private let visible = ["small", "medium", "large-v3-turbo"]
-
-    private var featured: [WhisperModels.Model] {
-        downloads.models.filter { visible.contains($0.name) || $0.downloaded || $0.name == selection || $0.name == downloads.currentModel }
-    }
+    private let featuredIDs = ["small", "medium", "large-v3-turbo"]
+    private var motion: Animation? { reduceMotion ? nil : .easeOut(duration: 0.14) }
 
     var body: some View {
         if downloads.models.isEmpty {
-            if let error = downloads.catalogError {
-                HStack {
+            SettingsRow {
+                if let error = downloads.catalogError {
                     Text(error).foregroundStyle(.secondary)
                     Spacer()
                     Button("再読み込み") { Task { await downloads.refresh() } }
+                        .buttonStyle(SettingsActionStyle())
+                } else {
+                    ProgressView().controlSize(.small).accessibilityLabel("モデルを読み込み中")
                 }
-            } else {
-                ProgressView().controlSize(.small).accessibilityLabel("モデルを読み込み中")
             }
         } else {
-            if !downloads.models.contains(where: { $0.name == selection }) {
-                Text(selection)
-                    .font(.callout)
-                    .accessibilityLabel("選択中のモデル \(selection)")
-            }
-            ForEach(featured) { row($0) }
-            let other = downloads.models.filter { entry in !featured.contains { $0.id == entry.id } }
-            if !other.isEmpty {
-                DisclosureGroup("その他のモデル") {
-                    ForEach(other) { row($0) }
+            let featured = downloads.models.filter { featuredIDs.contains($0.name) }
+            let other = downloads.models.filter { !featuredIDs.contains($0.name) }
+
+            SettingsRows {
+                if !downloads.models.contains(where: { $0.name == selection }) {
+                    SettingsRow("選択中のモデル") {
+                        Text(selection).font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(featured) { row($0) }
+                if !other.isEmpty {
+                    SettingsDisclosure(title: "その他のモデル",
+                                       initiallyExpanded: other.contains { $0.name == selection }) {
+                        ForEach(other) { row($0) }
+                    }
                 }
             }
         }
@@ -189,84 +193,102 @@ struct WhisperModelRows: View {
 
     private func row(_ entry: WhisperModels.Model) -> some View {
         let selected = selection == entry.name
-        let loading = downloads.currentModel == entry.name
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 11) {
-                Button {
-                    selection = entry.name
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(selected ? tint : .secondary)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(verbatim: entry.label)
-                                .font(.system(size: 13, weight: .semibold))
-                            if let note = note(for: entry) {
-                                Text(verbatim: note).font(.system(size: 11)).foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(entry.label)
-                .accessibilityAddTraits(selected ? .isSelected : [])
-                .help(selected ? "\(entry.label)を選択中" : "\(entry.label)を使う")
-
-                if loading {
-                    if let fraction = downloads.fraction {
-                        Text(fraction, format: .percent.precision(.fractionLength(0)))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .contentTransition(.numericText())
-                    } else {
-                        ProgressView().controlSize(.mini)
-                    }
-                } else if entry.downloaded {
-                    Label("取得済み", systemImage: "checkmark")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Menu("モデルの操作", systemImage: "ellipsis") {
-                        Button("ダウンロードを削除", role: .destructive) { remove(entry) }
-                            .disabled(entry.state == "loaded")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .labelStyle(.iconOnly)
-                    .fixedSize()
-                    .accessibilityLabel("\(entry.label)の操作")
-                } else {
-                    Button {
-                        Task { await downloads.start(entry.name) }
-                    } label: {
-                        if compact {
-                            Image(systemName: "arrow.down.to.line")
-                        } else {
-                            Label("ダウンロード", systemImage: "arrow.down.to.line")
+        return HStack(spacing: 0) {
+            Button {
+                withAnimation(motion) { selection = entry.name }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(selected ? tint : .secondary)
+                        .frame(width: 20)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(verbatim: entry.label)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        if let note = note(for: entry) {
+                            Text(verbatim: note).font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(downloads.active)
-                    .accessibilityLabel("\(entry.label)をダウンロード")
-                    .help("\(entry.label)をダウンロード")
+                    .lineLimit(1)
+                    Spacer(minLength: 0)
                 }
+                .padding(.leading, 16)
+                .padding(.trailing, 8)
+                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            if loading {
+            .buttonStyle(ReaderHoverStyle(tint: .primary, motion: motion))
+            .accessibilityLabel(entry.label)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .help(selected ? "\(entry.label)を選択中" : "\(entry.label)を使う")
+
+            actions(for: entry)
+                .frame(width: compact ? 100 : 164, alignment: .trailing)
+                .padding(.trailing, 12)
+        }
+        .frame(maxWidth: .infinity, minHeight: 56)
+    }
+
+    @ViewBuilder
+    private func actions(for entry: WhisperModels.Model) -> some View {
+        if downloads.currentModel == entry.name {
+            HStack(spacing: 9) {
                 if let fraction = downloads.fraction {
                     ProgressView(value: fraction)
                         .tint(tint)
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: fraction)
+                        .animation(motion, value: fraction)
                         .accessibilityLabel("\(entry.label)のダウンロード進捗")
+                    Text(fraction, format: .percent.precision(.fractionLength(0)))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                        .fixedSize()
                 } else {
-                    Text(downloads.isPreview ? "試作用のダウンロード" : "ダウンロードを準備中")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
+                    ProgressView().controlSize(.small)
+                    Text("準備中").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
+            .padding(.horizontal, 4)
+        } else if entry.downloaded {
+            HStack(spacing: 4) {
+                Text("取得済み")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Menu {
+                    Button("ダウンロードを削除", role: .destructive) { remove(entry) }
+                        .disabled(entry.state == "loaded")
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 36, height: 36)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("\(entry.label)の操作")
+                .help("\(entry.label)の操作")
+            }
+        } else {
+            Button {
+                Task { await downloads.start(entry.name) }
+            } label: {
+                if compact {
+                    Image(systemName: "arrow.down.to.line")
+                } else {
+                    Text("ダウンロード")
+                }
+            }
+            .buttonStyle(SettingsActionStyle())
+            .disabled(downloads.active)
+            .accessibilityLabel("\(entry.label)をダウンロード")
+            .help("\(entry.label)をダウンロード")
         }
-        .padding(.vertical, 4)
     }
 
     private func note(for model: WhisperModels.Model) -> String? {
