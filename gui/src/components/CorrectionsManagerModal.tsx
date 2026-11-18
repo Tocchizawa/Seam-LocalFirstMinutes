@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 /* 誤転写 (wrong → correct) 管理モーダル。
    検索 / ソート / インライン編集 / チェックボックス選択での一括削除。 */
 import { useEffect, useMemo, useState } from "react";
@@ -20,6 +21,7 @@ interface Props {
 type SortKey = "added" | "wrong" | "correct";
 
 export function CorrectionsManagerModal({ open, value, onChange, onClose }: Props) {
+  const dialogFocus = useDialogFocus(open);
   const [closing, setClosing] = useState(false);
   const [items, setItems] = useState<CorrectionPair[]>(value);
   const [query, setQuery] = useState("");
@@ -36,7 +38,7 @@ export function CorrectionsManagerModal({ open, value, onChange, onClose }: Prop
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") handleClose();
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) handleClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -135,11 +137,11 @@ export function CorrectionsManagerModal({ open, value, onChange, onClose }: Prop
 
       <div
         {...imeHandlers}
-        className={`dialog-shell relative w-[640px] max-w-[92vw] max-h-[88vh] flex flex-col ${closing ? "anim-modal-out" : "anim-modal-in"}`}
+        ref={dialogFocus} role="dialog" aria-modal="true" aria-label="誤転写ルール" tabIndex={-1} className={`dialog-shell dictionary-dialog relative w-[640px] max-w-[92vw] max-h-[88vh] flex flex-col ${closing ? "anim-modal-out" : "anim-modal-in"}`}
       >
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border) shrink-0">
           <div>
-            <h2 className="text-[14px] font-semibold text-(--t1)">誤転写ルールの管理</h2>
+            <h2 className="text-[14px] font-semibold text-(--t1)">誤転写ルール</h2>
             <p className="text-[11px] text-(--t3) mt-0.5">
               {items.length} 件
             </p>
@@ -149,11 +151,13 @@ export function CorrectionsManagerModal({ open, value, onChange, onClose }: Prop
           </button>
         </header>
 
-        <div className="px-5 pt-3 pb-2 flex items-center gap-2 border-b border-(--border) shrink-0">
-          <div className="flex items-center gap-1.5 flex-1 px-2.5 h-8 rounded-md border border-(--border) bg-(--surface)">
+        <div className="dictionary-toolbar">
+          <div className="dictionary-search" role="search">
             <MagnifyingGlass size={12} weight="regular" className="text-(--t3) shrink-0" />
             <input
               type="text"
+              data-initial-focus
+              aria-label="誤転写ルールを検索"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="誤転写または正式表記で検索"
@@ -183,7 +187,7 @@ export function CorrectionsManagerModal({ open, value, onChange, onClose }: Prop
           />
         </div>
 
-        <div className="px-5 py-2.5 flex items-center gap-2 border-b border-(--border) shrink-0">
+        <div className="dictionary-toolbar dictionary-add">
           <input
             type="text"
             value={newWrong}

@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 import { useState, useEffect, useRef } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { X, FolderOpen, Plus, Trash } from "@phosphor-icons/react";
@@ -33,6 +34,7 @@ function FolderInput({ value, onChange, placeholder, title }: {
 }
 
 export function ProjectDialog({ onClose, onSave }: Props) {
+  const dialogFocus = useDialogFocus();
   const [name, setName] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [outputDir, setOutputDir] = useState("");
@@ -96,7 +98,7 @@ export function ProjectDialog({ onClose, onSave }: Props) {
       <div className="absolute inset-0 cursor-pointer" onClick={handleClose}
         style={{ background: "rgba(0,0,0,0.45)" }} />
 
-      <div className={`dialog-shell relative w-[460px] max-h-[80vh] overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
+      <div ref={dialogFocus} role="dialog" aria-modal="true" aria-label="新規プロジェクト" tabIndex={-1} className={`dialog-shell project-form-dialog relative w-[460px] max-h-[80vh] overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
         <form
           onSubmit={submit}
           {...imeHandlers}
@@ -111,9 +113,6 @@ export function ProjectDialog({ onClose, onSave }: Props) {
           <header className="flex items-center justify-between p-4 px-5 border-b border-(--border)">
             <div>
               <h2 className="text-[14px] font-semibold text-(--t1)">新規プロジェクト</h2>
-              <p className="text-[11px] text-(--t3) mt-0.5">
-                議事録を管理するプロジェクトを作成
-              </p>
             </div>
             <button type="button" onClick={handleClose} className="icon-btn" title="閉じる">
               <X size={14} weight="bold" />
@@ -128,7 +127,7 @@ export function ProjectDialog({ onClose, onSave }: Props) {
             {step === 0 ? (
               <div className="flex flex-col gap-4">
                 <Field label="プロジェクト名" required>
-                  <input ref={ref} type="text" value={name} onChange={(e) => setName(e.target.value)}
+                  <input ref={ref} data-initial-focus aria-label="プロジェクト名" type="text" value={name} onChange={(e) => setName(e.target.value)}
                     className="input" placeholder="名前を入力" />
                 </Field>
                 <Field label="保存先" required hint="Markdown ファイルが書き出されます">
@@ -220,7 +219,7 @@ function Field({ label, required, hint, children }: {
 }) {
   return (
     <div>
-      <label className="block text-[11px] font-medium text-(--t2) mb-1">
+      <label className="project-field-label block font-medium text-(--t2) mb-1">
         {label}
         {required && <span className="text-(--danger) ml-0.5">*</span>}
       </label>

@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 import { useEffect, useState } from "react";
 import { open, ask } from "@tauri-apps/plugin-dialog";
 import {
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: Props) {
+  const dialogFocus = useDialogFocus();
   const [closing, setClosing] = useState(false);
 
   const [name, setName] = useState(project.name);
@@ -59,10 +61,13 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
   }, [project]);
 
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") handleClose(); };
+    if (glossaryManagerOpen || correctionsManagerOpen) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) handleClose();
+    };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, []);
+  }, [glossaryManagerOpen, correctionsManagerOpen]);
 
   const handleClose = () => {
     setClosing(true);
@@ -231,7 +236,7 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
         style={{ background: "rgba(0,0,0,0.4)" }}
       />
 
-      <div className={`dialog-shell relative w-[560px] max-w-[95vw] max-h-[86vh] flex flex-col overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
+      <div ref={dialogFocus} role="dialog" aria-modal="true" aria-label="プロジェクト設定" tabIndex={-1} inert={glossaryManagerOpen || correctionsManagerOpen} className={`dialog-shell project-form-dialog relative w-[560px] max-w-[95vw] max-h-[86vh] flex flex-col overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border) shrink-0">
           <div className="min-w-0">
             <h2 className="text-[14px] font-semibold text-(--t1)">プロジェクト設定</h2>
@@ -248,13 +253,14 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
               <input
                 type="text"
                 value={name}
+                aria-label="プロジェクト名"
                 onChange={(e) => setName(e.target.value)}
                 className="input"
                 placeholder="名前を入力"
               />
             </Field>
 
-            <Field label="保存先" required hint="Markdown ファイルが書き出されます">
+            <Field label="保存先" required hint="Markdown の書き出し先">
               <FolderInput
                 value={outputDir}
                 onChange={setOutputDir}
@@ -263,7 +269,7 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
               />
             </Field>
 
-            <Field label="リポジトリ" hint="任意。コンテキスト調査の対象">
+            <Field label="リポジトリ" hint="要約が参照するリポジトリ">
               <FolderInput
                 value={repoPath}
                 onChange={setRepoPath}
@@ -272,7 +278,7 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
               />
             </Field>
 
-            <Field label="ドキュメントフォルダ" hint="LLM がコンテキストとして参照">
+            <Field label="ドキュメントフォルダ" hint="要約が参照する資料">
               <div className="flex flex-col gap-1">
                 {docDirs.map((dir, i) => (
                   <div key={`${dir}-${i}`} className="flex items-center gap-1 surface px-2 py-1.5">
@@ -444,7 +450,7 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
 
             <Field
               label="誤転写の自動補正"
-              hint="要約完了時に LLM が誤転写を学習し、ここに蓄積されます。次回以降の文字起こしと再要約に反映されます。"
+              hint="要約後に候補を追加し、次回の文字起こしと要約に反映"
             >
               <CorrectionsSummaryCard
                 value={corrections}
@@ -593,7 +599,7 @@ function Field({
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-1 min-h-[22px]">
-        <label className="block text-[11px] font-medium text-(--t2)">
+        <label className="project-field-label block font-medium text-(--t2)">
           {label}
           {required && <span className="text-(--danger) ml-0.5">*</span>}
         </label>

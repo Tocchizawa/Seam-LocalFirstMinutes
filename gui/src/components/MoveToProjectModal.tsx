@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 import { useEffect, useState } from "react";
 import { X, FolderOpen, Check } from "@phosphor-icons/react";
 import type { Project } from "../lib/api";
@@ -13,6 +14,7 @@ interface Props {
 export function MoveToProjectModal({
   minutesTitle, currentProjectId, projects, onClose, onPick,
 }: Props) {
+  const dialogFocus = useDialogFocus();
   const [closing, setClosing] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -58,7 +60,7 @@ export function MoveToProjectModal({
       />
 
       <div
-        className={`dialog-shell relative w-[420px] max-h-[70vh] overflow-hidden ${
+        ref={dialogFocus} role="dialog" aria-modal="true" aria-label="移動先のプロジェクト" tabIndex={-1} className={`dialog-shell move-project-dialog relative w-[420px] max-h-[70vh] overflow-hidden ${
           closing ? "anim-modal-out" : "anim-modal-in"
         }`}
       >

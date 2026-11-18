@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 import { useState, useEffect, useCallback } from "react";
 import { X, Microphone, SpeakerHigh, ArrowClockwise } from "@phosphor-icons/react";
 import type { AudioDevice } from "../lib/api";
@@ -22,6 +23,7 @@ export function DeviceSettingsModal({
   onClose,
   refreshOnOpen = true,
 }: Props) {
+  const dialogFocus = useDialogFocus();
   const [closing, setClosing] = useState(false);
   const [devices, setDevices] = useState<AudioDevice[] | null>(null);
   const [systemAudioAvailable, setSystemAudioAvailable] = useState(false);
@@ -75,11 +77,11 @@ export function DeviceSettingsModal({
         onClick={handleClose}
         style={{ background: "rgba(0,0,0,0.45)" }} />
 
-      <div className={`dialog-shell device-settings-dialog relative w-[480px] max-w-[94vw] overflow-hidden ${
+      <div ref={dialogFocus} role="dialog" aria-modal="true" aria-label="録音デバイス" tabIndex={-1} className={`dialog-shell device-settings-dialog relative w-[480px] max-w-[94vw] overflow-hidden ${
         closing ? "anim-modal-out" : "anim-modal-in"
       }`}>
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border)">
-          <h2 className="text-[14px] font-semibold text-(--t1)">デバイス設定</h2>
+          <h2 className="text-[14px] font-semibold text-(--t1)">録音デバイス</h2>
           <div className="flex items-center gap-1">
             <button
               onClick={() => void loadDevices(refreshOnOpen)}
@@ -103,11 +105,8 @@ export function DeviceSettingsModal({
               {error && (
                 <p className="text-[11px] text-(--danger)">{error}</p>
               )}
-              <div>
-                <label className="flex items-center gap-1.5 text-[12px] font-medium text-(--t2) mb-2">
-                  <Microphone size={11} weight="regular" />
-                  マイク
-                </label>
+              <div className="device-setting">
+                <span className="device-label"><Microphone size={16} /> マイク</span>
                 <Select
                   value={micDevice == null ? "" : String(micDevice)}
                   onChange={(v) => onChangeMicDevice(v ? Number(v) : null)}
@@ -117,18 +116,16 @@ export function DeviceSettingsModal({
                   }))}
                   placeholder={loading ? "読み込み中..." : "マイクが見つかりません"}
                   className="w-full"
+                  ariaLabel="マイク"
                   disabled={loading}
                 />
               </div>
 
               {systemAudioAvailable && (
-                <div>
-                  <label className="flex items-center gap-1.5 text-[12px] font-medium text-(--t2) mb-2">
-                    <SpeakerHigh size={11} weight="regular" />
-                    内部音声
-                  </label>
+                <div className="device-setting">
+                  <span className="device-label"><SpeakerHigh size={16} /> 内部音声</span>
                   <Toggle
-                    label="内部音声も録音"
+                    label="内部音声を録音"
                     hint="Zoom 等の相手の声も含める"
                     checked={captureSystem}
                     onChange={onChangeCaptureSystem}

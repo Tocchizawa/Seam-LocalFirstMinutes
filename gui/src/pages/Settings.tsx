@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   X, MoonStars, Sun, Monitor, CheckCircle, ArrowsClockwise,
@@ -142,11 +143,13 @@ function settingsFormSnapshot(data: Record<string, any>): string {
 }
 
 export function SettingsModal({ onClose }: Props) {
+  const dialogFocus = useDialogFocus();
   const { recording } = useRecording();
   const recordingRef = useRef(recording);
   const [closing, setClosing] = useState(false);
   const [settings, setSettings] = useState<Record<string, any> | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
@@ -310,6 +313,7 @@ export function SettingsModal({ onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    setSettingsLoading(true);
     getSettings().then((s) => {
       if (cancelled) return;
       setSettings(s);
@@ -381,14 +385,11 @@ export function SettingsModal({ onClose }: Props) {
       setAiConsent(ai.consent || {});
 
       setSettingsLoading(false);
-    }).catch((e) => {
-      if (cancelled) return;
-      setSettings({});
-      setSettingsLoading(false);
-      setSpeakersError(e instanceof Error ? e.message : "設定の取得に失敗しました");
+    }).catch(() => {
+      if (!cancelled) setSettingsLoading(false);
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [settingsLoadAttempt]);
 
   useEffect(() => {
     if (category !== "speaker-list" || speakersLoadedRef.current) return;
@@ -758,22 +759,22 @@ export function SettingsModal({ onClose }: Props) {
       const result = await checkForAppUpdate({ timeoutMs: 15_000 });
       if (!result) {
         setUpdateStatus("最新版です");
-        showToast({ kind: "ok", text: "Seam は最新版です" });
+        showToast({ kind: "ok", text: "最新版を使用しています" });
         return;
       }
 
       setAvailableUpdate(result);
-      setUpdateStatus(`Seam ${result.version} を利用できます`);
+      setUpdateStatus(`バージョン ${result.version} を利用できます`);
       if (recordingRef.current) {
         showToast({
           kind: "info",
-          text: `Seam ${result.version} を利用できます。録音終了後にインストールしてください`,
+          text: `バージョン ${result.version} を利用できます。録音終了後にインストールしてください`,
           ttl: 7000,
         });
         return;
       }
       const ok = await ask(
-        `Seam ${result.version} にアップデートします。インストール後にアプリを再起動します。`,
+        `バージョン ${result.version} にアップデートします。インストール後にアプリを再起動します。`,
         {
           title: "アップデート",
           kind: "info",
@@ -953,7 +954,7 @@ export function SettingsModal({ onClose }: Props) {
         style={{ background: "rgba(0,0,0,0.4)" }}
       />
 
-      <div className={`dialog-shell settings-dialog relative w-[960px] max-w-[95vw] h-[720px] max-h-[88vh] flex flex-col overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
+      <div ref={dialogFocus} role="dialog" aria-modal="true" aria-label="設定" tabIndex={-1} className={`dialog-shell settings-dialog relative w-[960px] max-w-[95vw] h-[720px] max-h-[88vh] flex flex-col overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border) shrink-0">
           <h2 className="text-[14px] font-semibold text-(--t1)">設定</h2>
           <button onClick={handleClose} className="icon-btn" title="閉じる">
@@ -962,7 +963,7 @@ export function SettingsModal({ onClose }: Props) {
         </header>
 
         <div className="flex flex-1 min-h-0 overflow-hidden">
-          <aside className="settings-sidebar w-[184px] border-r border-(--border) p-3 bg-(--surface) overflow-y-auto shrink-0">
+          <nav aria-label="設定カテゴリ" className="settings-sidebar w-[184px] border-r border-(--border) p-3 bg-(--surface) overflow-y-auto shrink-0">
             <div className="flex flex-col gap-3">
               {Array.from(new Set(categories.map((c) => c.group))).map((group) => (
                 <div key={group}>
@@ -971,6 +972,7 @@ export function SettingsModal({ onClose }: Props) {
                     {categories.filter((c) => c.group === group).map((c) => (
                       <button
                         key={c.key}
+                        aria-current={category === c.key ? "page" : undefined}
                         onClick={() => setCategory(c.key)}
                         className={`settings-nav-item ${category === c.key ? "active" : ""}`}
                       >
@@ -981,21 +983,24 @@ export function SettingsModal({ onClose }: Props) {
                 </div>
               ))}
             </div>
-          </aside>
+          </nav>
 
           <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-y-auto px-7 py-6">
+            <div className="settings-scroll" key={category}>
             {!settings ? (
               <div className="flex h-full min-h-[240px] flex-col items-center justify-center gap-2">
-                <Spinner size={20} />
-                <span className="text-[11px] text-(--t3)">
-                  {settingsLoading ? "設定を読み込んでいます..." : "設定を表示できませんでした"}
-                </span>
+                {settingsLoading ? (
+                  <><Spinner size={20} /><span className="text-(--t2)" role="status">設定を読み込み中</span></>
+                ) : (
+                  <><span className="text-(--danger)" role="alert">設定を読み込めませんでした</span>
+                    <button type="button" className="btn" onClick={() => setSettingsLoadAttempt((attempt) => attempt + 1)}>再試行</button></>
+                )}
               </div>
             ) : (
               <div className="anim-fade-in">
+                <h2 className="settings-category-title">{categories.find((item) => item.key === category)?.label}</h2>
                 {category === "appearance" && (
-                  <SGroup title="外観">
+                  <SGroup>
                     <SRow label="テーマ">
                       <ThemePicker value={theme} onChange={pickTheme} />
                     </SRow>
@@ -1004,7 +1009,7 @@ export function SettingsModal({ onClose }: Props) {
 
                 {category === "app" && (
                   <>
-                    <SGroup title="アプリ">
+                    <SGroup>
                       <SRow label="現在のバージョン">
                         <span className="text-[12px] text-(--t2)">{appVersion || "取得中..."}</span>
                       </SRow>
@@ -1559,7 +1564,7 @@ export function SettingsModal({ onClose }: Props) {
                             }`}
                             title={aiTestResult.message}
                           >
-                            {aiTestResult.ok ? "✓ " : "⚠ "}
+
                             {aiTestResult.ok
                               ? `Ready${aiTestResult.model ? ` (${aiTestResult.model})` : ""}`
                               : `[${aiTestResult.code}] ${aiTestResult.message}`}
@@ -1953,11 +1958,7 @@ export function SettingsModal({ onClose }: Props) {
                 {!saved && isDirty && (
                   <span className="text-[11px] text-(--warning)">未保存の変更があります</span>
                 )}
-                {!saved && !isDirty && (
-                  <span className="text-[11px] text-(--t4)">変更はありません</span>
-                )}
-                <span className="flex-1" />
-                <span className="text-[10px] text-(--t4)">⌘S で保存</span>
+                {isDirty && <kbd className="ml-auto shortcut-key">⌘S</kbd>}
               </footer>
             )}
           </main>
@@ -2260,7 +2261,7 @@ function ConsentDialog({
         </header>
         <div className="px-5 py-4 flex flex-col gap-3">
           <p className="text-[12px] text-(--t2) leading-relaxed">
-            <strong className="text-(--danger)">⚠️ 文字起こしテキストが外部API ({PROVIDER_LABELS[provider]}) に送信されます。</strong>
+            <strong className="text-(--danger)">文字起こしテキストが外部API ({PROVIDER_LABELS[provider]}) に送信されます。</strong>
             機密情報を含む会議では利用しないでください。
           </p>
           {costHint[provider] && (
