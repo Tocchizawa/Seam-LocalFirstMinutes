@@ -119,8 +119,12 @@ private struct Workspace: View {
             ToolbarItem(placement: .primaryAction) {
                 if session.capture == nil {
                     Button(action: start) {
-                        Label("録音開始", systemImage: "record.circle.fill")
-                            .font(.system(size: 13, weight: .semibold))
+                        HStack(spacing: 7) {
+                            Image(systemName: "record.circle.fill").accessibilityHidden(true)
+                            Text("録音開始")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     .buttonStyle(.glassProminent)
                     .tint(accent)

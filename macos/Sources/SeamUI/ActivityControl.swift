@@ -46,7 +46,7 @@ public struct ActivityControl: View {
                     if let progress = lead.progress {
                         Text(progress, format: .percent.precision(.fractionLength(0)))
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.primary.opacity(0.82))
                             .contentTransition(.numericText())
                     }
                     let extra = activities.count - (modelActivity == nil ? 1 : 0)
@@ -108,7 +108,17 @@ public struct ActivityControl: View {
                 }
                 if !activities.isEmpty { Divider() }
             }
-            ForEach(activities) { row($0) }
+            if !activities.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(activities) { row($0) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxHeight: 255)
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(17)
         .frame(minWidth: 275, maxWidth: 350, alignment: .leading)
