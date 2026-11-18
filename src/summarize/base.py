@@ -78,6 +78,7 @@ class SummaryResult:
     input_chars: int
     output_chars: int
     duration_sec: float
+    usage: dict[str, int] | None = None
 
 
 @dataclass

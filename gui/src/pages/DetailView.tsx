@@ -9,13 +9,12 @@ import type {
 } from "../lib/api";
 import {
   audioPlayUrl, exportMinutes, getMinutesMarkdown, deleteMinutes,
-  getPipelineStatus, getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle, WS_URL,
+  getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle,
   triggerSummarize, getSummarizeStatus, cancelSummarize, getPipelineBySession,
-  updateMinutesSummary, getSessionSegments, getSessionAudioInfo,
+  updateMinutesSummary, getSessionSegments, recoverSessionMinutes,
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
 } from "../lib/api";
 import { Spinner } from "../components/Spinner";
-import { Waveform } from "../components/Waveform";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { MarkdownView } from "../components/MarkdownView";
 import { Select } from "../components/Select";
@@ -55,12 +54,9 @@ function fmtDuration(s: number) {
   return h > 0 ? `${h}時間${m}分` : `${m}分`;
 }
 
-function fmtBytes(n: number): string {
-  if (!n || n < 0) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+function fmtTokens(n: unknown): string {
+  const value = Number(n);
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)).toLocaleString() : "—";
 }
 
 export function DetailView(props: Props) {
@@ -72,66 +68,76 @@ export function DetailView(props: Props) {
   useEffect(() => { setCurrentMinutes(props.minutes); }, [props.minutes]);
 
   useEffect(() => {
-    if (!isLive) return;
-    const fetchPipeline = () => getPipelineStatus().then(setPipeline).catch(() => {});
-    fetchPipeline();
-
-    let ws: WebSocket | null = null;
-    let timer: number | null = null;
-    let attempt = 0;
+    if (!isLive || !props.sessionId) return;
     let stopped = false;
-
-    const handle = (e: MessageEvent) => {
-      try {
-        const m = JSON.parse(e.data);
-        if (m.type === "transcript_chunk" && m.data) {
-          const seg = m.data as LiveSegment;
-          if (props.sessionId && seg.session_id !== props.sessionId) return;
-          setLiveSegments((prev) => {
-            // start 時刻が一致する既存セグメントは置換、無ければ追加してソート
-            const filtered = prev.filter((p) => p.start !== seg.start);
-            const next = [...filtered, seg].sort((a, b) => a.start - b.start);
-            if (next.length <= MAX_LIVE_SEGMENTS) return next;
-            return next.slice(next.length - MAX_LIVE_SEGMENTS);
-          });
-        }
-        if (m.type === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
-          const speakerId = String(m.data.speaker_id);
-          const speakerLabel = String(m.data.speaker_label);
-          setLiveSegments((prev) =>
-            prev.map((seg) =>
-              seg.speaker_id === speakerId
-                ? { ...seg, speaker_label: speakerLabel }
-                : seg
-            )
-          );
-        }
-        if (["pipeline_progress", "pipeline_done", "pipeline_error", "recording_stopped"].includes(m.type)) {
-          fetchPipeline();
-        }
-      } catch {}
+    let pipelineRequest = 0;
+    const sessionId = props.sessionId;
+    const fetchPipeline = () => {
+      const requestId = ++pipelineRequest;
+      void getPipelineBySession(sessionId)
+        .then((current) => {
+          if (!stopped && requestId === pipelineRequest) setPipeline(current);
+        })
+        .catch(() => {});
     };
 
-    const connect = () => {
-      if (stopped) return;
-      try { ws = new WebSocket(WS_URL); } catch { scheduleReconnect(); return; }
-      ws.onopen = () => { attempt = 0; fetchPipeline(); };
-      ws.onmessage = handle;
-      ws.onclose = scheduleReconnect;
-      ws.onerror = () => { try { ws?.close(); } catch {} };
-    };
-    const scheduleReconnect = () => {
-      if (stopped || timer) return;
-      attempt++;
-      const delay = Math.min(8000, 500 * Math.pow(1.6, Math.min(attempt, 6)));
-      timer = window.setTimeout(() => { timer = null; connect(); }, delay);
+    setPipeline(null);
+    setLiveSegments([]);
+    const handle = (e: Event) => {
+      const type = e.type.replace("recording-ws:", "");
+      const data = (e as CustomEvent<any>).detail;
+      if (type === "__open") {
+        fetchPipeline();
+        return;
+      }
+      if (type === "transcript_chunk" && data) {
+        const seg = data as LiveSegment;
+        if (seg.session_id !== sessionId) return;
+        setLiveSegments((prev) => {
+          // start 時刻が一致する既存セグメントは置換、無ければ追加してソート
+          const filtered = prev.filter((p) => p.start !== seg.start);
+          const next = [...filtered, seg].sort((a, b) => a.start - b.start);
+          if (next.length <= MAX_LIVE_SEGMENTS) return next;
+          return next.slice(next.length - MAX_LIVE_SEGMENTS);
+        });
+      }
+      if (type === "speaker_renamed" && data?.speaker_id && data?.speaker_label) {
+        const speakerId = String(data.speaker_id);
+        const speakerLabel = String(data.speaker_label);
+        setLiveSegments((prev) =>
+          prev.map((seg) =>
+            seg.speaker_id === speakerId
+              ? { ...seg, speaker_label: speakerLabel }
+              : seg
+          )
+        );
+      }
+      if (["pipeline_progress", "pipeline_done", "pipeline_error", "recording_stopped"].includes(type)
+          && data?.session_id === sessionId) {
+        fetchPipeline();
+      }
+      // finalize で作成された minutes を取得して詳細画面を切り替える。
+      if ((type === "pipeline_done" || type === "minutes_saved") && data?.session_id === sessionId
+          && typeof data?.minutes_id === "string") {
+        void getMinutes(data.minutes_id)
+          .then((fresh) => { if (!stopped) setCurrentMinutes(fresh); })
+          .catch(() => {});
+      }
     };
 
-    connect();
+    const eventTypes = [
+      "__open", "transcript_chunk", "speaker_renamed", "pipeline_progress",
+      "pipeline_done", "minutes_saved", "pipeline_error", "recording_stopped",
+    ];
+    for (const type of eventTypes) {
+      window.addEventListener(`recording-ws:${type}`, handle);
+    }
+    fetchPipeline();
     return () => {
       stopped = true;
-      if (timer) window.clearTimeout(timer);
-      try { ws?.close(); } catch {}
+      for (const type of eventTypes) {
+        window.removeEventListener(`recording-ws:${type}`, handle);
+      }
     };
   }, [isLive, props.sessionId]);
 
@@ -168,7 +174,7 @@ export function DetailView(props: Props) {
   // liveSegments に蓄積されているのでそれを優先表示。
   // pipeline 完了後は pipeline.transcript / minutes.transcript が確定する。
   const transcript: TranscriptSegment[] = (() => {
-    if (minutes?.transcript) return minutes.transcript;
+    if (minutes?.transcript && minutes.transcript.length > 0) return minutes.transcript;
     const segs = liveResult?.segments;
     if (segs && segs.length > 0) return segs;
     return liveSegments;
@@ -237,25 +243,30 @@ export function DetailView(props: Props) {
 
   /* 要約ジョブ状態 (in-flight / done / failed / cancelled) */
   const [summaryJob, setSummaryJob] = useState<SummarizeStatus | null>(null);
+  const summaryStatusVersionRef = useRef(0);
   const [summaryBusy, setSummaryBusy] = useState(false);   // 連打debounce
-  // mount 時に in-flight ジョブが無いか確認 (アプリ再接続/別タブで起動時の復元)
+  // mount 時 / minutes 確定時に in-flight ジョブが無いか確認。
+  // pipeline-detail (live) モードでも minutesId が手に入った瞬間に呼ぶことで、
+  // 文字起こし完了直後に走る自動要約のステータスを取りこぼさない。
   useEffect(() => {
-    if (isLive || !minutesId) return;
+    if (!minutesId) return;
     let cancelled = false;
+    const version = ++summaryStatusVersionRef.current;
     (async () => {
       try {
         const st = await getSummarizeStatus(minutesId);
-        if (cancelled) return;
+        if (cancelled || version !== summaryStatusVersionRef.current) return;
         if (st.state && st.state !== "none") {
           setSummaryJob(st);
-        }
+        } else setSummaryJob(null);
       } catch {/* ignore */}
     })();
     return () => { cancelled = true; };
-  }, [isLive, minutesId]);
+  }, [minutesId]);
 
   const startSummarize = useCallback(async (provider?: SummarizeProvider) => {
     if (!minutesId || summaryBusy) return;
+    summaryStatusVersionRef.current += 1;
     setSummaryBusy(true);
     try {
       // 楽観的に running 状態へ。WS で確定値が来たら上書きされる。
@@ -284,148 +295,211 @@ export function DetailView(props: Props) {
     try { await cancelSummarize(minutesId); } catch {/* ignore */}
   }, [minutesId]);
 
-  /* 非-live モードでも WS を貼って、pipeline_done で議事録をリロード */
+  /* minutesId が手に入った時点で、共通 WebSocket が配信するイベントを購読する。
+     pipeline-detail (live) モードでも文字起こし完了後に自動要約を追跡する。 */
   useEffect(() => {
-    if (isLive || !minutesId || !sessionId) return;
-    let ws: WebSocket | null = null;
-    let timer: number | null = null;
-    let attempt = 0;
+    if (!minutesId || !sessionId) return;
     let stopped = false;
 
     const reload = async () => {
-      try { setCurrentMinutes(await getMinutes(minutesId)); } catch {}
-    };
-    const handle = (e: MessageEvent) => {
       try {
-        const m = JSON.parse(e.data);
-        if (m.type === "pipeline_progress" && m.data?.session_id === sessionId) {
-          const st = String(m.data?.state || "");
-          if (["transcribing", "stopping"].includes(st)) {
-            setRetryStatus({
-              state: st as "transcribing" | "stopping",
-              message: String(m.data?.message || "処理中..."),
-              progress: typeof m.data?.progress === "number" ? m.data.progress : 0,
-              stage: m.data?.stage ?? null,
-              stage_label: m.data?.stage_label ?? null,
-              stage_step: typeof m.data?.stage_step === "number" ? m.data.stage_step : null,
-              stage_total: typeof m.data?.stage_total === "number" ? m.data.stage_total : null,
-            });
+        const fresh = await getMinutes(minutesId);
+        if (stopped) return;
+        setCurrentMinutes(fresh);
+        // 一覧画面など他コンポーネントも同期できるよう通知
+        window.dispatchEvent(
+          new CustomEvent("minutes-updated", { detail: { id: minutesId } }),
+        );
+      } catch {}
+    };
+    const handle = (e: Event) => {
+      const type = e.type.replace("recording-ws:", "");
+      const data = (e as CustomEvent<any>).detail;
+      const m = { type, data };
+      if (type === "__open") {
+        const version = ++summaryStatusVersionRef.current;
+        void getSummarizeStatus(minutesId).then((status) => {
+          if (!stopped && version === summaryStatusVersionRef.current
+          ) {
+            setSummaryJob(status.state && status.state !== "none" ? status : null);
           }
+        }).catch(() => {});
+        if (!isLive) {
+          void getPipelineBySession(sessionId).then((p) => {
+            if (stopped || !p) return;
+            if (p.state === "transcribing" || p.state === "stopping") {
+              setRetryStatus({
+                state: p.state,
+                message: p.message || "処理中...",
+                progress: typeof p.progress === "number" ? p.progress : 0,
+                stage: p.stage ?? null,
+                stage_label: p.stage_label ?? null,
+                stage_step: typeof p.stage_step === "number" ? p.stage_step : null,
+                stage_total: typeof p.stage_total === "number" ? p.stage_total : null,
+              });
+            }
+          }).catch(() => {});
         }
-        if (m.type === "pipeline_done" && m.data?.session_id === sessionId) {
-          setRetryStatus(null);
-          reload();
-        }
-        if (m.type === "pipeline_error" && m.data?.session_id === sessionId) {
+        return;
+      }
+      // retry banner は「既存議事録の再文字起こし」を可視化するためのもの。
+      // pipeline-detail (live) モードでは初回文字起こしの pipeline_progress と
+      // 区別できないので、live モードでは setRetryStatus を呼ばない。
+      if (!isLive && m.type === "pipeline_progress" && m.data?.session_id === sessionId) {
+        const st = String(m.data?.state || "");
+        if (["transcribing", "stopping"].includes(st)) {
           setRetryStatus({
-            state: "error",
-            message: String(m.data?.message || "エラー"),
-            progress: 0,
+            state: st as "transcribing" | "stopping",
+            message: String(m.data?.message || "処理中..."),
+            progress: typeof m.data?.progress === "number" ? m.data.progress : 0,
+            stage: m.data?.stage ?? null,
+            stage_label: m.data?.stage_label ?? null,
+            stage_step: typeof m.data?.stage_step === "number" ? m.data.stage_step : null,
+            stage_total: typeof m.data?.stage_total === "number" ? m.data.stage_total : null,
           });
         }
-        if (m.type === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
-          const speakerId = String(m.data.speaker_id);
-          const speakerLabel = String(m.data.speaker_label);
-          setCurrentMinutes((prev) => {
-            if (!prev) return prev;
-            const transcript = (prev.transcript || []).map((seg) =>
-              seg.speaker_id === speakerId
-                ? { ...seg, speaker_label: speakerLabel }
-                : seg
-            );
-            return { ...prev, transcript };
-          });
-        }
+      }
+      if (m.type === "pipeline_done" && m.data?.session_id === sessionId) {
+        if (!isLive) setRetryStatus(null);
+        reload();
+      }
+      if (!isLive && m.type === "pipeline_error" && m.data?.session_id === sessionId) {
+        setRetryStatus({
+          state: "error",
+          message: String(m.data?.message || "エラー"),
+          progress: 0,
+        });
+      }
+      if (m.type === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
+        const speakerId = String(m.data.speaker_id);
+        const speakerLabel = String(m.data.speaker_label);
+        setCurrentMinutes((prev) => {
+          if (!prev) return prev;
+          const transcript = (prev.transcript || []).map((seg) =>
+            seg.speaker_id === speakerId
+              ? { ...seg, speaker_label: speakerLabel }
+              : seg
+          );
+          return { ...prev, transcript };
+        });
+      }
 
-        // ─── 要約ジョブイベント ───
-        if (m.data?.minutes_id !== minutesId) {
-          // 自分の議事録に対するイベントだけ拾う
-        } else if (m.type === "summary_stage") {
+      // ─── 要約ジョブイベント ───
+      if (m.data?.minutes_id !== minutesId) {
+        // 自分の議事録に対するイベントだけ拾う
+      } else if (m.type === "summary_stage") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId, state: "running" as const }),
+          state: prev?.state === "done" ? "done" : "running",
+          stage: m.data?.stage ?? null,
+          stage_label: m.data?.stage_label ?? null,
+        }));
+      } else if (m.type === "summary_activity") {
+        summaryStatusVersionRef.current += 1;
+        const activity = String(m.data?.activity || "").trim();
+        if (activity) {
           setSummaryJob((prev) => ({
             ...(prev || { minutes_id: minutesId, state: "running" as const }),
             state: prev?.state === "done" ? "done" : "running",
-            stage: m.data?.stage ?? null,
-            stage_label: m.data?.stage_label ?? null,
+            activity,
           }));
-        } else if (m.type === "summary_activity") {
-          const activity = String(m.data?.activity || "").trim();
-          if (activity) {
-            setSummaryJob((prev) => ({
-              ...(prev || { minutes_id: minutesId, state: "running" as const }),
-              state: prev?.state === "done" ? "done" : "running",
-              activity,
-            }));
-          }
-        } else if (m.type === "summary_chunk") {
-          const chunk = String(m.data.text || "");
-          setSummaryJob((prev) => ({
-            ...(prev || { minutes_id: minutesId, state: "running" }),
-            state: "running",
-            partial_text: (prev?.partial_text || "") + chunk,
-            error_code: null,
-            error_message: null,
-          }));
-        } else if (m.type === "summary_done") {
-          setSummaryJob({
-            state: "done",
-            minutes_id: minutesId,
-            provider: m.data?.provider ?? null,
-            model: m.data?.model ?? null,
-            finished_at: Date.now() / 1000,
-          });
-          // タイトル即時反映 (DB は既に更新済み、UI 楽観反映)
-          if (m.data?.new_title) {
-            setCurrentMinutes((prev) =>
-              prev ? { ...prev, title: String(m.data.new_title) } : prev,
-            );
-          }
-          reload();
-        } else if (m.type === "minutes_title_updated") {
-          // 別箇所からの更新 (一覧画面等) を反映
-          setCurrentMinutes((prev) =>
-            prev ? { ...prev, title: String(m.data?.title || prev.title) } : prev,
-          );
-        } else if (m.type === "summary_failed") {
-          setSummaryJob({
-            state: "failed",
-            minutes_id: minutesId,
-            error_code: m.data?.error_code ?? "UNKNOWN",
-            error_message: m.data?.message ?? "要約生成に失敗しました",
-          });
-        } else if (m.type === "summary_cancelled") {
-          setSummaryJob((prev) => ({
-            ...(prev || { minutes_id: minutesId }),
-            state: "cancelled",
-          }));
-        } else if (m.type === "summary_skipped") {
-          setSummaryJob({
-            state: "skipped",
-            minutes_id: minutesId,
-            error_code: m.data?.reason ?? "SKIPPED",
-            error_message: "発話が短すぎて要約をスキップしました",
-          });
         }
-      } catch {}
+      } else if (m.type === "summary_usage") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId, state: "running" as const }),
+          usage: m.data?.usage ?? null,
+        }));
+      } else if (m.type === "summary_chunk") {
+        summaryStatusVersionRef.current += 1;
+        const chunk = String(m.data.text || "");
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId, state: "running" }),
+          state: "running",
+          partial_text: (prev?.partial_text || "") + chunk,
+          error_code: null,
+          error_message: null,
+        }));
+      } else if (m.type === "summary_done") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob({
+          state: "done",
+          minutes_id: minutesId,
+          provider: m.data?.provider ?? null,
+          model: m.data?.model ?? null,
+          usage: m.data?.usage ?? null,
+          finished_at: Date.now() / 1000,
+        });
+        // タイトル即時反映 (DB は既に更新済み、UI 楽観反映)
+        if (m.data?.new_title) {
+          setCurrentMinutes((prev) =>
+            prev ? { ...prev, title: String(m.data.new_title) } : prev,
+          );
+        }
+        reload();
+      } else if (m.type === "dictionary_update_started") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId }),
+          state: "dictionary_update",
+          stage: "dictionary_update",
+          stage_label: String(m.data?.stage_label || "用語辞書を整理中"),
+        }));
+      } else if (m.type === "dictionary_update_finished") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => (
+          prev?.state === "dictionary_update"
+            ? { ...prev, state: "done", stage: null, stage_label: null }
+            : prev
+        ));
+        reload();
+      } else if (m.type === "transcript_corrected") {
+        reload();
+      } else if (m.type === "minutes_title_updated") {
+        // 別箇所からの更新 (一覧画面等) を反映
+        setCurrentMinutes((prev) =>
+          prev ? { ...prev, title: String(m.data?.title || prev.title) } : prev,
+        );
+      } else if (m.type === "summary_failed") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob({
+          state: "failed",
+          minutes_id: minutesId,
+          error_code: m.data?.error_code ?? "UNKNOWN",
+          error_message: m.data?.message ?? "要約生成に失敗しました",
+        });
+      } else if (m.type === "summary_cancelled") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId }),
+          state: "cancelled",
+        }));
+      } else if (m.type === "summary_skipped") {
+        summaryStatusVersionRef.current += 1;
+        setSummaryJob({
+          state: "skipped",
+          minutes_id: minutesId,
+          error_code: m.data?.reason ?? "SKIPPED",
+          error_message: "発話が短すぎて要約をスキップしました",
+        });
+      }
     };
-    const connect = () => {
-      if (stopped) return;
-      try { ws = new WebSocket(WS_URL); } catch { scheduleReconnect(); return; }
-      ws.onopen = () => { attempt = 0; };
-      ws.onmessage = handle;
-      ws.onclose = scheduleReconnect;
-      ws.onerror = () => { try { ws?.close(); } catch {} };
-    };
-    const scheduleReconnect = () => {
-      if (stopped || timer) return;
-      attempt++;
-      const delay = Math.min(8000, 500 * Math.pow(1.6, Math.min(attempt, 6)));
-      timer = window.setTimeout(() => { timer = null; connect(); }, delay);
-    };
-    connect();
+    const eventTypes = [
+      "__open", "pipeline_progress", "pipeline_done", "pipeline_error",
+      "speaker_renamed", "summary_stage", "summary_activity", "summary_usage",
+      "summary_chunk", "summary_done", "summary_failed", "summary_cancelled",
+      "summary_skipped", "dictionary_update_started", "dictionary_update_finished",
+      "transcript_corrected", "minutes_title_updated",
+    ];
+    for (const type of eventTypes) {
+      window.addEventListener(`recording-ws:${type}`, handle);
+    }
     return () => {
       stopped = true;
-      if (timer) window.clearTimeout(timer);
-      try { ws?.close(); } catch {}
+      for (const type of eventTypes) {
+        window.removeEventListener(`recording-ws:${type}`, handle);
+      }
     };
   }, [isLive, minutesId, sessionId]);
 
@@ -434,23 +508,10 @@ export function DetailView(props: Props) {
   const [playing, setPlaying] = useState(false);
   const [ct, setCt] = useState(0);
   const [rate, setRate] = useState(1.0);
-  const [audioInfo, setAudioInfo] = useState<{ name: string; size_bytes: number } | null>(null);
-
-  useEffect(() => {
-    if (!sessionId) {
-      setAudioInfo(null);
-      return;
-    }
-    let cancelled = false;
-    getSessionAudioInfo(sessionId)
-      .then((info) => {
-        if (!cancelled) setAudioInfo(info);
-      })
-      .catch(() => {
-        if (!cancelled) setAudioInfo(null);
-      });
-    return () => { cancelled = true; };
-  }, [sessionId]);
+  const [mediaDuration, setMediaDuration] = useState<number | null>(null);
+  const playbackDuration = (mediaDuration && Number.isFinite(mediaDuration) && mediaDuration > 0)
+    ? mediaDuration
+    : duration;
 
   // sessionId 変更時 / unmount 時に再生中の Audio を必ず停止する
   useEffect(() => {
@@ -465,6 +526,7 @@ export function DetailView(props: Props) {
       }
       setPlaying(false);
       setCt(0);
+      setMediaDuration(null);
     };
   }, [sessionId]);
 
@@ -513,48 +575,42 @@ export function DetailView(props: Props) {
     return out;
   }, [transcript, findQuery]);
 
-  const summaryMatchCount = useMemo(() => {
-    const q = findQuery.trim();
-    if (!q || !summary) return 0;
-    const lcq = q.toLowerCase();
-    const lcs = summary.toLowerCase();
-    let pos = 0, count = 0;
-    while (pos < lcs.length) {
-      const f = lcs.indexOf(lcq, pos);
-      if (f < 0) break;
-      count++;
-      pos = f + lcq.length;
-    }
-    return count;
-  }, [summary, findQuery]);
+  // 要約タブの検索ヒット件数は MarkdownView (tiptap) 側で実体テキストから数える。
+  // (markdown 構文文字を含めない正確な件数 + 各マッチに decoration を貼るため)
+  const [summaryMatchCount, setSummaryMatchCount] = useState(0);
+
+  // タブ切替時に findIndex を 0 に戻す (各タブごとにマッチ集合が違うため)
+  useEffect(() => { setFindIndex(0); }, [tab]);
+
+  // アクティブタブのマッチ件数
+  const activeMatchCount = tab === "summary" ? summaryMatchCount : matches.length;
 
   // findIndex がレンジ外にならないようにクランプ
   useEffect(() => {
-    if (matches.length === 0) {
+    if (activeMatchCount === 0) {
       if (findIndex !== 0) setFindIndex(0);
-    } else if (findIndex >= matches.length) {
+    } else if (findIndex >= activeMatchCount) {
       setFindIndex(0);
     }
-  }, [matches.length, findIndex]);
+  }, [activeMatchCount, findIndex]);
 
-  // 検索クエリ/インデックスが変わったら active な mark を画面中央へ
+  // 検索クエリ/インデックスが変わったら active な mark を画面中央へ (文字起こしタブ用)
   useEffect(() => {
-    if (matches.length === 0) return;
-    // mark がレンダリングされた直後にスクロール (初期マウント時にも確実に動かす)
+    if (tab !== "transcript" || matches.length === 0) return;
     const id = requestAnimationFrame(() => {
       const el = document.getElementById(FIND_ACTIVE_ID);
       if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
     });
     return () => cancelAnimationFrame(id);
-  }, [findIndex, matches.length, findQuery]);
+  }, [findIndex, matches.length, findQuery, tab]);
 
   const nextMatch = () => {
-    if (matches.length === 0) return;
-    setFindIndex((i) => (i + 1) % matches.length);
+    if (activeMatchCount === 0) return;
+    setFindIndex((i) => (i + 1) % activeMatchCount);
   };
   const prevMatch = () => {
-    if (matches.length === 0) return;
-    setFindIndex((i) => (i - 1 + matches.length) % matches.length);
+    if (activeMatchCount === 0) return;
+    setFindIndex((i) => (i - 1 + activeMatchCount) % activeMatchCount);
   };
 
   const openFind = () => {
@@ -608,7 +664,7 @@ export function DetailView(props: Props) {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | null>(null);
+  const [busy, setBusy] = useState<"export" | "copy" | "delete" | "retry" | "retry_cancel" | "recover" | null>(null);
 
   /* title edit */
   const [editingTitle, setEditingTitle] = useState(false);
@@ -657,10 +713,22 @@ export function DetailView(props: Props) {
 
   const aud = () => {
     if (!audioRef.current) {
-      audioRef.current = new Audio(audioPlayUrl(sessionId));
-      audioRef.current.onended = () => setPlaying(false);
-      audioRef.current.ontimeupdate = () => setCt(audioRef.current?.currentTime || 0);
-      try { audioRef.current.playbackRate = rate; } catch { /* noop */ }
+      const a = new Audio(audioPlayUrl(sessionId));
+      const syncDuration = () => {
+        const d = a.duration;
+        if (Number.isFinite(d) && d > 0) setMediaDuration(d);
+      };
+      a.onloadedmetadata = syncDuration;
+      a.ondurationchange = syncDuration;
+      a.onended = () => {
+        const d = a.duration;
+        const end = Number.isFinite(d) && d > 0 ? d : (a.currentTime || 0);
+        setCt(end);
+        setPlaying(false);
+      };
+      a.ontimeupdate = () => setCt(a.currentTime || 0);
+      try { a.playbackRate = rate; } catch { /* noop */ }
+      audioRef.current = a;
     }
     return audioRef.current;
   };
@@ -781,29 +849,61 @@ export function DetailView(props: Props) {
     }
   };
 
-  const canAct = !isLive && !!minutesId;
+  const handleRecoverSession = async (startRetranscribe: boolean) => {
+    if (!sessionId || busy) return;
+    setBusy("recover");
+    try {
+      const res = await recoverSessionMinutes(sessionId, startRetranscribe);
+      setCurrentMinutes(res.minutes);
+      window.dispatchEvent(new CustomEvent("minutes-updated"));
+      if (startRetranscribe) {
+        const retryState = String(res.retranscribe?.status || "");
+        if (retryState === "started") {
+          showToast({ kind: "ok", text: "救済保存して再文字起こしを開始しました" });
+        } else if (retryState === "skipped") {
+          showToast({ kind: "info", text: "救済保存しました（音声がないため再文字起こしはスキップ）" });
+        } else {
+          showToast({ kind: "ok", text: "救済保存しました" });
+        }
+      } else {
+        showToast({ kind: "ok", text: "救済保存しました" });
+      }
+    } catch (e) {
+      showToast({ kind: "err", text: `救済保存に失敗: ${e instanceof Error ? e.message : "不明なエラー"}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const canAct = !!minutesId;
+  const summaryInProgress = summaryJob?.state === "queued"
+    || summaryJob?.state === "running"
+    || summaryJob?.state === "dictionary_update";
+  const summaryBlockedLabel = summaryJob?.state === "dictionary_update"
+    ? "用語辞書の整理が終わってから操作できます"
+    : "要約が終わってから操作できます";
+  const canRecoverSession = isLive && !minutesId && !!sessionId
+    && (stateLive === "error" || stateLive === "done");
   const isRetranscribing = !!retryStatus && retryStatus.state !== "error";
   const retryStopPending = busy === "retry_cancel" || retryStatus?.state === "stopping";
   const isSearching = findQuery.trim().length > 0;
   const tabs: Array<["summary" | "transcript", string, number | null]> = [
     [
       "summary",
-      "Summary",
+      "要約",
       isSearching ? summaryMatchCount : (summary ? null : 0),
     ],
     [
       "transcript",
-      "Transcribe",
+      "文字起こし",
       isSearching ? matches.length : transcript.length,
     ],
   ];
 
-  const progress = duration > 0 ? (ct / duration) * 100 : 0;
-
   return (
-    <div className="anim-fade-in flex flex-col h-full overflow-hidden">
+    <div className="detail-page flex flex-col h-full overflow-hidden">
       {/* Header (toolbar 風) */}
-      <div className="toolbar">
+      <div className="toolbar detail-toolbar">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <button onClick={props.onBack} className="icon-btn" title="戻る">
             <ArrowLeft size={14} weight="regular" />
@@ -882,7 +982,8 @@ export function DetailView(props: Props) {
               <ActionBtn
                 onClick={handleRetry}
                 loading={busy === "retry"}
-                title="文字起こしを再実行"
+                disabled={summaryInProgress}
+                title={summaryInProgress ? summaryBlockedLabel : "文字起こしを再実行"}
                 label="再実行"
               >
                 <ArrowsClockwise size={13} weight="regular" />
@@ -894,15 +995,21 @@ export function DetailView(props: Props) {
             <ActionBtn onClick={handleExport} loading={busy === "export"} title="ファイルに書き出し" label="書き出し">
               <DownloadSimple size={13} weight="regular" />
             </ActionBtn>
-            <ActionBtn onClick={handleDelete} loading={busy === "delete"} title="削除" danger>
+            <ActionBtn
+              onClick={handleDelete}
+              loading={busy === "delete"}
+              disabled={summaryInProgress}
+              title={summaryInProgress ? summaryBlockedLabel : "削除"}
+              danger
+            >
               <Trash size={13} weight="regular" />
             </ActionBtn>
           </div>
         )}
       </div>
 
-      {/* Live processing state — 録音停止後の pipeline (stopping / transcribing) も
-          再文字起こしと同じ retry-status バナーで表示する */}
+      {/* Live processing state — 録音停止後の pipeline (stopping / transcribing) を
+          共通の進捗バナーで表示する */}
       {isLive && (stateLive === "stopping" || stateLive === "transcribing") && (
         <div className="retry-status">
           <div className="retry-status-row">
@@ -945,8 +1052,34 @@ export function DetailView(props: Props) {
           </div>
         </div>
       )}
-      {liveError && (
-        <p className="px-4 py-2 text-[11px] text-(--danger) border-b border-(--border)">{liveError}</p>
+      {(liveError || canRecoverSession) && (
+        <div className="px-4 py-2 border-b border-(--border) flex items-center gap-2">
+          {liveError && (
+            <p className="text-[11px] text-(--danger) flex-1 min-w-0 truncate">{liveError}</p>
+          )}
+          {canRecoverSession && (
+            <div className="flex items-center gap-1 shrink-0">
+              <ActionBtn
+                onClick={() => handleRecoverSession(false)}
+                loading={busy === "recover"}
+                disabled={busy === "recover"}
+                title="既存の文字起こしを議事録として保存"
+                label="救済保存"
+              >
+                <DownloadSimple size={13} weight="regular" />
+              </ActionBtn>
+              <ActionBtn
+                onClick={() => handleRecoverSession(true)}
+                loading={busy === "recover"}
+                disabled={busy === "recover"}
+                title="救済保存して再文字起こしを開始"
+                label="救済して再実行"
+              >
+                <ArrowsClockwise size={13} weight="regular" />
+              </ActionBtn>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Retranscribe status banner (非-live のみ) */}
@@ -954,7 +1087,7 @@ export function DetailView(props: Props) {
         <div className="retry-status">
           <div className="retry-status-row">
             {retryStatus.state === "error" ? (
-              <span className="text-(--danger)" aria-label="error">⚠</span>
+              <span className="text-(--danger)" aria-label="エラー"><WarningCircle size={16} /></span>
             ) : (
               <Spinner size={12} />
             )}
@@ -1010,71 +1143,69 @@ export function DetailView(props: Props) {
       )}
 
       {/* Player */}
-      {sessionId && duration > 0 && (
-        <div className="relative border-b border-(--border) bg-(--surface)">
-          <div className="px-4 pt-3 pb-1">
-            <Waveform level={playing ? 0.5 : 0.1} alive={playing} height={64} />
-          </div>
-          {/* progress overlay */}
-          <div className="absolute top-0 bottom-0 pointer-events-none"
-            style={{
-              left: 0,
-              width: `${progress}%`,
-              background: "color-mix(in srgb, var(--accent) 12%, transparent)",
-              borderRight: progress > 0 ? "1px solid var(--accent)" : "none",
-              transition: "width 100ms linear",
-            }} />
-          {/* seek hit area */}
-          <div className="absolute inset-0 cursor-pointer"
-            onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              seek(((e.clientX - r.left) / r.width) * duration);
-            }} />
-
-          <div className="relative flex items-center justify-between px-4 pb-2 gap-3">
-            <div className="num text-[11px] text-(--t3) shrink-0">{fmt(ct)}</div>
-            {/* Play button: bottom row の幾何学的中心に重ねる */}
-            <button
-              onClick={(e) => { e.stopPropagation(); toggle(); }}
-              className="absolute left-1/2 -bottom-2 -translate-x-1/2 -translate-y-1/2 z-10 circle-btn !w-8 !h-8 hover:opacity-80 duration-100 transition-opacity"
-              title={playing ? "一時停止" : "再生"}
-            >
-              {playing ? <Pause size={12} weight="fill" /> : <Play size={12} weight="fill" />}
-            </button>
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="num text-[11px] text-(--t3)">{fmt(duration)}</div>
-              {audioInfo && (
-                <span
-                  className="num text-[11px] text-(--t3) tabular-nums"
-                  title={audioInfo.name}
-                >
-                  {fmtBytes(audioInfo.size_bytes)}
-                </span>
-              )}
+      {sessionId && playbackDuration > 0 && (
+        <div className="audio-player">
+          <button
+            type="button"
+            onClick={toggle}
+            className="audio-play-button"
+            title={playing ? "一時停止" : "再生"}
+            aria-label={playing ? "音声を一時停止" : "音声を再生"}
+          >
+            {playing ? <Pause size={16} weight="fill" /> : <Play size={16} weight="fill" />}
+          </button>
+          <div className="audio-player-main">
+            <div className="audio-player-topline">
               <PlaybackRatePill rate={rate} onChange={setRate} />
             </div>
+            <input
+              type="range"
+              className="audio-seek"
+              min={0}
+              max={playbackDuration}
+              step={0.1}
+              value={Math.min(playbackDuration, Math.max(0, ct))}
+              onChange={(e) => seek(Number(e.target.value))}
+              aria-label="音声の再生位置"
+            />
+            <div className="audio-player-time num">
+              <span>{fmt(ct)}</span>
+              <span>{fmt(playbackDuration)}</span>
+            </div>
+          </div>
+          <div className="audio-player-transport">
+            <button
+              type="button"
+              onClick={() => seek(Math.max(0, ct - 10))}
+              aria-label="10秒戻る"
+              title="10秒戻る"
+            >−10</button>
+            <button
+              type="button"
+              onClick={() => seek(Math.min(playbackDuration, ct + 10))}
+              aria-label="10秒進む"
+              title="10秒進む"
+            >+10</button>
           </div>
         </div>
       )}
 
       {/* Tabs */}
-      <div className="flex items-center gap-5 px-5 border-b border-(--border)">
+      <nav className="detail-tabs" aria-label="議事録の表示切替">
         {tabs.map(([k, label, count]) => {
           const active = tab === k;
           return (
-            <button key={k} onClick={() => setTab(k)}
-              className="relative py-2.5 cursor-pointer flex items-center gap-1.5"
-              style={{ background: "transparent", border: "none" }}>
+            <button key={k} type="button" onClick={() => setTab(k)}
+              aria-pressed={active}
+              className="detail-tab relative py-2.5 cursor-pointer flex items-center gap-1.5"
+              >
               <span className={`text-[12px] font-medium transition-colors ${active ? "text-(--t1)" : "text-(--t3) hover:text-(--t2)"}`}>
                 {label}
               </span>
               {count !== null && count !== undefined && (
                 <span className="text-[10px] text-(--t3) tabular-nums">{count}</span>
               )}
-              {active && (
-                <span className="absolute -bottom-px left-0 right-0 h-[2px] rounded-full"
-                  style={{ background: "var(--accent)" }} />
-              )}
+
             </button>
           );
         })}
@@ -1090,7 +1221,7 @@ export function DetailView(props: Props) {
             </button>
           )}
         </div>
-      </div>
+      </nav>
 
       {/* Find bar */}
       {findOpen && (
@@ -1098,9 +1229,9 @@ export function DetailView(props: Props) {
           query={findQuery}
           onChange={(v) => { setFindQuery(v); setFindIndex(0); }}
           inputRef={findInputRef}
-          matches={matches.length}
-          index={matches.length === 0 ? 0 : findIndex + 1}
-          summaryMatchCount={summaryMatchCount}
+          matches={activeMatchCount}
+          index={activeMatchCount === 0 ? 0 : findIndex + 1}
+          otherCount={tab === "summary" ? matches.length : summaryMatchCount}
           activeTab={tab}
           onJumpSummary={() => { setTab("summary"); }}
           onJumpTranscript={() => { setTab("transcript"); }}
@@ -1119,8 +1250,11 @@ export function DetailView(props: Props) {
             savedSummary={summary || ""}
             savedModel={minutes?.llm_model || ""}
             job={summaryJob}
-            canAct={canAct}
+            canAct={canAct && !isRetranscribing}
             busy={summaryBusy}
+            searchQuery={findOpen ? findQuery : ""}
+            activeMatchIndex={tab === "summary" ? findIndex : -1}
+            onMatchesChange={setSummaryMatchCount}
             onGenerate={startSummarize}
             onCancel={handleCancelSummary}
             onSaved={(next) => {
@@ -1134,24 +1268,28 @@ export function DetailView(props: Props) {
 
         {tab === "transcript" && (
           transcript.length > 0 ? (
-            <div className="anim-fade-in">
+            <div className="transcript-sheet">
               {transcript.map((seg, i) => {
                 const on = playing && ct >= seg.start && ct < seg.end;
                 const speakerLabel = seg.speaker_label || "話者?";
                 const segMatches = matches.filter((m) => m.segIndex === i);
                 return (
-                  <div
+                  <button
                     key={i}
+                    type="button"
                     onClick={() => seek(seg.start)}
-                    className="flat-row"
+                    className={`flat-row ${on ? "is-playing" : ""}`}
+                    aria-label={`${fmt(seg.start)}、${speakerLabel}、${seg.text}。音声の位置へ移動`}
+                    style={{ width: "100%", color: "inherit", font: "inherit", textAlign: "left", borderTop: 0, borderLeft: 0, borderRight: 0 }}
                   >
-                    <div className="min-w-[74px] shrink-0 flex flex-col">
-                      <span className="num text-[10px] text-(--t3)" style={{ fontWeight: 400 }}>
+                    <span className="transcript-time num">
+                      <span className="transcript-stamp">
                         {fmt(seg.start)}
                       </span>
-                      <span className="text-[10px] text-(--t3)">{speakerLabel}</span>
-                    </div>
-                    <span className={`text-[13px] leading-relaxed flex-1 transition-colors ${on ? "text-(--t1)" : "text-(--t2)"}`}>
+
+                    </span>
+                    <span className="transcript-copy">
+                      <span className="transcript-speaker">{speakerLabel}</span>
                       <SegmentText
                         text={seg.text}
                         matches={segMatches}
@@ -1160,7 +1298,7 @@ export function DetailView(props: Props) {
                         activeId={FIND_ACTIVE_ID}
                       />
                     </span>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -1173,7 +1311,7 @@ export function DetailView(props: Props) {
           )
         )}
         </div>
-        {tab === "transcript" && transcript.length > 0 && (
+        {tab === "transcript" && transcript.length > 1 && (
           <TranscriptMinimap
             segments={transcript}
             scrollRef={transcriptScrollRef}
@@ -1250,7 +1388,9 @@ function PlaybackRatePill({
      - summary 無し & job なし: 空状態 + 「要約を生成」ボタン
    ボタン高さは ActionBtn と同じ h-8 で揃え、視覚的に統一感を保つ。 */
 function SummaryPanel({
-  minutesId, savedSummary, savedModel, job, canAct, busy, onGenerate, onCancel, onSaved,
+  minutesId, savedSummary, savedModel, job, canAct, busy,
+  searchQuery, activeMatchIndex, onMatchesChange,
+  onGenerate, onCancel, onSaved,
 }: {
   minutesId?: string;
   savedSummary: string;
@@ -1258,25 +1398,31 @@ function SummaryPanel({
   job: SummarizeStatus | null;
   canAct: boolean;
   busy: boolean;
+  searchQuery?: string;
+  activeMatchIndex?: number;
+  onMatchesChange?: (n: number) => void;
   onGenerate: (provider?: SummarizeProvider) => void;
   onCancel: () => void;
   onSaved?: (next: Minutes) => void;
 }) {
   const state = job?.state;
   const isRunning = state === "queued" || state === "running";
+  const isDictionaryUpdating = state === "dictionary_update";
+  const isBusy = isRunning || isDictionaryUpdating;
   const isFailed = state === "failed";
   const isSkipped = state === "skipped";
   const isCancelled = state === "cancelled";
 
   // 表示するMarkdown本文の決定:
   // 生成中は partial_text を表示 (ストリーミング)
-  // 完了後は savedSummary (DB 由来) を表示
+  // 完了後は savedSummary (DB 由来)。ただし summary_done 直後で reload が間に合っていない
+  // 場合 (savedSummary が空) は partial_text を fallback で表示し続けてフリッカーを防ぐ。
   const displayText = isRunning
-    ? (job?.partial_text || "")
-    : savedSummary;
+    ? (job?.partial_text || savedSummary || "")
+    : (savedSummary || job?.partial_text || "");
 
   // Status banner があるかどうか (生成中・失敗・skip・cancel)
-  const showBanner = isRunning || isFailed || isSkipped || isCancelled;
+  const showBanner = isBusy || isFailed || isSkipped || isCancelled || Boolean(job?.usage);
 
   // 編集モード state
   const [editing, setEditing] = useState(false);
@@ -1288,7 +1434,7 @@ function SummaryPanel({
     if (!editing) setDraft(savedSummary);
   }, [savedSummary, editing]);
 
-  const canEdit = !isRunning && !!minutesId;
+  const canEdit = !isBusy && !!minutesId;
   const dirty = draft !== savedSummary;
 
   const startEdit = () => {
@@ -1368,8 +1514,13 @@ function SummaryPanel({
         <div className="flex-1 overflow-y-auto">
           {displayText ? (
             <div className="px-6 py-6">
-              <MarkdownView value={displayText} />
-              {savedSummary && !isRunning && (
+              <MarkdownView
+                value={displayText}
+                searchQuery={searchQuery}
+                activeMatchIndex={activeMatchIndex}
+                onMatchesChange={onMatchesChange}
+              />
+              {savedSummary && !isBusy && (
                 <SummaryFooter
                   savedModel={savedModel}
                   canAct={canAct}
@@ -1381,7 +1532,7 @@ function SummaryPanel({
               )}
             </div>
           ) : (
-            !isRunning && !isFailed && (
+            !isBusy && !isFailed && (
               <SummaryEmpty
                 canAct={canAct}
                 busy={busy}
@@ -1407,6 +1558,20 @@ function SummaryStatusBanner({
     ? PROVIDER_LABELS[job.provider as SummarizeProvider] || job.provider
     : "";
   const modelLabel = job.model ? ` / ${job.model}` : "";
+
+  if (state === "dictionary_update") {
+    return (
+      <div className="summary-banner summary-banner-running" role="status" aria-live="polite">
+        <Spinner size={12} />
+        <div className="flex-1 min-w-0">
+          <p className="text-[12px] text-(--t1) font-medium">用語辞書を整理中</p>
+          <p className="text-[11px] text-(--t3) truncate">
+            文字起こしの表記を確認しています。この間は再実行や削除を一時停止しています。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (state === "queued" || state === "running") {
     const chars = (job.partial_text || "").length;
@@ -1440,6 +1605,19 @@ function SummaryStatusBanner({
         <button onClick={onCancel} className="btn h-7 px-2.5 text-[11px]">
           キャンセル
         </button>
+      </div>
+    );
+  }
+  if (state === "done" && job.usage) {
+    return (
+      <div className="summary-banner summary-banner-info">
+        <span className="text-[11px] text-(--t3) flex-1 tabular-nums">
+          Codex使用量: 入力 {fmtTokens(job.usage.input_tokens)} · 出力 {fmtTokens(job.usage.output_tokens)}
+          {job.usage.reasoning_output_tokens
+            ? ` · 推論 ${fmtTokens(job.usage.reasoning_output_tokens)}`
+            : ""}
+          {` · 合計 ${fmtTokens(job.usage.total_tokens)}`}
+        </span>
       </div>
     );
   }
@@ -1661,7 +1839,7 @@ function SegmentText({
 
 function FindBar({
   query, onChange, inputRef, matches, index,
-  summaryMatchCount, activeTab,
+  otherCount, activeTab,
   onJumpSummary, onJumpTranscript,
   onPrev, onNext, onClose,
 }: {
@@ -1670,7 +1848,7 @@ function FindBar({
   inputRef: React.MutableRefObject<HTMLInputElement | null>;
   matches: number;
   index: number;
-  summaryMatchCount: number;
+  otherCount: number;
   activeTab: "summary" | "transcript";
   onJumpSummary: () => void;
   onJumpTranscript: () => void;
@@ -1678,8 +1856,6 @@ function FindBar({
   onNext: () => void;
   onClose: () => void;
 }) {
-  const otherCount =
-    activeTab === "transcript" ? summaryMatchCount : 0; // summary タブでは transcript 件数を別表示しない (現状はまだ計算していない)
   const otherLabel = activeTab === "transcript" ? "要約" : "本文";
   const onJumpOther = activeTab === "transcript" ? onJumpSummary : onJumpTranscript;
 
@@ -1701,9 +1877,9 @@ function FindBar({
             onClose();
           }
         }}
-        placeholder={activeTab === "transcript" ? "本文を検索" : "本文タブで検索 (要約は別)"}
+        placeholder={activeTab === "transcript" ? "本文を検索" : "要約を検索"}
         className="find-bar-input"
-        aria-label="本文を検索"
+        aria-label={activeTab === "transcript" ? "本文を検索" : "要約を検索"}
       />
       <span className="num text-[11px] text-(--t3) shrink-0">
         {matches === 0 ? "0/0" : `${index}/${matches}`}

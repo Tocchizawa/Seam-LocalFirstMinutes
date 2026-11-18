@@ -7,7 +7,7 @@
 │                     GUI (Tauri + React)                       │
 │  プロジェクト管理 / 録音操作 / リアルタイム表示 / 議事録ビューア │
 │                                                              │
-│  Rust側: Swift sidecar (SCK) / Python Backend プロセス管理    │
+│  Rust側: native audio sidecar / Python Backend 管理             │
 └────────────────────────┬─────────────────────────────────────┘
                          │ HTTP / WebSocket
 ┌────────────────────────▼─────────────────────────────────────┐
@@ -71,12 +71,11 @@ gui/
 ├── src-tauri/
 │   └── src/
 │       ├── main.rs               # ウィンドウ管理
-│       └── sidecar.rs            # Python Backend + Swift sidecar 起動・管理
+│       └── sidecar.rs            # Python Backend + native sidecar 起動・管理
 ├── sidecar/
-│   └── audio-capture/            # Swift sidecar (ScreenCaptureKit)
-│       ├── Package.swift
+│   └── audio-capture/            # Objective-C sidecar (ScreenCaptureKit + Core Audio mic)
 │       └── Sources/
-│           └── main.swift        # SCK 音声キャプチャ → Unix socket で PCM 転送
+│           └── main.m            # システム音声/マイク → raw PCM 書き出し
 │
 └── src/
     ├── App.tsx
@@ -127,8 +126,8 @@ src/
 ├── audio/
 │   ├── recorder.py          # 2トラック同時録音オーケストレーション
 │   ├── mic_capture.py       # sounddevice でマイク録音
-│   ├── system_capture.py    # Rust IPC からシステム音声受信
-│   ├── mixer.py             # リアルタイムミキシング + WAVミキシング (ffmpeg でレベル正規化・変換)
+│   ├── system_capture.py    # ScreenCaptureKit sidecar からシステム音声受信
+│   ├── mixer.py             # リアルタイムミキシング + 自動ゲイン補正
 │   ├── devices.py           # デバイス一覧
 │   ├── raw_writer.py        # RAW PCM 書き込み
 │   ├── converter.py         # RAW→WAV 変換 (ffmpeg subprocess)
@@ -173,16 +172,17 @@ GijirokuN.app/Contents/
 │   ├── backend/                 # PyInstaller --onedir 出力
 │   │   ├── seam-backend     # エントリーポイント
 │   │   └── _internal/           # Python + 依存 (~3GB)
-│   ├── sidecar/
-│   │   └── audio-capture        # Swift sidecar (ScreenCaptureKit 音声キャプチャ)
+│   ├── audio-capture            # native audio sidecar
 │   ├── ollama/ollama            # Ollama バイナリ (~200MB)
 │   └── ffmpeg/ffmpeg            # ffmpeg バイナリ (~80MB)
 └── Info.plist
 ```
 
-モデルは .app に同梱しない（配布サイズ削減）。初回起動ウィザードでDL:
+モデルは .app に同梱しない（配布サイズ削減）。初回起動ウィザードまたは設定画面から Hugging Face Hub のキャッシュへDL:
 - Qwen3 8B: ~5GB (Ollama pull)
 - Whisper medium: ~1.5GB (HuggingFace)
+
+Whisper は設定画面で Tiny / Base / Small / Medium / Large v1 / Large v2 / Large v3 / Large v3 Turbo をリストから選択できる。モデルのダウンロードは同時に1件だけ実行し、設定画面と録音開始中・録音開始後の画面が共通の進捗状態（取得済みバイト、総バイト、割合、速度、エラー）を参照する。録音中のモデル削除・手動ダウンロードは受け付けない。
 
 **起動シーケンス**:
 ```
@@ -196,17 +196,15 @@ GijirokuN.app/Contents/
 ### 3.2 音声録音 + リアルタイムミックス
 
 ```
-[Swift sidecar]                    [Python Backend]
-ScreenCaptureKit                      sounddevice
+[native sidecar]                   [Python Backend]
+ScreenCaptureKit                       sounddevice
   │                                      │
-  │ audio buffer (48kHz)                 │ audio buffer
-  │ → 16kHz リサンプリング               │
+  │ raw PCM (float32, mono)              │ audio buffer
+  │ + metadata JSON                      │
   ▼                                      ▼
-Unix socket ─────(raw PCM)─────→ system_capture.py
-(/tmp/seam-audio-{pid}.sock)        │
-(固定フォーマット:                        │
- 16kHz, mono, int16LE,                   │
- ヘッダなし)                              ▼
+raw file tail ───(raw PCM)────→ system_capture.py
+(.meta.json で sample rate 共有)       │
+                                         ▼
                                   ┌──────────────┐
                          mic ────→│ Realtime     │
                          sys ────→│ Mixer        │──→ Streaming Whisper
@@ -215,37 +213,35 @@ Unix socket ─────(raw PCM)─────→ system_capture.py
                                          │
                               ┌──────────┼──────────┐
                               ▼          ▼          ▼
-                          mic.raw    system.raw   → WebSocket → GUI
-                          (個別保存)  (個別保存)    (文字起こし結果)
+                          mic.raw    system.raw → WebSocket → GUI
+                          (個別保存)  (個別保存)   (文字起こし結果)
 ```
 
-#### IPC プロトコル (Swift sidecar → Python)
+#### IPC プロトコル (native sidecar → Python)
 
-- **トランスポート**: Unix domain socket (`/tmp/seam-audio-{pid}.sock`, chmod 600)
-  - macOS の `sockaddr_un.sun_path` は **104バイト制限**。`/tmp/` 配下なら安全（`~/.seam/` はユーザー名次第で超過リスクあり）
-- **フォーマット**: Raw PCM ストリーム（16kHz, mono, int16LE）
-  - SCK デフォルト出力は 48kHz → **Swift 側で 16kHz にリサンプリング**してから送出
-- **ヘッダなし**: 固定フォーマットのため不要。接続時のハンドシェイクで確認
-- **フロー制御**: Swift 側は non-blocking write。Python 側が詰まったらバッファがカーネルで溜まる（socket バッファ 256KB ≈ 8秒分）
-- **切断対応**: Swift 側はバッファリングして再接続待ち。RAW PCM はファイルに常に書き込まれるのでデータロスなし
+- **トランスポート**: sidecar が `system.raw` に追記し、Python が raw を tail してリアルタイムミックスへ渡す
+- **メタデータ**: `system.meta.json` に backend / format / sample_rate / channels を記録
+- **フォーマット**: Raw PCM (`float32`, mono, little-endian, metadata の sample rate)
+- **停止後変換**: Python 側が ffmpeg で `system.raw` を `system.wav` へ変換する
+- **取得経路固定**: 内部音声は ScreenCaptureKit のみ。代替の内部音声取得経路は持たない
 
 #### トラック同期
 
-- 両トラックに `time.monotonic_ns()` でタイムスタンプ付与
-- リアルタイムミキサーがタイムスタンプでアラインメント
-- 3時間でも monotonic clock のドリフトは無視可能（同一マシン上）
+- リアルタイムミキサーは mic timeline を基準にし、system 欠損分は無音で埋める
+- DB 保存用 transcript は録音中に Whisper へ投入した realtime mixed stream を正とする
 
 #### ffmpeg の使用箇所
 
 - **RAW → WAV 変換**: `ffmpeg -f s16le -ar 16000 -ac 1 -i mic.raw mic.wav`
-- **レベル正規化**: `ffmpeg -i mic.wav -filter:a loudnorm ...` で mic と system の音量を揃える
-- **ミキシング**: `ffmpeg -i mic.wav -i system.wav -filter_complex amix=inputs=2 combined.wav`
+- **リアルタイム補正**: Whisper 投入前に RMS ベースの自動ゲイン補正をかける
+- **レベル補正**: Whisper 投入前のリアルタイムミックスに RMS ベースの自動ゲイン補正をかける
+- **ミキシング**: Whisper に投入するリアルタイムミックス済み PCM を録音中に `combined.wav` へ保存し、停止後に `combined.flac` へ変換する
 - ffmpeg バイナリは .app 内の `Resources/ffmpeg/` に同梱。subprocess で呼び出す
 
 #### クラッシュ耐性
 
 - RAW PCM で常にファイルに書き込み（WAVヘッダ不要→途中切断でもデータ有効）
-- 正常停止時: RAW → WAV 変換 (ffmpeg)
+- 正常停止時: `system.raw` → `system.wav` 変換 (ffmpeg)
 - 異常終了後の再起動: RAW ファイル検出 → WAV 変換 → stopped_at を RAW ファイル末尾時刻で自動設定 → Phase 2 から再開
 
 ### 3.3 ストリーミング Whisper
@@ -339,8 +335,9 @@ class StreamingWhisper:
 
 **設計上の重要ポイント**:
 - **オーバーラップ**: チャンク間に1秒の重複区間を設け、文の途中で切れることを防止。重複部分のセグメントは後処理で除去
-- **絶対タイムスタンプ**: Whisper はチャンク先頭を0とした相対時間を返すため、`offset_sec` を累積加算して会議開始からの絶対時間に変換
-- **最終補正は行わない**: ストリーミング結果 + flush 結果が最終文字起こし
+- **リアルタイム表示**: ストリーミング結果を録音中に表示し、録音停止時に flush して未処理分を確定する
+- **保存用タイムスタンプ**: ストリーミングチャンクごとの `offset_sec` を会議開始からの絶対時間として保持する
+- **最終文字起こし**: DB に保存する transcript と要約入力は、録音中に確定したストリーミング transcript を正とする。`combined.flac` からの再文字起こしは手動実行時のみ行う
 
 ### 3.4 Context Agent
 
@@ -565,8 +562,8 @@ class PipelineStage(Enum):
 ~/.seam/sessions/{session_id}/
 ├── state.json                   # パイプライン状態
 ├── mic.raw → mic.wav            # ← 完了後に全削除
-├── system.raw → system.wav      # ←
-├── combined.wav                 # ←
+├── system.raw → system.wav
+├── combined.flac                # ←
 ├── streaming_transcript.json    # ←
 ├── context.json                 # ←
 └── minutes.md                   # ←
@@ -599,6 +596,10 @@ class PipelineStage(Enum):
 | GET | /api/minutes/search?q={query}&project={id} | 議事録検索 |
 | GET | /api/settings | 設定取得 |
 | PUT | /api/settings | 設定更新 |
+| GET | /api/summarize/codex/usage?days=30 | Seam経由のCodex CLI利用量集計 |
+| GET | /api/models/whisper | Whisperモデル一覧・キャッシュ状態・ダウンロード進捗 |
+| POST | /api/models/whisper/{model_name}/download | Whisperモデルのダウンロード開始 |
+| DELETE | /api/models/whisper/{model_name} | Whisperモデルのキャッシュ削除 |
 | GET | /health | ヘルスチェック |
 
 ### 4.2 エラーレスポンス形式
@@ -632,6 +633,19 @@ ws://localhost:18900/ws
 // 録音状態 (Phase 1)
 { "type": "recording_status", "data": { "state": "recording", "elapsed_sec": 123 } }
 
+// Whisperモデル準備状態 (録音開始時)
+{ "type": "streaming_status", "data": {
+    "model_state": "loading",
+    "model_name": "medium",
+    "model_download": {
+      "state": "downloading",
+      "current_bytes": 524288000,
+      "total_bytes": 1572864000,
+      "percent": 33.3,
+      "speed_bytes_per_sec": 18432000
+    }
+} }
+
 // パイプライン進捗 (Phase 2)
 { "type": "pipeline_progress", "data": {
     "stage": "generating_minutes",
@@ -644,6 +658,13 @@ ws://localhost:18900/ws
 
 // エラー
 { "type": "error", "data": { "stage": "...", "message": "...", "recoverable": true } }
+
+// Codex CLI活動・利用量
+{ "type": "summary_activity", "data": { "minutes_id": "...", "activity": "推論: ..." } }
+{ "type": "summary_usage", "data": {
+    "minutes_id": "...",
+    "usage": { "input_tokens": 1200, "output_tokens": 80, "reasoning_output_tokens": 40, "total_tokens": 1280 }
+} }
 ```
 
 **GUI 側の再接続戦略**:
@@ -661,9 +682,10 @@ ws://localhost:18900/ws
 | Ollama 未起動 | Python Backend (startup.py) が Phase 2 開始時に自動起動。失敗時はエラー表示 |
 | モデル未DL | セットアップウィザードへ誘導 |
 | Python Backend 起動失敗 | 3回リトライ → エラー表示 |
-| ScreenCaptureKit 権限なし | macOS 権限ダイアログ → BlackHole ガイド |
+| ScreenCaptureKit 権限/初期化失敗 | 内部音声録音を開始失敗扱いにし、システム音声取得権限と sidecar 配置を確認する |
 | マイクデバイス未検出 | デバイス一覧を表示して選択を促す |
-| IPC 切断 (Swift↔Python) | 自動再接続。RAW PCM はファイルに保持されるのでデータロスなし |
+| sidecar 停止 (native↔Python) | RAW PCM はファイルに保持。停止後に coverage を検証し、内部音声欠落を正常完了扱いしない |
+| 内部音声の全時間無音 | ScreenCaptureKit の RAW bytes はあるが非ゼロ音声が検出できない場合、内部音声欠落として正常完了扱いしない |
 | 録音中クラッシュ | RAW PCM 保持 → 再起動後に検出 → stopped_at を RAW ファイル末尾時刻で自動設定 → Phase 2 から再開提案 |
 | Tauri 終了 (録音後処理中) | Python Backend に SIGTERM → state.json を保存して graceful shutdown → 再起動後に current_stage から再開 |
 | Whisper OOM | 小さいモデルへのフォールバック提案 |

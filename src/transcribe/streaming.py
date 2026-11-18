@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
+import math
 import os
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -19,6 +22,12 @@ from typing import Awaitable, Callable
 
 import numpy as np
 
+from src.config import config
+from src.audio.resource_monitor import (
+    ResourceBusyError,
+    ResourceMonitor,
+    model_resource_gate,
+)
 from src.speakers import speaker_memory
 from src.transcribe.hallucination_filter import HallucinationFilter
 
@@ -29,22 +38,42 @@ SAMPLE_RATE = 16000
 
 
 # ─── システム負荷を抑えるための初期設定 ──────────────────────────
-# MLX (Apple Metal) のメモリキャップを relaxed モードで設定。
-# 必要に応じてキャップを超えられるが、通常時は他アプリ用の余白を確保。
+# MLX (Apple Metal) のメモリ目安を設定。
+# MLXのバージョンに応じて、top-level APIまたは旧metal APIを使う。
 try:
     import mlx.core as _mx  # type: ignore
     import psutil as _psutil  # type: ignore
     _total_gb = _psutil.virtual_memory().total / (1024 ** 3)
-    # システム RAM の 40% を上限に。relaxed=True なので必要時は超えられる
+    # 既定はシステム RAM の 40% を上限に (設定 whisper.performance.mlx_memory_ratio)。
     # 16GB Mac → 約 6GB / 32GB → 約 13GB
-    _cap_gb = min(20, max(4, int(_total_gb * 0.4)))
+    try:
+        _mem_ratio = max(0.2, min(0.8, float(
+            config.get("whisper", "performance", "mlx_memory_ratio", default=0.4)
+        )))
+    except Exception:
+        _mem_ratio = 0.4
+    _cap_gb = min(24, max(4, int(_total_gb * _mem_ratio)))
     _cap_bytes = _cap_gb * 1024 * 1024 * 1024
     try:
-        if hasattr(_mx, "metal") and hasattr(_mx.metal, "set_memory_limit"):
-            _mx.metal.set_memory_limit(_cap_bytes, relaxed=True)
-            logger.info("MLX Metal memory cap: %d GB (relaxed)", _cap_gb)
-        # キャッシュも緩めに
-        if hasattr(_mx, "metal") and hasattr(_mx.metal, "set_cache_limit"):
+        _memory_limit_mode: str | None = None
+        memory_limit = getattr(_mx, "set_memory_limit", None)
+        cache_limit = getattr(_mx, "set_cache_limit", None)
+        if callable(memory_limit):
+            memory_limit(_cap_bytes)
+            _memory_limit_mode = "limit"
+        elif hasattr(_mx, "metal") and hasattr(_mx.metal, "set_memory_limit"):
+            try:
+                _mx.metal.set_memory_limit(_cap_bytes, relaxed=True)
+                _memory_limit_mode = "relaxed"
+            except TypeError:
+                # MLX 0.31.x does not expose the relaxed keyword.
+                _mx.metal.set_memory_limit(_cap_bytes)
+                _memory_limit_mode = "limit"
+        if _memory_limit_mode is not None:
+            logger.info("MLX Metal memory cap: %d GB (%s)", _cap_gb, _memory_limit_mode)
+        if callable(cache_limit):
+            cache_limit(int(_cap_bytes * 0.5))
+        elif hasattr(_mx, "metal") and hasattr(_mx.metal, "set_cache_limit"):
             _mx.metal.set_cache_limit(int(_cap_bytes * 0.5))
     except Exception as _e:
         logger.debug("MLX memory cap not applied: %s", _e)
@@ -67,6 +96,27 @@ MLX_REPO_MAP = {
     "large-v3": "mlx-community/whisper-large-v3-mlx",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
+
+WHISPER_MODEL_LABELS = {
+    "tiny": "Tiny",
+    "base": "Base",
+    "small": "Small",
+    "medium": "Medium",
+    "large-v1": "Large v1",
+    "large-v2": "Large v2",
+    "large-v3": "Large v3",
+    "large-v3-turbo": "Large v3 Turbo",
+}
+WHISPER_MODEL_NAMES = (
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large-v3-turbo",
+)
 
 
 def _resolve_repo(model_name: str) -> str:
@@ -131,24 +181,338 @@ def _resolve_cached_snapshot(repo: str) -> str | None:
         return None
 
     model_dir = _repo_cache_dir(repo)
+
+    def is_valid_snapshot(snap: Path) -> bool:
+        return (
+            snap.is_dir()
+            and any((snap / name).exists() for name in ("weights.safetensors", "weights.npz"))
+            and (snap / "config.json").exists()
+        )
+
     ref_main = model_dir / "refs" / "main"
-    if not ref_main.exists():
-        return None
+    if ref_main.exists():
+        try:
+            revision = ref_main.read_text(encoding="utf-8").strip()
+        except OSError:
+            revision = ""
+        if revision:
+            snap = model_dir / "snapshots" / revision
+            if is_valid_snapshot(snap):
+                return str(snap)
+
+    # HF Hub の途中更新や古いキャッシュでは refs/main が無いことがある。
+    # 必須ファイルが揃った snapshot は再ダウンロードせず、そのまま利用する。
+    snapshots_dir = model_dir / "snapshots"
     try:
-        revision = ref_main.read_text(encoding="utf-8").strip()
-    except Exception:
+        snapshots = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+        snapshots.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
         return None
-    if not revision:
+    return next((str(path) for path in snapshots if is_valid_snapshot(path)), None)
+
+
+# ─── Whisper モデルのダウンロード/キャッシュ管理 ─────────────────────
+# HF Hub の snapshot_download を全 caller で共有し、設定画面と録音中の UI が
+# 同じ状態を参照できるようにする。ダウンロードは常に1件ずつ実行する。
+_download_condition = threading.Condition()
+_download_active_repo: str | None = None
+_download_token = 0
+_download_status: dict[str, object] = {
+    "state": "idle",  # idle | downloading | ready | error
+    "model": None,
+    "repo": None,
+    "current_bytes": 0,
+    "total_bytes": 0,
+    "percent": None,
+    "speed_bytes_per_sec": None,
+    "error": None,
+}
+
+
+def _known_whisper_model(model_name: str) -> tuple[str, str]:
+    name = str(model_name or "").strip()
+    repo = MLX_REPO_MAP.get(name)
+    if repo is None:
+        raise ValueError(f"未対応のWhisperモデルです: {name or '(empty)'}")
+    return name, repo
+
+
+def _set_download_status(**updates: object) -> None:
+    with _download_condition:
+        _download_status.update(updates)
+        _download_condition.notify_all()
+
+
+def get_whisper_download_status() -> dict[str, object]:
+    with _download_condition:
+        return dict(_download_status)
+
+
+def _update_download_progress(
+    current_bytes: int,
+    total_bytes: int,
+    speed_bytes_per_sec: float | None = None,
+) -> None:
+    total = max(0, int(total_bytes))
+    current = max(0, int(current_bytes))
+    percent = (current / total * 100.0) if total > 0 else None
+    updates: dict[str, object] = {
+        "current_bytes": current,
+        "total_bytes": total,
+        "percent": round(min(100.0, percent), 1) if percent is not None else None,
+    }
+    if speed_bytes_per_sec is not None:
+        try:
+            speed = float(speed_bytes_per_sec)
+        except (TypeError, ValueError):
+            speed = 0.0
+        if math.isfinite(speed) and speed > 0:
+            updates["speed_bytes_per_sec"] = round(speed, 1)
+    _set_download_status(**updates)
+
+
+try:
+    from tqdm.auto import tqdm as _BaseTqdm
+except Exception:  # pragma: no cover - tqdm is an mlx-whisper dependency
+    _BaseTqdm = object  # type: ignore[assignment,misc]
+
+
+class _ProgressSink:
+    """tqdm の表示を捨てる。StringIO と違ってDL中にログを蓄積しない。"""
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
         return None
 
-    snap = model_dir / "snapshots" / revision
-    if not snap.exists():
-        return None
-    if not (snap / "weights.npz").exists():
-        return None
-    if not (snap / "config.json").exists():
-        return None
-    return str(snap)
+
+class _DownloadTqdm(_BaseTqdm):
+    """Hugging Face の集約バイト進捗をアプリ状態へ転送する。"""
+
+    def __init__(self, *args, **kwargs):
+        self._is_byte_bar = kwargs.get("unit") == "B"
+        # HF Hub 1.x は name を独自に渡す。画面/標準エラーには出さない。
+        kwargs.pop("name", None)
+        kwargs["disable"] = False
+        kwargs["file"] = _ProgressSink()
+        super().__init__(*args, **kwargs)
+        self._publish()
+
+    def _publish(self) -> None:
+        if self._is_byte_bar:
+            rate = self.format_dict.get("rate")
+            _update_download_progress(self.n, self.total or 0, rate)
+
+    def update(self, n=1):
+        result = super().update(n)
+        self._publish()
+        return result
+
+    def refresh(self, *args, **kwargs):
+        result = super().refresh(*args, **kwargs)
+        self._publish()
+        return result
+
+
+def _claim_download(model_name: str, repo: str) -> int:
+    global _download_active_repo, _download_token
+    _download_token += 1
+    _download_active_repo = repo
+    _download_status.update({
+        "state": "downloading",
+        "model": model_name,
+        "repo": repo,
+        "current_bytes": 0,
+        "total_bytes": 0,
+        "percent": None,
+        "speed_bytes_per_sec": None,
+        "error": None,
+    })
+    return _download_token
+
+
+def _run_download(model_name: str, repo: str, token: int) -> str:
+    global _download_active_repo
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=repo,
+            cache_dir=_hf_cache_root(),
+            tqdm_class=_DownloadTqdm,
+        )
+        snapshot = _resolve_cached_snapshot(repo)
+        if snapshot is None:
+            raise RuntimeError(
+                "モデルの必須ファイル(weights.safetensors/weights.npz/config.json)が見つかりません"
+            )
+        with _download_condition:
+            total_progress = int(_download_status.get("total_bytes") or 0)
+        total = max(total_progress, _estimate_repo_cache_bytes(repo))
+        with _download_condition:
+            if token == _download_token and _download_active_repo == repo:
+                _download_status.update({
+                    "state": "ready",
+                    "current_bytes": total,
+                    "total_bytes": total,
+                    "percent": 100.0,
+                    "speed_bytes_per_sec": None,
+                    "error": None,
+                })
+                _download_condition.notify_all()
+        return snapshot
+    except Exception as exc:
+        with _download_condition:
+            if token == _download_token and _download_active_repo == repo:
+                _download_status.update({
+                    "state": "error",
+                    "error": str(exc),
+                })
+                _download_condition.notify_all()
+        raise
+    finally:
+        with _download_condition:
+            if token == _download_token and _download_active_repo == repo:
+                _download_active_repo = None
+                _download_condition.notify_all()
+
+
+def ensure_model_downloaded(model_name: str) -> str:
+    """モデルをキャッシュへ配置し、ロード対象の snapshot path を返す。"""
+    raw_name = str(model_name or "").strip()
+    if "/" in raw_name:
+        name, repo = raw_name, _resolve_repo(raw_name)
+    else:
+        name, repo = _known_whisper_model(raw_name)
+    while True:
+        with _download_condition:
+            cached = _resolve_cached_snapshot(repo)
+            if cached is not None and _download_active_repo != repo:
+                if _download_active_repo is None:
+                    total = _estimate_repo_cache_bytes(repo)
+                    _download_status.update({
+                        "state": "ready",
+                        "model": name,
+                        "repo": repo,
+                        "current_bytes": total,
+                        "total_bytes": total,
+                        "percent": 100.0,
+                        "speed_bytes_per_sec": None,
+                        "error": None,
+                    })
+                    _download_condition.notify_all()
+                return cached
+
+            active_repo = _download_active_repo
+            active_token = _download_token
+            if active_repo is not None:
+                _download_condition.wait(timeout=1.0)
+                if (
+                    active_repo == repo
+                    and _download_active_repo is None
+                    and _download_token == active_token
+                    and _download_status.get("state") == "error"
+                ):
+                    raise RuntimeError(str(_download_status.get("error") or "モデルのダウンロードに失敗しました"))
+                continue
+
+            token = _claim_download(name, repo)
+        return _run_download(name, repo, token)
+
+
+def start_whisper_model_download(model_name: str) -> dict[str, object]:
+    """API 用の非同期モデルダウンロード開始。"""
+    name, repo = _known_whisper_model(model_name)
+    with _download_condition:
+        if _download_active_repo is not None:
+            if _download_active_repo == repo:
+                return dict(_download_status)
+            raise RuntimeError("別のWhisperモデルをダウンロード中です")
+
+        cached = _resolve_cached_snapshot(repo)
+        if cached is not None:
+            _download_status.update({
+                "state": "ready",
+                "model": name,
+                "repo": repo,
+                "current_bytes": _estimate_repo_cache_bytes(repo),
+                "total_bytes": _estimate_repo_cache_bytes(repo),
+                "percent": 100.0,
+                "speed_bytes_per_sec": None,
+                "error": None,
+            })
+            return dict(_download_status)
+        token = _claim_download(name, repo)
+
+    threading.Thread(
+        target=_download_worker,
+        args=(name, repo, token),
+        daemon=True,
+        name=f"whisper-download-{name}",
+    ).start()
+    return get_whisper_download_status()
+
+
+def _download_worker(model_name: str, repo: str, token: int) -> None:
+    try:
+        _run_download(model_name, repo, token)
+    except Exception:
+        logger.exception("Whisper model download failed: %s", repo)
+
+
+def delete_whisper_model(model_name: str) -> None:
+    """既知モデルの HF キャッシュを削除する。録音中は削除しない。"""
+    _name, repo = _known_whisper_model(model_name)
+    with _download_condition:
+        if _download_active_repo == repo:
+            raise RuntimeError("ダウンロード中のモデルは削除できません")
+    if model_resource_gate.snapshot().get("whisper_users", 0):
+        raise RuntimeError("録音中はWhisperモデルを削除できません")
+    with _load_lock:
+        loaded = _loaded_repo == repo
+    if loaded:
+        unload_model()
+    shutil.rmtree(_repo_cache_dir(repo), ignore_errors=False)
+    with _download_condition:
+        if _download_status.get("repo") == repo:
+            _download_status.update({
+                "state": "idle",
+                "model": None,
+                "repo": None,
+                "current_bytes": 0,
+                "total_bytes": 0,
+                "percent": None,
+                "speed_bytes_per_sec": None,
+                "error": None,
+            })
+        _download_condition.notify_all()
+
+
+def get_whisper_model_catalog() -> dict[str, object]:
+    download = get_whisper_download_status()
+    with _load_lock:
+        loaded_repo = _loaded_repo
+    models: list[dict[str, object]] = []
+    for name in WHISPER_MODEL_NAMES:
+        repo = MLX_REPO_MAP[name]
+        snapshot = _resolve_cached_snapshot(repo)
+        downloaded = snapshot is not None
+        state = "downloaded" if downloaded else "not_downloaded"
+        if loaded_repo == repo:
+            state = "loaded"
+        if download.get("model") == name and download.get("state") in {"downloading", "error"}:
+            state = str(download["state"])
+        models.append({
+            "name": name,
+            "label": WHISPER_MODEL_LABELS.get(name, name),
+            "repo": repo,
+            "state": state,
+            "downloaded": downloaded,
+            "loaded": loaded_repo == repo,
+            "size_bytes": _estimate_repo_cache_bytes(repo),
+        })
+    return {"models": models, "download": download}
 
 
 _loaded_repo: str | None = None
@@ -160,13 +524,57 @@ _loading_token: int = 0
 _load_error: str | None = None
 _loading_progress_bytes: int = 0
 _loading_progress_at: float | None = None
+_resource_monitor = ResourceMonitor()
 
 
-def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
+def unload_model() -> None:
+    """mlx-whisper のモデル参照と MLX キャッシュを解放する。"""
+    global _loaded_repo, _load_error, _loading_progress_bytes, _loading_progress_at
+
+    with _load_lock:
+        if _loading_repo is not None:
+            logger.warning("Skip Whisper unload while model loading is active")
+            return
+        _loaded_repo = None
+        _load_error = None
+        _loading_progress_bytes = 0
+        _loading_progress_at = None
+        _load_event.clear()
+
+    try:
+        from mlx_whisper.transcribe import ModelHolder
+
+        ModelHolder.model = None
+        ModelHolder.model_path = None
+    except Exception as exc:
+        logger.debug("mlx-whisper model holder could not be cleared: %s", exc)
+
+    try:
+        import mlx.core as mx
+
+        if hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+        elif hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+            mx.metal.clear_cache()
+    except Exception as exc:
+        logger.debug("MLX cache could not be cleared: %s", exc)
+    gc.collect()
+    logger.info("Whisper model unloaded")
+
+
+def get_or_load_model(
+    model_name: str,
+    timeout_sec: float = 120.0,
+    *,
+    allow_stale_takeover: bool = False,
+) -> str:
     """指定モデルを mlx-whisper にロードさせる(repo path を返す)。
 
-    mlx-whisper は load_model() に LRU キャッシュを持つので、同じ repo で
+    mlx-whisper は ModelHolder にモデル参照を保持するので、同じ repo で
     再度呼んでも実ロードは初回のみ。
+
+    allow_stale_takeover=True は復旧用の明示モード。通常 caller は timeout_sec を
+    待機上限として扱い、他 thread の loader が固着していても自動引き継ぎしない。
     """
     global _loaded_repo, _loading_repo, _loading_started_at, _loading_token, _load_error
     global _loading_progress_bytes, _loading_progress_at
@@ -194,7 +602,7 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
         if should_load:
             try:
                 from mlx_whisper.load_models import load_model
-                load_target = _resolve_cached_snapshot(repo) or repo
+                load_target = ensure_model_downloaded(model_name)
                 t0 = time.time()
                 logger.info(
                     "Loading mlx-whisper model: %s (target=%s, token=%d)",
@@ -261,8 +669,8 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
                 now_mono = time.monotonic()
                 load_age = (now_mono - loading_started_at) if loading_started_at else 0.0
 
-            # ダウンロード/キャッシュ書き込みが進行している間は timeout を延長する。
-            # (例: 2~4GB モデルの初回取得中)
+            # 復旧モードでは、ダウンロード/キャッシュ書き込みが進行している間だけ
+            # lease を延長する。通常 caller は timeout_sec を超えて待たない。
             if loading_repo and loading_started_at:
                 current_cache_bytes = _estimate_repo_cache_bytes(loading_repo)
                 cache_delta = current_cache_bytes - loading_progress_bytes
@@ -280,8 +688,9 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
                         cache_delta / (1024 * 1024),
                         current_cache_bytes / (1024 * 1024),
                     )
-                    deadline = time.monotonic() + timeout_sec
-                    continue
+                    if allow_stale_takeover:
+                        deadline = time.monotonic() + timeout_sec
+                        continue
 
             idle_since_progress = (
                 (now_mono - loading_progress_at)
@@ -292,7 +701,8 @@ def get_or_load_model(model_name: str, timeout_sec: float = 120.0) -> str:
             with _load_lock:
                 # ロード担当が固着した場合は貸与を失効させ、次ループで再ロードを試みる。
                 if (
-                    loading_repo
+                    allow_stale_takeover
+                    and loading_repo
                     and loading_started_at
                     and load_age >= timeout_sec
                     and idle_since_progress >= timeout_sec
@@ -367,6 +777,45 @@ def build_initial_prompt(glossary: list[str], recent_text: str = "") -> str:
             recent = recent[-budget:]
             return f"{glossary_str} {recent}".strip() if glossary_str else recent
     return glossary_str
+
+
+def estimate_chunker_pending_sec(chunker: object, sample_rate: int = SAMPLE_RATE) -> float:
+    """chunker 内に未確定で保持されている末尾 audio 秒数を返す。"""
+    pending = 0.0
+    frames_ms = getattr(chunker, "_frames_ms", None)
+    if frames_ms is not None:
+        try:
+            pending += max(0.0, float(frames_ms) / 1000.0)
+        except Exception:
+            pass
+    stream_buf = getattr(chunker, "_stream_buffer", None)
+    if stream_buf is not None:
+        try:
+            pending += max(0.0, len(stream_buf) / sample_rate)
+        except Exception:
+            pass
+    pending_emit = getattr(chunker, "_pending_emit", None)
+    if pending_emit is not None:
+        try:
+            pending += sum(
+                max(0.0, len(ch) / sample_rate) for ch in pending_emit if ch is not None
+            )
+        except Exception:
+            pass
+    return pending
+
+
+def compute_chunk_start_offset(
+    total_audio_sec: float,
+    chunk_samples: int,
+    chunker: object,
+    sample_rate: int = SAMPLE_RATE,
+) -> float:
+    """feed 済み総時間と chunker の保留分から、確定 chunk の開始時刻を計算する。"""
+    chunk_dur = chunk_samples / sample_rate
+    pending_after_emit = estimate_chunker_pending_sec(chunker, sample_rate=sample_rate)
+    chunk_end = max(0.0, total_audio_sec - pending_after_emit)
+    return max(0.0, chunk_end - chunk_dur)
 
 
 class VADChunker:
@@ -708,10 +1157,12 @@ class StreamingTranscriber:
                  hallucination_cfg: dict | None = None,
                  glossary: list[str] | None = None,
                  corrections: list[tuple[str, str]] | None = None,
-                 vad_provider: str = "silero") -> None:
+                 vad_provider: str = "silero",
+                 on_preview: Callable[[dict], Awaitable[None]] | None = None) -> None:
         self.model_name = model_name
         self.language = language
         self._on_segment = on_segment
+        self._on_preview = on_preview
         self._session_id = session_id
         self._vad_provider = (vad_provider or "silero").lower()
         self._chunker = self._build_chunker(chunker_kwargs or {})
@@ -734,6 +1185,7 @@ class StreamingTranscriber:
         self._model_load_timeout_sec = max(5.0, float(model_load_timeout_sec))
         self._flush_join_timeout_sec = max(5.0, float(flush_join_timeout_sec))
         self._worker: threading.Thread | None = None
+        self._worker_count = 0
         self._worker_lock = threading.Lock()
         self._active_generation = 0
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -760,6 +1212,11 @@ class StreamingTranscriber:
         self._dropped_audio_sec: float = 0.0
         self._transcribe_errors: int = 0
         self._filtered_segments: int = 0
+        # リソーススロットル (whisper.performance): 直近チャンクで挿入した休止秒数
+        self._last_throttle_sec: float = 0.0
+        self._last_resource_pressure: str | None = None
+        self._resource_lease = False
+        self._resource_lease_lock = threading.Lock()
 
     @property
     def segments(self) -> list[dict]:
@@ -859,41 +1316,50 @@ class StreamingTranscriber:
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         if self._running:
             return
-        self._loop = loop
-        self._running = True
-        with self._segments_lock:
-            self._segments = []
-        self._total_audio_sec = 0.0
-        # 既存の chunker パラメータを保持して再構築
-        prev = self._chunker
-        kwargs: dict = {
-            "sample_rate": prev.sample_rate,
-            "silence_duration_ms": prev.silence_duration_ms,
-            "min_chunk_ms": prev.min_chunk_ms,
-            "max_chunk_ms": prev.max_chunk_ms,
-        }
-        if hasattr(prev, "rms_threshold"):
-            kwargs["rms_threshold"] = prev.rms_threshold
-        if hasattr(prev, "threshold"):
-            kwargs["threshold"] = prev.threshold
-        if hasattr(prev, "smart_cut_lookback_ms"):
-            kwargs["smart_cut_lookback_ms"] = prev.smart_cut_lookback_ms
-        self._chunker = self._build_chunker(kwargs)
-        self._model_loaded.clear()
-        self._model_error = None
-        self._recent_ratios = []
-        self._pending_audio_sec = 0.0
-        self._last_processed_at = 0.0
-        self._last_feed_at = 0.0
-        self._worker_restarts = 0
-        self._last_restart_reason = None
-        self._last_restart_at = 0.0
-        self._dropped_chunks = 0
-        self._dropped_audio_sec = 0.0
-        self._transcribe_errors = 0
-        self._filtered_segments = 0
-        self._clear_queue()
-        self._spawn_worker(reason="start", force=True)
+        if not model_resource_gate.try_acquire_whisper():
+            raise ResourceBusyError("Whisper resource is busy with a local LLM")
+        self._resource_lease = True
+        try:
+            self._loop = loop
+            self._running = True
+            with self._segments_lock:
+                self._segments = []
+            self._total_audio_sec = 0.0
+            # 既存の chunker パラメータを保持して再構築
+            prev = self._chunker
+            kwargs: dict = {
+                "sample_rate": prev.sample_rate,
+                "silence_duration_ms": prev.silence_duration_ms,
+                "min_chunk_ms": prev.min_chunk_ms,
+                "max_chunk_ms": prev.max_chunk_ms,
+            }
+            if hasattr(prev, "rms_threshold"):
+                kwargs["rms_threshold"] = prev.rms_threshold
+            if hasattr(prev, "threshold"):
+                kwargs["threshold"] = prev.threshold
+            if hasattr(prev, "smart_cut_lookback_ms"):
+                kwargs["smart_cut_lookback_ms"] = prev.smart_cut_lookback_ms
+            self._chunker = self._build_chunker(kwargs)
+            self._model_loaded.clear()
+            self._model_error = None
+            self._recent_ratios = []
+            self._pending_audio_sec = 0.0
+            self._last_processed_at = 0.0
+            self._last_feed_at = 0.0
+            self._worker_restarts = 0
+            self._last_restart_reason = None
+            self._last_restart_at = 0.0
+            self._dropped_chunks = 0
+            self._dropped_audio_sec = 0.0
+            self._transcribe_errors = 0
+            self._filtered_segments = 0
+            self._clear_queue()
+            if not self._spawn_worker(reason="start", force=True):
+                raise RuntimeError("Whisper worker could not be started")
+        except Exception:
+            self._running = False
+            self._release_resource_lease()
+            raise
 
     def feed(self, samples_f32: np.ndarray) -> None:
         """16kHz mono float32 サンプルを投入(任意のスレッドから)。"""
@@ -904,15 +1370,20 @@ class StreamingTranscriber:
         self._last_feed_at = time.monotonic()
         self._total_audio_sec += len(samples_f32) / SAMPLE_RATE
         chunk = self._chunker.feed(samples_f32)
-        if chunk is not None:
+        while chunk is not None:
             self._enqueue(chunk)
+            # SileroVADChunker は 1 feed で複数 chunk が確定し得るため、
+            # 空 feed で pending emit を取り切る。
+            chunk = self._chunker.feed(np.zeros(0, dtype=np.float32))
 
     def flush(self) -> list[dict]:
         """残バッファを処理してワーカー終了を待つ。全 segment を返す。"""
         if not self._running:
             return self.segments
-        chunk = self._chunker.flush()
-        if chunk is not None:
+        while True:
+            chunk = self._chunker.flush()
+            if chunk is None:
+                break
             self._enqueue(chunk)
         # ワーカー終了シグナル
         self._running = False
@@ -954,12 +1425,40 @@ class StreamingTranscriber:
                 if current_progress > last_progress:
                     last_progress = current_progress
                     deadline = time.monotonic() + wait_sec
+        if self._worker_count == 0:
+            self._release_resource_lease()
         return self.segments
 
     def cleanup(self) -> None:
         self._running = False
         # mlx-whisper のキャッシュは load_model 側で保持。参照だけクリア。
         self._repo = None
+        if self._worker_count == 0:
+            self._release_resource_lease()
+
+    def _release_resource_lease(self) -> None:
+        with self._resource_lease_lock:
+            if not self._resource_lease:
+                return
+            self._resource_lease = False
+        # 最後の Whisper 利用者が解放する直前にモデルを落とす。
+        # ゲートの条件変数を保持したまま行うため、LLM の起動と競合しない。
+        model_resource_gate.release_whisper(before_release=unload_model)
+
+    def _run_worker_guarded(self, generation: int) -> None:
+        try:
+            self._run_worker(generation)
+        except BaseException:
+            logger.exception("Streaming worker crashed (gen=%d)", generation)
+            raise
+        finally:
+            with self._worker_lock:
+                self._worker_count = max(0, self._worker_count - 1)
+                should_release = self._worker_count == 0 and not self._running
+            # 録音中の異常終了は watchdog が次世代 worker を起動するため、
+            # 再起動前に共有モデルのリースを解放しない。
+            if should_release:
+                self._release_resource_lease()
 
     def restart_worker(self, reason: str, force: bool = False) -> bool:
         return self._spawn_worker(reason=reason, force=force)
@@ -989,6 +1488,7 @@ class StreamingTranscriber:
             "model_error": self.model_error,
             "model_state": model_state,
             "model_name": self.model_name,
+            "model_download": get_whisper_download_status(),
             "queue_size": self.queue_size,
             "queue_maxsize": self._queue_maxsize,
             "total_segments": self.total_segments,
@@ -1009,6 +1509,11 @@ class StreamingTranscriber:
             "dropped_audio_sec": round(self.dropped_audio_sec, 2),
             "transcribe_errors": self._transcribe_errors,
             "filtered_segments": self._filtered_segments,
+            "perf_mode": str(
+                config.get("whisper", "performance", "mode", default="auto")
+            ),
+            "last_throttle_sec": round(self._last_throttle_sec, 2),
+            "last_resource_pressure": self._last_resource_pressure,
         }
 
     def _clear_queue(self) -> None:
@@ -1018,9 +1523,17 @@ class StreamingTranscriber:
             except queue.Empty:
                 return
 
+    def _chunker_pending_sec(self) -> float:
+        return estimate_chunker_pending_sec(self._chunker, sample_rate=SAMPLE_RATE)
+
     def _enqueue(self, chunk: np.ndarray) -> None:
         chunk_dur = len(chunk) / SAMPLE_RATE
-        chunk_start = max(0.0, self._total_audio_sec - chunk_dur)
+        # 全 feed 済み audio から、chunker が保持している未確定末尾分を引くと、
+        # 「今回確定した chunk の終了時刻」が得られる。そこから dur を引いて先頭時刻化。
+        # これで smart-cut の tail 保持時も、無音ドロップ時も絶対時刻を維持できる。
+        pending_after_emit = self._chunker_pending_sec()
+        chunk_end = max(0.0, self._total_audio_sec - pending_after_emit)
+        chunk_start = max(0.0, chunk_end - chunk_dur)
         # backlog が溜まり過ぎるとメモリ逼迫で全体停止しやすいので古い chunk を破棄する。
         while self.pending_audio_sec >= self._max_pending_audio_sec:
             if not self._drop_oldest_chunk("pending limit"):
@@ -1081,13 +1594,18 @@ class StreamingTranscriber:
             self._active_generation += 1
             generation = self._active_generation
             worker = threading.Thread(
-                target=self._run_worker,
+                target=self._run_worker_guarded,
                 args=(generation,),
                 daemon=True,
                 name=f"streaming-transcriber-{generation}",
             )
             self._worker = worker
-            worker.start()
+            self._worker_count += 1
+            try:
+                worker.start()
+            except Exception:
+                self._worker_count = max(0, self._worker_count - 1)
+                raise
             if reason != "start":
                 self._worker_restarts += 1
                 self._last_restart_reason = reason
@@ -1095,12 +1613,58 @@ class StreamingTranscriber:
                 logger.warning("Streaming worker restarted (reason=%s, gen=%d)", reason, generation)
             return True
 
-    def _run_worker(self, generation: int) -> None:
-        # 他アプリへの影響軽減のため少しだけ priority 下げる(snappy 優先)
+    def _throttle_pause_sec(self, processing_elapsed: float) -> float:
+        """whisper.performance 設定に基づき、チャンク処理後に挿入する休止秒数を返す。
+
+        - full: 常に 0 (全力)
+        - eco : 常に processing_elapsed × throttle_ratio (上限 max_throttle_sec)
+        - auto: CPU またはシステムメモリが閾値以上のときのみ eco と同じ休止
+        """
+        perf = config.get("whisper", "performance", default={}) or {}
+        mode = str(perf.get("mode", "auto")).lower()
+        if mode not in ("auto", "eco"):
+            return 0.0
         try:
-            import os
-            os.nice(3)
-        except (OSError, AttributeError):
+            ratio = max(0.0, min(3.0, float(perf.get("throttle_ratio", 0.5))))
+            max_pause = max(0.0, min(10.0, float(perf.get("max_throttle_sec", 3.0))))
+        except Exception:
+            ratio, max_pause = 0.5, 3.0
+        if ratio <= 0.0 or max_pause <= 0.0 or processing_elapsed <= 0.0:
+            return 0.0
+        if mode == "auto":
+            try:
+                cpu_threshold = float(perf.get("cpu_high_threshold", 75.0))
+                memory_threshold = float(perf.get("memory_high_threshold", 85.0))
+            except Exception:
+                cpu_threshold, memory_threshold = 75.0, 85.0
+            throttled, pressures = _resource_monitor.pressure(
+                cpu_threshold=cpu_threshold,
+                memory_threshold=memory_threshold,
+            )
+            self._last_resource_pressure = ",".join(pressures) or None
+            if not throttled:
+                return 0.0
+        else:
+            self._last_resource_pressure = "eco"
+        return min(max_pause, processing_elapsed * ratio)
+
+    def _throttle_sleep(self, pause_sec: float, generation: int) -> None:
+        """スロットル休止。世代交代 (worker restart) 時は即座に抜ける。"""
+        deadline = time.monotonic() + pause_sec
+        while time.monotonic() < deadline:
+            if generation != self._active_generation:
+                return
+            time.sleep(0.1)
+
+    def _run_worker(self, generation: int) -> None:
+        # 他アプリへの影響軽減のため Seam バックエンドの priority を下げる。
+        # os.nice() は加算式でプロセス全体に効くため、設定値を絶対値で適用する。
+        try:
+            nice_val = int(
+                config.get("whisper", "performance", "worker_nice", default=3)
+            )
+            _resource_monitor.apply_process_priority(nice_val)
+        except (OSError, AttributeError, ValueError, TypeError):
             pass
 
         try:
@@ -1145,8 +1709,16 @@ class StreamingTranscriber:
                 if item is None:
                     break
                 chunk_audio, chunk_start = item
+                t_chunk_start = time.monotonic()
                 self._transcribe(chunk_audio, chunk_start, generation)
                 self._last_processed_at = time.monotonic()
+                # リソーススロットル: 設定に応じてチャンク間に休止を挿入し、
+                # CPU/GPU の占有率を下げる (レイテンシと引き換え)。
+                pause = self._throttle_pause_sec(time.monotonic() - t_chunk_start)
+                self._last_throttle_sec = pause
+                if pause > 0:
+                    logger.debug("Streaming throttle: pausing %.2fs", pause)
+                    self._throttle_sleep(pause, generation)
             except KeyboardInterrupt:
                 raise
             except Exception as e:
@@ -1160,6 +1732,7 @@ class StreamingTranscriber:
             return
         chunk_dur = len(audio) / SAMPLE_RATE
         speaker_meta: dict | None = None
+        preview_start: float | None = None
         is_active_generation = generation == self._active_generation
         if is_active_generation:
             self._current_chunk_audio_sec = chunk_dur
@@ -1195,23 +1768,23 @@ class StreamingTranscriber:
                 audio.astype(np.float32),
                 **kwargs,
             )
-            try:
-                speaker_meta = speaker_memory.identify(
-                    audio,
-                    SAMPLE_RATE,
-                    session_id=self._session_id,
-                    start_sec=start_offset,
-                    end_sec=start_offset + chunk_dur,
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after decode "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
                 )
-            except Exception as e:
-                logger.warning("speaker identify failed: %s", e)
+                return
             new_segments: list[dict] = []
+            filtered_segments = 0
             for seg in result.get("segments", []):
                 text = (seg.get("text") or "").strip()
                 if not text:
                     continue
                 if self._hallucination_filter.is_hallucination(text):
-                    self._filtered_segments += 1
+                    filtered_segments += 1
                     logger.info("Filtered hallucination segment: %s", text[:80])
                     continue
                 # corrections (wrong→correct) をリアルタイムに適用。要約後の post-process
@@ -1242,38 +1815,98 @@ class StreamingTranscriber:
                     "end": round(start_offset + float(seg.get("end", 0.0)), 2),
                     "text": text,
                     "words": words,
+                })
+            if new_segments and self._on_preview is not None:
+                with self._worker_lock:
+                    if generation == self._active_generation:
+                        preview_start = new_segments[0]["start"]
+                        self._emit_preview({
+                            "start": preview_start,
+                            "end": new_segments[-1]["end"],
+                            "text": " ".join(segment["text"] for segment in new_segments),
+                            "segments": [
+                                {key: segment[key] for key in ("start", "end", "text")}
+                                for segment in new_segments
+                            ],
+                        })
+            try:
+                if new_segments:
+                    speaker_meta = speaker_memory.identify(
+                        audio,
+                        SAMPLE_RATE,
+                        session_id=self._session_id,
+                        start_sec=start_offset,
+                        end_sec=start_offset + chunk_dur,
+                    )
+            except Exception as e:
+                logger.warning("speaker identify failed: %s", e)
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after speaker identify "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
+                )
+                return
+            for segment in new_segments:
+                segment.update({
                     "speaker_id": (speaker_meta or {}).get("speaker_id"),
                     "speaker_label": (speaker_meta or {}).get("speaker_label"),
                     "speaker_confidence": (speaker_meta or {}).get("speaker_confidence"),
                 })
-            elapsed = time.time() - t0
-            ratio = chunk_dur / max(elapsed, 1e-3)
-            self._recent_ratios.append(ratio)
-            if len(self._recent_ratios) > 6:
-                self._recent_ratios.pop(0)
-            logger.info("Streaming transcribe: %.1fs audio → %d seg in %.1fs (%.1fx)",
-                        chunk_dur, len(new_segments), elapsed, ratio)
-            with self._segments_lock:
-                self._segments.extend(new_segments)
-            if new_segments:
-                tail = " ".join(s.get("text", "") for s in new_segments[-3:]).strip()
-                if tail:
-                    with self._recent_text_lock:
-                        # 直近 N チャンクぶんを保持。max ~ PROMPT_RECENT_CHARS で十分
-                        merged = (self._recent_text_tail + " " + tail).strip()
-                        self._recent_text_tail = merged[-PROMPT_RECENT_CHARS:]
-            for seg in new_segments:
-                self._emit(seg)
+            with self._worker_lock:
+                if generation != self._active_generation:
+                    logger.info(
+                        "Discarding stale transcribe result before apply "
+                        "(gen=%d, active=%d, audio=%.1fs, segments=%d)",
+                        generation,
+                        self._active_generation,
+                        chunk_dur,
+                        len(new_segments),
+                    )
+                    return
+                self._filtered_segments += filtered_segments
+                elapsed = time.time() - t0
+                ratio = chunk_dur / max(elapsed, 1e-3)
+                self._recent_ratios.append(ratio)
+                if len(self._recent_ratios) > 6:
+                    self._recent_ratios.pop(0)
+                logger.info("Streaming transcribe: %.1fs audio → %d seg in %.1fs (%.1fx)",
+                            chunk_dur, len(new_segments), elapsed, ratio)
+                with self._segments_lock:
+                    self._segments.extend(new_segments)
+                if new_segments:
+                    tail = " ".join(s.get("text", "") for s in new_segments[-3:]).strip()
+                    if tail:
+                        with self._recent_text_lock:
+                            # 直近 N チャンクぶんを保持。max ~ PROMPT_RECENT_CHARS で十分
+                            merged = (self._recent_text_tail + " " + tail).strip()
+                            self._recent_text_tail = merged[-PROMPT_RECENT_CHARS:]
+                for seg in new_segments:
+                    self._emit(seg)
         except Exception as e:
             self._transcribe_errors += 1
             logger.error("Streaming transcribe failed: %s", e)
         finally:
+            if preview_start is not None:
+                self._emit_preview({"start": preview_start, "text": ""})
             # 進捗トラッキングをリセット + pending を減算
             if is_active_generation and generation == self._active_generation:
                 self._current_chunk_started_at = None
                 self._current_chunk_audio_sec = 0.0
             with self._pending_lock:
                 self._pending_audio_sec = max(0.0, self._pending_audio_sec - chunk_dur)
+
+    def _emit_preview(self, preview: dict) -> None:
+        if self._on_preview is None or self._loop is None or self._loop.is_closed():
+            return
+        notification = self._on_preview(preview)
+        try:
+            asyncio.run_coroutine_threadsafe(notification, self._loop)
+        except RuntimeError:
+            if asyncio.iscoroutine(notification):
+                notification.close()
 
     def _emit(self, segment: dict) -> None:
         if self._on_segment is None or self._loop is None:

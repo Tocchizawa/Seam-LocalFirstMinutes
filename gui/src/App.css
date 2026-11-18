@@ -20,29 +20,29 @@
 /* ─── ダーク(デフォルト)───────────────────────────────────── */
 :root,
 [data-theme="dark"] {
-  /* 背景レイヤー: true black ベース */
-  --bg: #000000;
-  --surface: #0c0c0e;
-  --surface-2: #16161a;
-  --surface-3: #1f1f24;
-  --surface-pressed: #2a2a30;
+  /* Graphite and paper: quiet surfaces, with a single recorder-red accent. */
+  --bg: #18191b;
+  --surface: #202124;
+  --surface-2: #292b2f;
+  --surface-3: #323539;
+  --surface-pressed: #3c3f44;
 
   /* 線 */
-  --border: rgba(255, 255, 255, 0.1);
-  --border-hover: rgba(255, 255, 255, 0.12);
-  --border-strong: rgba(255, 255, 255, 0.18);
+  --border: rgba(238, 238, 239, 0.08);
+  --border-hover: rgba(238, 238, 239, 0.14);
+  --border-strong: rgba(238, 238, 239, 0.20);
 
   /* テキスト */
-  --t1: #f5f5f7;
-  --t2: rgba(245, 245, 247, 0.65);
-  --t3: rgba(245, 245, 247, 0.42);
-  --t4: rgba(245, 245, 247, 0.20);
+  --t1: #eeeeef;
+  --t2: #bdc0c5;
+  --t3: #a0a4ab;
+  --t4: #92969e;
 
   /* アクセント: 暖かいオレンジ */
-  --accent: #f97316;
-  --accent-bright: #fb923c;
-  --accent-soft: rgba(249, 115, 22, 0.14);
-  --accent-line: rgba(249, 115, 22, 0.30);
+  --accent: #ef916f;
+  --accent-bright: #ffa684;
+  --accent-soft: rgba(239, 145, 111, 0.12);
+  --accent-line: rgba(239, 145, 111, 0.30);
   --blue: #60a5fa;
   --green: #34d399;
   --yellow: #fbbf24;
@@ -50,59 +50,59 @@
   /* 状態色 */
   --danger: #f87171;
   --warning: #f59e0b;
-  --success: #10b981;
-  --success-soft: rgba(16, 185, 129, 0.12);
+  --success: #42aa80;
+  --success-soft: rgba(66, 170, 128, 0.12);
 
   /* on-accent (オレンジ上にのる文字) */
-  --on-accent: #0a0a0a;
+  --on-accent: #24150f;
 
   /* 影 */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.30);
+  --shadow-lg: 0 20px 56px rgba(0, 0, 0, 0.40);
 
   /* シェル */
-  --shell-bg: #000000;
-  --shell-border: rgba(255, 255, 255, 0.08);
-  --sidebar-bg: #050507;
-  --titlebar-bg: rgba(0, 0, 0, 0.6);
+  --shell-bg: #18191b;
+  --shell-border: rgba(238, 238, 239, 0.08);
+  --sidebar-bg: #141517;
+  --titlebar-bg: #18191b;
 
   /* dialog */
-  --dialog-bg: #16161a;
-  --dialog-border: rgba(255, 255, 255, 0.08);
+  --dialog-bg: #202124;
+  --dialog-border: rgba(238, 238, 239, 0.10);
 
   color-scheme: dark;
 }
 
 /* ─── ライト ───────────────────────────────────────────────── */
 [data-theme="light"] {
-  --bg: #fafafa;
+  --bg: #f7f7f6;
   --surface: #ffffff;
-  --surface-2: #f4f4f5;
-  --surface-3: #eaeaec;
-  --surface-pressed: #d4d4d8;
+  --surface-2: #eeeeed;
+  --surface-3: #e5e5e4;
+  --surface-pressed: #dcdddc;
 
-  --border: rgba(0, 0, 0, 0.08);
-  --border-hover: rgba(0, 0, 0, 0.14);
-  --border-strong: rgba(0, 0, 0, 0.20);
+  --border: rgba(32, 33, 36, 0.10);
+  --border-hover: rgba(32, 33, 36, 0.16);
+  --border-strong: rgba(32, 33, 36, 0.24);
 
-  --t1: #0a0a0a;
-  --t2: rgba(10, 10, 10, 0.65);
-  --t3: rgba(10, 10, 10, 0.42);
-  --t4: rgba(10, 10, 10, 0.20);
+  --t1: #202124;
+  --t2: #54575c;
+  --t3: #65696f;
+  --t4: #6d7177;
 
-  --accent: #ea580c;
-  --accent-bright: #f97316;
-  --accent-soft: rgba(234, 88, 12, 0.10);
-  --accent-line: rgba(234, 88, 12, 0.30);
+  --accent: #a13e25;
+  --accent-bright: #91351e;
+  --accent-soft: rgba(161, 62, 37, 0.10);
+  --accent-line: rgba(161, 62, 37, 0.27);
   --blue: #2563eb;
   --green: #059669;
   --yellow: #d97706;
 
   --danger: #dc2626;
   --warning: #d97706;
-  --success: #059669;
-  --success-soft: rgba(5, 150, 105, 0.10);
+  --success: #16835e;
+  --success-soft: rgba(22, 131, 94, 0.10);
 
   --on-accent: #ffffff;
 
@@ -110,13 +110,13 @@
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.16);
 
-  --shell-bg: #fafafa;
-  --shell-border: rgba(0, 0, 0, 0.08);
-  --sidebar-bg: #f4f4f5;
-  --titlebar-bg: rgba(255, 255, 255, 0.85);
+  --shell-bg: #f7f7f6;
+  --shell-border: rgba(32, 33, 36, 0.10);
+  --sidebar-bg: #efefee;
+  --titlebar-bg: #f7f7f6;
 
   --dialog-bg: #ffffff;
-  --dialog-border: rgba(0, 0, 0, 0.08);
+  --dialog-border: rgba(32, 33, 36, 0.12);
 
   color-scheme: light;
 }
@@ -219,6 +219,35 @@ button { font-family: inherit; }
 
 .input::placeholder { color: var(--t3); }
 
+.textarea {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--t1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+  line-height: 1.6;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.textarea:hover { border-color: var(--border-hover); }
+.textarea:focus { border-color: var(--blue); background: var(--surface-2); }
+.textarea::placeholder { color: var(--t3); }
+
+/* 要約 system prompt 編集用 */
+.prompt-editor {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  min-height: 240px;
+  white-space: pre-wrap;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -233,7 +262,10 @@ button { font-family: inherit; }
   border: 1px solid var(--border);
   border-radius: 8px;
   cursor: pointer;
-  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .btn:hover {
   background: var(--surface-2);
@@ -283,7 +315,9 @@ button { font-family: inherit; }
   border: none;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .icon-btn:hover { color: var(--t1); background: var(--surface-2); }
 .icon-btn:active { background: var(--surface-3); transform: scale(0.94); }
@@ -303,49 +337,14 @@ button { font-family: inherit; }
   border: 1px solid transparent;
   border-radius: 12px;
   cursor: pointer;
-  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .pill:hover { background: var(--surface-3); }
 .pill:active { background: var(--surface-pressed); transform: scale(0.97); }
 .pill:disabled { opacity: 0.4; cursor: not-allowed; }
 .pill .icon { color: var(--t2); }
-
-/* ─── Circle control button ─────────────────────────────── */
-/* 主要メディア操作ボタン。白丸 + black icon。 */
-.circle-btn {
-  width: 40px;
-  height: 40px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--t1);
-  color: var(--bg);
-  border: none;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1),
-              filter 140ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.circle-btn:hover { filter: brightness(0.92); }
-.circle-btn:active { transform: scale(0.92); }
-.circle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-.circle-btn-ghost {
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  color: var(--t2);
-}
-.circle-btn-ghost:hover {
-  border-color: var(--t2);
-  color: var(--t1);
-  filter: none;
-  background: var(--surface);
-}
-
-.circle-btn-accent {
-  background: var(--accent);
-  color: var(--on-accent);
-}
 
 /* ─── Status dot (Speaking 等) ──────────────────────────── */
 .status-dot {
@@ -411,73 +410,239 @@ button { font-family: inherit; }
 .flat-row:hover::before { opacity: 1; }
 
 .flat-row-actions { opacity: 0; transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1); }
-.flat-row:hover .flat-row-actions { opacity: 1; }
+.flat-row:hover .flat-row-actions,
+.search-result-card:hover .flat-row-actions { opacity: 1; }
 
-.flat-group-label {
-  display: block;
-  padding: 18px 18px 6px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+/* ─── Minutes list search bar (sticky header) ─────────── */
+.minutes-search-wrap {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 14px 20px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: saturate(140%) blur(8px);
+  -webkit-backdrop-filter: saturate(140%) blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.minutes-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.minutes-list-toolbar .search-bar {
+  flex: 1;
+  min-width: 0;
+}
+.minutes-list-toolbar-spacer {
+  flex: 1;
+  min-height: 32px;
+}
+.minutes-import-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.minutes-import-btn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.minutes-import-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--t1);
+  background: var(--surface-2);
+}
+.minutes-import-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.24);
+  z-index: 20;
+}
+.minutes-import-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--t2);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.minutes-import-menu-item:hover {
+  background: var(--surface-2);
+  color: var(--t1);
+}
+.minutes-list-state,
+.minutes-list-load-more {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 20px;
   color: var(--t3);
+  font-size: 12px;
+}
+.minutes-list-state {
+  min-height: 120px;
+}
+.minutes-list-state.is-error,
+.minutes-list-load-more.is-error {
+  color: var(--danger);
 }
 
-/* ─── Processing row (active → done → leaving) ─────────── */
-.proc-row {
-  /* base: flat-row のサブセット。背景遷移を追加 */
+/* ─── Minutes card (3-line layout) ────────────────────── */
+.minutes-card {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 18px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
   transition:
-    background 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 160ms cubic-bezier(0.16, 1, 0.3, 1),
     max-height 320ms cubic-bezier(0.7, 0, 0.3, 1),
     padding 320ms cubic-bezier(0.7, 0, 0.3, 1),
-    opacity 280ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 240ms cubic-bezier(0.16, 1, 0.3, 1),
     border-color 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: row-enter 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.minutes-card:hover { background: var(--surface); }
+.minutes-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.minutes-card:hover::before { opacity: 1; }
+
+.minutes-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.minutes-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--t3);
+  font-weight: 300;
+  letter-spacing: 0.01em;
+}
+.minutes-card-meta-sep {
+  color: var(--t4);
+}
+.minutes-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--t1);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.minutes-card-preview {
+  font-size: 12px;
+  color: var(--t3);
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.minutes-card-preview.is-empty {
+  color: var(--t4);
+  font-style: italic;
+}
+.minutes-card-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  line-height: 1.5;
+  min-width: 0;
+}
+.minutes-card-status.is-error {
+  color: var(--danger);
 }
 
-/* "done" 状態: 緑のフラッシュ + チェックがバウンスイン */
-.proc-row[data-anim="done"] {
+.minutes-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  align-self: center;
+}
+.minutes-card:hover .minutes-card-actions { opacity: 1; }
+
+.proc-card[data-anim="done"] {
   background: color-mix(in srgb, var(--success) 9%, transparent);
 }
-
-/* "leaving" 状態: 高さ・パディング・opacity を 0 へ */
-.proc-row[data-anim="leaving"] {
+.proc-card[data-anim="leaving"] {
   max-height: 0 !important;
   padding-top: 0 !important;
   padding-bottom: 0 !important;
   opacity: 0;
   border-bottom-color: transparent;
   pointer-events: none;
+  overflow: hidden;
 }
 
-/* ─── Icon swap (spinner ⇄ check) ─────────────────────── */
-.icon-stack {
-  position: relative;
+/* ─── Session recovery banner ──────────────────────────── */
+.recovery-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  animation: row-enter 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.recovery-banner-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
   height: 16px;
   flex-shrink: 0;
 }
-.icon-stack > * {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition:
-    opacity 280ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 360ms cubic-bezier(0.34, 1.6, 0.5, 1);
+.recovery-progress {
+  width: 80px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+  flex-shrink: 0;
 }
-.icon-stack .icon-active { opacity: 1; transform: scale(1); }
-.icon-stack .icon-done { opacity: 0; transform: scale(0.5) rotate(-30deg); }
-
-.proc-row[data-anim="done"] .icon-stack .icon-active,
-.proc-row[data-anim="leaving"] .icon-stack .icon-active {
-  opacity: 0;
-  transform: scale(0.5) rotate(30deg);
-}
-.proc-row[data-anim="done"] .icon-stack .icon-done,
-.proc-row[data-anim="leaving"] .icon-stack .icon-done {
-  opacity: 1;
-  transform: scale(1) rotate(0deg);
+.recovery-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 280ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ─── Status text crossfade ───────────────────────────── */
@@ -507,100 +672,6 @@ button { font-family: inherit; }
   flex-direction: column;
 }
 
-.sidebar-search {
-  width: 100%;
-  padding: 7px 10px 7px 28px;
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--t1);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  outline: none;
-  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.sidebar-search:focus { border-color: var(--accent-line); }
-.sidebar-search::placeholder { color: var(--t3); }
-
-.project-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 6px 5px 14px;
-  font-size: 12px;
-  color: var(--t2);
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  width: 100%;
-  font-family: inherit;
-  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
-              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.project-row:hover { color: var(--t1); background: var(--surface); }
-.project-row.active {
-  color: var(--t1);
-  background: var(--surface);
-}
-.project-row.active::before {
-  content: '';
-  position: absolute;
-  left: 0; top: 4px; bottom: 4px;
-  width: 2px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
-}
-
-.project-row-action {
-  width: 22px;
-  height: 22px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--t3);
-  background: transparent;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1),
-              color 160ms cubic-bezier(0.16, 1, 0.3, 1),
-              background 160ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.project-row:hover .project-row-action {
-  opacity: 1;
-}
-.project-row-action:hover {
-  color: var(--t1);
-  background: var(--surface-2);
-}
-.project-row-action.is-editing {
-  opacity: 1;
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-.project-row-action.is-editing:hover {
-  color: var(--accent);
-  background: var(--accent-soft);
-  filter: brightness(1.05);
-}
-
-/* 編集中(プロジェクト設定を開いている)プロジェクト行 */
-.project-row.editing {
-  background: var(--accent-soft);
-  color: var(--t1);
-}
-.project-row.editing::before {
-  content: '';
-  position: absolute;
-  left: 0; top: 4px; bottom: 4px;
-  width: 2px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
-}
-
 /* icon-btn の active 状態 (全体設定 gear など) */
 .icon-btn.is-active {
   color: var(--accent);
@@ -622,7 +693,9 @@ button { font-family: inherit; }
   color: var(--t3);
   font-size: 12px;
   cursor: pointer;
-  transition: all 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 150ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .settings-nav-item:hover {
   color: var(--t1);
@@ -632,6 +705,23 @@ button { font-family: inherit; }
   color: var(--t1);
   border-color: var(--border);
   background: var(--surface-2);
+}
+.settings-nav-group-title {
+  margin: 0 10px 5px;
+  color: var(--t4);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.settings-save-footer {
+  background: color-mix(in srgb, var(--dialog-bg) 94%, transparent);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -10px 22px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(12px);
+}
+[data-theme="light"] .settings-save-footer {
+  box-shadow: 0 -10px 22px rgba(0, 0, 0, 0.06);
 }
 
 /* ─── Radio card (設定画面のプロバイダ選択など) ──────── */
@@ -751,6 +841,9 @@ button { font-family: inherit; }
 }
 .s-rows {
   border-top: 1px solid var(--border);
+}
+.whisper-model-rows {
+  border-top: 0;
 }
 .s-row {
   display: flex;
@@ -997,7 +1090,9 @@ button { font-family: inherit; }
   justify-content: center;
   color: transparent;
   padding: 0;
-  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .spk-check:hover { border-color: var(--t2); }
 .spk-check.is-on {
@@ -1069,7 +1164,9 @@ button { font-family: inherit; }
   align-items: center;
   justify-content: center;
   color: var(--t2);
-  transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .spk-play-btn:hover {
   border-color: var(--accent);
@@ -1395,43 +1492,11 @@ button { font-family: inherit; }
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 10px 16px;
+  gap: 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   background: transparent;
   min-height: 64px;
-}
-
-/* ─── Record morph animation ──────────────────────────── */
-@keyframes rec-spawn {
-  from {
-    transform: scale(0.6) translateX(28px);
-    opacity: 0;
-  }
-  to {
-    transform: scale(1) translateX(0);
-    opacity: 1;
-  }
-}
-@keyframes rec-spawn-left {
-  from {
-    transform: scale(0.6) translateX(-28px);
-    opacity: 0;
-  }
-  to {
-    transform: scale(1) translateX(0);
-    opacity: 1;
-  }
-}
-@keyframes rec-collapse {
-  from { transform: scale(1); opacity: 1; }
-  to   { transform: scale(0.7); opacity: 0; }
-}
-.anim-rec-spawn {
-  animation: rec-spawn 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-.anim-rec-spawn-l {
-  animation: rec-spawn-left 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 /* ─── Drag region ─────────────────────────────────────── */
@@ -1446,91 +1511,6 @@ button { font-family: inherit; }
 }
 
 /* ─── Record controls (smooth transitions) ───────────── */
-.rec-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* Pause button: width animates 0 → 40px when entering rec state */
-.rec-pause {
-  height: 40px;
-  width: 0;
-  margin: 0;
-  padding: 0;
-  border-radius: 999px;
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  color: var(--t2);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  overflow: hidden;
-  flex-shrink: 0;
-  transition:
-    width 380ms cubic-bezier(0.34, 1.4, 0.5, 1),
-    opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
-    border-color 200ms ease,
-    background 200ms ease,
-    color 200ms ease;
-}
-.rec-pause:hover {
-  border-color: var(--t2);
-  color: var(--t1);
-  background: var(--surface);
-}
-.rec-pause:active { transform: scale(0.94); }
-
-.rec-controls[data-state="rec"] .rec-pause {
-  width: 40px;
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* Main button: stays in place, only icon + bg morph */
-.rec-main {
-  position: relative;
-  width: 44px;
-  height: 44px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition:
-    background 240ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.rec-main:hover { filter: brightness(0.93); }
-.rec-main:active { transform: scale(0.94); }
-
-.rec-main-icon {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition:
-    opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 240ms cubic-bezier(0.34, 1.6, 0.5, 1);
-}
-.rec-main-icon-mic { opacity: 1; transform: scale(1) rotate(0deg); }
-.rec-main-icon-stop { opacity: 0; transform: scale(0.5) rotate(-90deg); }
-
-.rec-controls[data-state="rec"] .rec-main-icon-mic {
-  opacity: 0;
-  transform: scale(0.5) rotate(90deg);
-}
-.rec-controls[data-state="rec"] .rec-main-icon-stop {
-  opacity: 1;
-  transform: scale(1) rotate(0deg);
-}
-
-/* ─── Timer tick ──────────────────────────────────────── */
 @keyframes tick-in {
   0%   { opacity: 0.55; transform: translateY(-2px); }
   60%  { opacity: 1; }
@@ -1595,12 +1575,12 @@ button { font-family: inherit; }
 @keyframes overlay-in  { from { opacity: 0; } to { opacity: 1; } }
 @keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes modal-in {
-  from { opacity: 0; transform: scale(0.92) translateY(12px); }
+  from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: scale(1)    translateY(0);    }
 }
 @keyframes modal-out {
   from { opacity: 1; transform: scale(1)    translateY(0);    }
-  to   { opacity: 0; transform: scale(0.95) translateY(6px);  }
+  to   { opacity: 0; transform: translateY(4px); }
 }
 @keyframes spin    { to { transform: rotate(360deg); } }
 @keyframes breathe {
@@ -2064,6 +2044,10 @@ button { font-family: inherit; }
   line-height: 1.5;
   min-height: 1.5em;
 }
+.splash-message.is-error {
+  color: var(--danger);
+  font-weight: 600;
+}
 .splash-phase-hint {
   color: var(--t3);
 }
@@ -2088,35 +2072,19 @@ button { font-family: inherit; }
   border-radius: 2px;
   transition: width 280ms cubic-bezier(0.16, 1, 0.3, 1);
 }
+.splash-progress-fill.is-error {
+  width: 100%;
+  background: var(--danger);
+}
 .splash-progress-fill.is-indeterminate {
   position: absolute;
   width: 40%;
   left: 0;
-  animation: splash-indeterminate 1.5s ease-in-out infinite;
+  animation: splash-indeterminate 1.35s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 @keyframes splash-indeterminate {
-  0%   { left: -40%; }
-  50%  { left: 50%; }
-  100% { left: 100%; }
-}
-/* 進捗値があっても常時走るシマー — 画面に必ず動きがある安心感を残す */
-.splash-progress-shimmer {
-  position: absolute;
-  top: 0; bottom: 0; left: 0;
-  width: 40%;
-  background: linear-gradient(
-    90deg,
-    rgba(255,255,255,0) 0%,
-    rgba(255,255,255,0.45) 50%,
-    rgba(255,255,255,0) 100%
-  );
-  animation: splash-shimmer 1.6s linear infinite;
-  pointer-events: none;
-  mix-blend-mode: overlay;
-}
-@keyframes splash-shimmer {
   0%   { transform: translateX(-100%); }
-  100% { transform: translateX(350%); }
+  100% { transform: translateX(250%); }
 }
 .splash-progress-label {
   font-size: 11px;
@@ -2134,6 +2102,17 @@ button { font-family: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.splash-detail.is-error {
+  width: 100%;
+  color: var(--danger);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--danger) 36%, transparent);
+  border-radius: 8px;
+}
 .splash-note {
   font-size: 11px;
   color: var(--t3);
@@ -2143,6 +2122,11 @@ button { font-family: inherit; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+.splash-note.is-error {
+  color: var(--t2);
+  text-align: left;
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border));
 }
 
 /* バックエンドの生 stderr ログを表示するターミナル風エリア。 */

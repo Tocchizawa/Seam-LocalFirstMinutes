@@ -17,10 +17,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+MAX_CUSTOM_SYSTEM_PROMPT_CHARS = 32_000
+
+
 def _validate_launcher_settings(data: dict[str, Any]) -> None:
     minutes_ai = data.get("minutes_ai")
     if not isinstance(minutes_ai, dict):
         return
+    prompt = minutes_ai.get("custom_system_prompt")
+    if prompt is not None:
+        if not isinstance(prompt, str) or len(prompt) > MAX_CUSTOM_SYSTEM_PROMPT_CHARS:
+            raise bad_request(
+                "INVALID_SYSTEM_PROMPT",
+                f"custom_system_prompt は {MAX_CUSTOM_SYSTEM_PROMPT_CHARS} 文字以内の文字列にしてください",
+            )
     for provider in ("claude_code", "codex"):
         provider_cfg = minutes_ai.get(provider)
         if not isinstance(provider_cfg, dict):
@@ -71,6 +81,14 @@ async def update_settings(data: dict[str, Any], request: Request) -> dict[str, A
         backup_count=log_cfg.get("backup_count", 3),
     )
     return config.data
+
+
+@router.get("/summary/default-prompt")
+async def get_default_summary_prompt() -> dict[str, str]:
+    """要約の既定 system prompt を返す (UI の「デフォルトに戻す」用)。"""
+    from src.summarize.prompts import SYSTEM_PROMPT
+
+    return {"prompt": SYSTEM_PROMPT}
 
 
 @router.get("/cli/codex/models")

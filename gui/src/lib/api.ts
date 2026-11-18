@@ -1,5 +1,17 @@
 const BASE_URL = "http://127.0.0.1:18900";
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(message: string, status: number, code: string | null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -7,7 +19,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
-    throw new Error(err.error?.message || err.detail?.message || res.statusText);
+    throw new ApiError(
+      err.error?.message || err.detail?.message || res.statusText,
+      res.status,
+      err.error?.code || err.detail?.code || null,
+    );
   }
   return res.json();
 }
@@ -63,6 +79,12 @@ export const updateProject = (id: string, data: Partial<ProjectCreate>) =>
     body: JSON.stringify(data),
   });
 
+export const reorderProjects = (projectIds: string[]) =>
+  request<Project[]>("/api/projects/order", {
+    method: "PUT",
+    body: JSON.stringify({ project_ids: projectIds }),
+  });
+
 export const deleteProject = (id: string, deleteOutput = false) =>
   request<{ status: string }>(`/api/projects/${id}?delete_output=${deleteOutput}`, {
     method: "DELETE",
@@ -77,14 +99,75 @@ export const updateSettings = (data: Record<string, unknown>) =>
     body: JSON.stringify(data),
   });
 
+// Whisper model management
+export type WhisperDownloadState = "idle" | "downloading" | "ready" | "error";
+
+export interface WhisperDownloadStatus {
+  state: WhisperDownloadState;
+  model: string | null;
+  repo: string | null;
+  current_bytes: number;
+  total_bytes: number;
+  percent: number | null;
+  speed_bytes_per_sec: number | null;
+  error: string | null;
+}
+
+export interface WhisperModelInfo {
+  name: string;
+  label: string;
+  repo: string;
+  state: "not_downloaded" | "downloading" | "downloaded" | "loaded" | "error";
+  downloaded: boolean;
+  loaded: boolean;
+  size_bytes: number;
+}
+
+export interface WhisperModelCatalog {
+  models: WhisperModelInfo[];
+  download: WhisperDownloadStatus;
+}
+
+export const getWhisperModels = () =>
+  request<WhisperModelCatalog>("/api/models/whisper");
+
+export const downloadWhisperModel = (model: string) =>
+  request<{ status: string; download: WhisperDownloadStatus }>(
+    `/api/models/whisper/${encodeURIComponent(model)}/download`,
+    { method: "POST" },
+  );
+
+export const deleteWhisperModel = (model: string) =>
+  request<{ status: string; model: string }>(
+    `/api/models/whisper/${encodeURIComponent(model)}`,
+    { method: "DELETE" },
+  );
+
 export interface CliModelOption {
   slug: string;
   display_name: string;
   description?: string;
 }
 
+/** 要約の既定 system prompt (UI の「デフォルトに戻す」用) */
+export const getDefaultSummaryPrompt = () =>
+  request<{ prompt: string }>("/api/settings/summary/default-prompt");
+
 export const getCodexModels = () =>
   request<CliModelOption[]>("/api/settings/cli/codex/models");
+
+export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface CodexUsageSummary {
+  days: number;
+  runs: number;
+  total: Record<string, number>;
+  average: Record<string, number>;
+  recent: Array<Record<string, string | number | null>>;
+}
+
+export const getCodexUsage = (days = 30) =>
+  request<CodexUsageSummary>(`/api/summarize/codex/usage?days=${days}`);
 
 export const getClaudeCodeModels = () =>
   request<CliModelOption[]>("/api/settings/cli/claude_code/models");
@@ -177,6 +260,36 @@ export const moveMinutesToProject = (id: string, projectId: string) =>
     body: JSON.stringify({ project_id: projectId }),
   });
 
+export interface ImportAudioResponse {
+  status: string;
+  minutes: Minutes;
+  session_id: string;
+  audio_path: string;
+  source_path: string;
+  used_existing_transcript: boolean;
+  start_retranscribe: boolean;
+  summary_enqueued: boolean;
+  retranscribe: {
+    status: string;
+    session_id: string;
+  } | null;
+}
+
+export const importAudioMinutes = (
+  projectId: string,
+  sourcePath: string,
+  options: { title?: string; startRetranscribe?: boolean } = {},
+) =>
+  request<ImportAudioResponse>("/api/minutes/import-audio", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: projectId,
+      source_path: sourcePath,
+      title: options.title?.trim() || undefined,
+      start_retranscribe: options.startRetranscribe,
+    }),
+  });
+
 export interface MinutesSearchResult extends Minutes {
   highlights?: {
     title: string | null;
@@ -221,15 +334,75 @@ export interface AudioDevice {
   is_blackhole: boolean;
 }
 
-export const listDevices = () =>
-  request<{ devices: AudioDevice[]; screen_capture_available: boolean }>("/api/devices");
+export const listDevices = (options: { refresh?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (options.refresh) params.set("refresh", "true");
+  const query = params.toString();
+  return request<{
+    devices: AudioDevice[];
+    screen_capture_available: boolean;
+    system_audio_available?: boolean;
+    devices_refreshed?: boolean;
+  }>(`/api/devices${query ? `?${query}` : ""}`);
+};
 
 // Recording
-export const startRecording = (projectId: string, micDevice?: number | null, captureSystem = false) =>
-  request<{ session_id: string; has_system_audio: boolean }>("/api/recording/start", {
-    method: "POST",
-    body: JSON.stringify({ project_id: projectId, mic_device: micDevice ?? null, capture_system: captureSystem }),
+export interface StartRecordingOptions {
+  signal?: AbortSignal;
+  onWaitingForModel?: () => void;
+}
+
+export const startRecording = async (
+  projectId: string,
+  micDevice?: number | null,
+  captureSystem = true,
+  options: StartRecordingOptions = {},
+) => {
+  const abortError = () => new DOMException("録音開始をキャンセルしました", "AbortError");
+  const waitToRetry = () => new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, 1000);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(abortError());
+    };
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
   });
+
+  while (true) {
+    if (options.signal?.aborted) throw abortError();
+    try {
+      const started = await request<{ session_id: string; has_system_audio: boolean; transcription_deferred?: boolean }>(
+        "/api/recording/start",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            project_id: projectId,
+            mic_device: micDevice ?? null,
+            capture_system: captureSystem,
+          }),
+        },
+      );
+      if (options.signal?.aborted) {
+        await stopRecording().catch(() => {});
+        throw abortError();
+      }
+      return started;
+    } catch (error) {
+      if (options.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        throw error;
+      }
+      if (!(error instanceof ApiError) || error.code !== "LOCAL_MODEL_BUSY") {
+        throw error;
+      }
+      options.onWaitingForModel?.();
+      await waitToRetry();
+    }
+  }
+};
 
 export interface RecordingResult {
   session_id: string;
@@ -239,12 +412,18 @@ export interface RecordingResult {
 }
 
 export const stopRecording = () =>
-  request<{ status: string }>("/api/recording/stop", { method: "POST" });
+  request<{ status: string; session_id?: string }>("/api/recording/stop", { method: "POST" });
 
 export const getRecordingStatus = () =>
-  request<{ recording: boolean; elapsed_sec: number; mic_muted?: boolean }>(
+  request<{ recording: boolean; elapsed_sec: number; session_id?: string | null; mic_muted?: boolean; paused?: boolean; stopping?: boolean; transcription_deferred?: boolean }>(
     "/api/recording/status",
   );
+
+export const setRecordingPaused = (paused: boolean) =>
+  request<{ status: string; paused: boolean }>("/api/recording/pause", {
+    method: "POST",
+    body: JSON.stringify({ paused }),
+  });
 
 export const setMicMuted = (muted: boolean) =>
   request<{ status: string; muted: boolean }>("/api/recording/mic-mute", {
@@ -256,7 +435,7 @@ export const getLastRecording = () =>
   request<RecordingResult>("/api/recording/last");
 
 export const audioPlayUrl = (sessionId: string) =>
-  `${BASE_URL}/api/recording/play/${sessionId}`;
+  `${BASE_URL}/api/recording/play/${encodeURIComponent(sessionId)}?v=flac-playback-2`;
 
 // Pipeline
 export interface TranscriptSegment {
@@ -281,6 +460,25 @@ export interface SessionAudioInfo {
 export const getSessionAudioInfo = (sessionId: string) =>
   request<SessionAudioInfo>(
     `/api/recording/sessions/${encodeURIComponent(sessionId)}/audio_info`,
+  );
+
+export interface RecoverSessionResponse {
+  status: string;
+  created: boolean;
+  used_audio: boolean;
+  used_segments: boolean;
+  minutes: Minutes;
+  retranscribe?: {
+    status: string;
+    reason?: string;
+    session_id?: string;
+  };
+}
+
+export const recoverSessionMinutes = (sessionId: string, startRetranscribe = false) =>
+  request<RecoverSessionResponse>(
+    `/api/recording/sessions/${encodeURIComponent(sessionId)}/recover?start_retranscribe=${startRetranscribe ? "true" : "false"}`,
+    { method: "POST" },
   );
 
 export interface PipelineStatus {
@@ -330,6 +528,24 @@ export const resetPipeline = () =>
     "/api/recording/pipeline/reset",
     { method: "POST" },
   );
+
+export interface RecoveryItem {
+  session_id: string;
+  started_at: string | null;
+  date: string;
+  hhmm: string;
+  prior_state: string | null;
+}
+export interface RecoveryStatus {
+  state: "idle" | "running" | "done";
+  total: number;
+  current: number;
+  item: RecoveryItem | null;
+  recovered: number;
+  finished_at: string | null;
+}
+export const getRecoveryStatus = () =>
+  request<RecoveryStatus>("/api/recording/recovery/status");
 
 // WebSocket
 export const WS_URL = "ws://127.0.0.1:18900/ws";
@@ -453,6 +669,7 @@ export const PROVIDER_LABELS: Record<SummarizeProvider, string> = {
 export type SummarizeJobState =
   | "queued"
   | "running"
+  | "dictionary_update"
   | "done"
   | "failed"
   | "cancelled"
@@ -473,6 +690,7 @@ export interface SummarizeStatus {
   stage_label?: string | null;
   /** CLI provider が「いま何をしているか」を示す短いラベル (例: "Read: docs/README.md") */
   activity?: string | null;
+  usage?: Record<string, number> | null;
 }
 
 export const triggerSummarize = (

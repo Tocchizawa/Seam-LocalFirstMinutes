@@ -1,7 +1,23 @@
+<p align="center">
+  <img src="./docs/images/seam-banner.png" alt="Seam - Local-first meeting minutes for macOS" width="100%">
+</p>
+
 # Seam - Local-First Minutes
 
 Seam は、**会議の録音・文字起こし・要約をローカル環境中心で完結**させる macOS 向けアプリです。  
 デスクトップUI（Tauri + React）とバックエンドAPI（FastAPI）を分離し、実運用しやすい構成で実装しています。
+
+<p align="center">
+  <img src="./docs/images/seam-main.png" alt="Seam main screen" width="100%">
+</p>
+
+## ダウンロード
+
+最新版の DMG は [Releases ページ](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases) からダウンロードできます。
+DMG を開いて `Seam.app` を `Applications` にドラッグするだけでインストール完了です（Apple Developer ID 署名 + 公証済み）。
+インストール後は設定画面から更新確認できます。起動時自動アップデートを有効にすると、次回起動時に更新を見つけた場合だけ自動で適用します。
+
+ビルドはご自身でも可能です。手順は [ローカル実行（開発）](#ローカル実行開発) と [ビルド](#ビルド) を参照してください。
 
 ## プロジェクトの狙い
 
@@ -9,7 +25,7 @@ Seam は、**会議の録音・文字起こし・要約をローカル環境中�
 - 会議データの取り扱いをシンプルにできること
 - 1人開発でも保守しやすい構成にすること
 
-## 主な機能（実装ベース）
+## 主な機能
 
 ### 1. 録音・リアルタイム文字起こし
 
@@ -56,7 +72,7 @@ Seam は、**会議の録音・文字起こし・要約をローカル環境中�
 ## 実装状況メモ
 
 - `Gemini` は設定UI/APIの枠はありますが、要約本体は未対応です
-- システム音声録音は macOS の画面収録権限が必要です
+- システム音声録音は macOS のシステム音声取得権限が必要です
 - ローカル完結運用が基本ですが、Claude/OpenAI などクラウド要約も選択可能です
 
 ## 技術スタック
@@ -98,7 +114,7 @@ pnpm build
 生成物:
 
 - `gui/src-tauri/target/release/bundle/macos/Seam.app`
-- `gui/src-tauri/target/release/bundle/dmg/Seam_0.1.0_aarch64.dmg`
+- `gui/src-tauri/target/release/bundle/dmg/Seam_<version>_aarch64.dmg`
 
 ## セキュリティ / プライバシー方針（要点）
 
@@ -166,4 +182,4 @@ SKIP_GUI_BUILD=1 ./scripts/oss_preflight.sh
 
 - コントリビュート: [CONTRIBUTING.md](./CONTRIBUTING.md)
 - セキュリティ: [SECURITY.md](./SECURITY.md)
-- ライセンス: [MIT](./LICENSE)
+- ライセンス: [Apache 2.0](./LICENSE)

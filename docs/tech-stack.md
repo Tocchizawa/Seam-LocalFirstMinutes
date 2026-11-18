@@ -4,7 +4,7 @@
 
 | カテゴリ | 技術 | バージョン | 用途 |
 |----------|------|-----------|------|
-| **GUI** | Tauri | 2.x | デスクトップアプリ + ScreenCaptureKit + プロセス管理 |
+| **GUI** | Tauri | 2.x | デスクトップアプリ + native sidecar + プロセス管理 |
 | **GUI フロント** | React + TypeScript | 19+ | UI |
 | **GUI スタイル** | Tailwind CSS | 4+ | スタイリング |
 | **バックエンド** | Python | 3.12+ | AI処理・API |
@@ -13,10 +13,9 @@
 | **パッケージ管理 (GUI)** | pnpm | 9+ | フロント依存管理 |
 | **音声認識** | faster-whisper | 1.0+ | ストリーミング文字起こし |
 | **LLM** | Ollama + Qwen3 8B | latest | コンテキスト調査・議事録生成 |
-| **マイク録音** | sounddevice | 0.5+ | マイク入力 |
-| **内部音声** | ScreenCaptureKit | macOS 13+ | システム音声キャプチャ (Swift sidecar) |
-| **内部音声 (FB)** | BlackHole | 0.6+ | フォールバック (Python完結) |
-| **音声処理** | ffmpeg | 7+ | RAW→WAV変換・レベル正規化・2トラックミキシング (.app同梱) |
+| **マイク録音** | Core Audio Audio Queue | macOS | マイク入力 (Objective-C sidecar) |
+| **内部音声** | ScreenCaptureKit audio stream | macOS 13.0+ | システム音声キャプチャ (Objective-C sidecar) |
+| **音声処理** | ffmpeg | 7+ | mixed WAV→FLAC 変換 (.app同梱) |
 | **ファイル読取** | pymupdf | 1.24+ | PDF (Context Agent) |
 | **ファイル読取** | python-docx | 1.1+ | Word (Context Agent) |
 | **ファイル読取** | openpyxl | 3.1+ | Excel (Context Agent) |
@@ -24,6 +23,7 @@
 | **設定** | PyYAML | 6+ | YAML |
 | **HTTP** | httpx | 0.27+ | Ollama API |
 | **バンドル** | PyInstaller | 6+ | Python→バイナリ |
+| **更新配布** | Tauri Updater | 2.x | 署名済み `.app.tar.gz` によるアプリ内更新 |
 
 ---
 
@@ -34,7 +34,7 @@
 3つの役割を1つで担える:
 1. **GUI**: 軽量 (~10MB)、メモリを AI に回せる
 2. **Sidecar管理**: Python Backend の起動・監視・停止（Ollama は Python が Phase 2 で起動）
-3. **ScreenCaptureKit**: Rust から macOS ネイティブ API に直接アクセス
+3. **Sidecar管理**: native audio sidecar と Python Backend の起動に必要なリソース/環境変数を管理
 
 ### 2.2 FastAPI
 
@@ -42,29 +42,22 @@
 - async でパイプラインの非同期実行
 - Whisper の `transcribe()` は同期関数だが `run_in_executor` で共存
 
-### 2.3 ScreenCaptureKit (Swift sidecar)
+### 2.3 音声キャプチャ (native audio sidecar)
 
-- ドライバ不要（BlackHole 不要）
-- アプリ単位で音声キャプチャ可能
-- **Swift sidecar バイナリ**として実装（Tauri の sidecar 機能で起動）
-  - Rust の SCK バインディング (`screencapturekit-rs` 等) は未成熟。特に audio-only streaming が不安定
-  - Swift は SCK のネイティブ API に直接アクセスでき、デリゲートパターンも自然に扱える
-  - Tauri `tauri.conf.json` の sidecar 設定でバンドル・起動管理
-- Unix domain socket (`/tmp/seam-audio-{pid}.sock`) で Python に RAW PCM を転送
-  - SCK デフォルト出力は **48kHz** → Swift 側で **16kHz にリサンプリング**してから送出
-  - 固定フォーマット: 16kHz, mono, int16LE
-  - ヘッダなし、フロー制御はカーネルバッファに依存
-  - 切断時は Swift 側がバッファリング + RAW ファイルに常に書いているのでロスなし
-- **audio-only でも画面収録権限が必要**（macOS の制約）。初回ウィザードでガイド
-
-BlackHole フォールバック時は Python (sounddevice) 完結で Swift sidecar 不要。
+- マイク入力は **Audio Queue** を使い、Objective-C sidecar が RAW PCM (`float32`, mono, 16kHz) を書き出す。Python は raw を追尾して `mic.wav` とリアルタイムミックスへ流す。
+- 内部音声は **ScreenCaptureKit audio stream** を使う。`SCStreamOutputTypeAudio` を Objective-C sidecar で受け取り、mono `float32` RAW PCM と metadata JSON を書き出す。
+- **Objective-C sidecar バイナリ**として実装し、Tauri の resources に同梱する。
+- sidecar は `system.raw` (`float32`, mono, requested sample rate) と `system.meta.json` を書き出す。Python は raw を追尾してリアルタイムミックスへ流し、停止時に ffmpeg で `system.wav` へ変換する。
+- 内部音声録音中は sidecar が表示アイドルスリープを抑止する。SCStream停止時は取得済みRAWを保持し、Python側が同じScreenCaptureKit経路を再生成する。
+- 内部音声の取得経路は ScreenCaptureKit のみ。macOS 13.0 未満、sidecar 起動失敗、ScreenCaptureKit 権限/初期化失敗時は内部音声録音を開始失敗として扱う。
+- システム音声取得用に `NSAudioCaptureUsageDescription` を Info.plist に含める。
 
 ### 2.4 faster-whisper
 
 - ストリーミング: 数秒チャンクごとにリアルタイム文字起こし
 - **1秒オーバーラップ**: チャンク間に重複区間を設けて文の途中切れを防止
 - **絶対タイムスタンプ**: チャンクごとに offset を累積加算
-- **最終補正は行わない**: ストリーミング結果 + 残バッファ flush が最終結果
+- **最終結果**: ストリーミング結果を録音停止時に flush し、DB 保存用 transcript として確定する。`combined.flac` からの再文字起こしは手動実行時のみ行う
 - **CPU のみ対応** (CTranslate2 ベース): CUDA / CPU のみ。**Metal/MPS は非対応**
   - Apple Silicon では ARM NEON 最適化による CPU 推論で動作。medium モデルで実用的な速度
   - GPU 推論が必要な場合の代替: **mlx-whisper** (Apple MLX) または **whisper.cpp** (Metal 対応)
@@ -98,8 +91,7 @@ GijirokuN.app/Contents/
 │   ├── backend/                 # PyInstaller --onedir 出力
 │   │   ├── seam-backend     # エントリーポイント
 │   │   └── _internal/           # Python + 依存 (~3GB)
-│   ├── sidecar/
-│   │   └── audio-capture        # Swift sidecar (ScreenCaptureKit)
+│   ├── audio-capture            # Objective-C sidecar (ScreenCaptureKit + Core Audio mic)
 │   ├── ollama/ollama            # Ollama バイナリ (~200MB)
 │   └── ffmpeg/ffmpeg            # ffmpeg バイナリ (~80MB)
 └── Info.plist
@@ -112,6 +104,13 @@ GijirokuN.app/Contents/
 .dmg サイズ: ~3.5GB（Python バックエンド + Ollama + ffmpeg）
 初回DL合計: ~6.5GB
 
+### 3.1.1 アプリ内アップデート
+
+- 通常インストール用の DMG に加えて、Tauri updater 用の `Seam.app.tar.gz` / `Seam.app.tar.gz.sig` を GitHub Releases にアップロードする
+- アプリは固定フィード `updater-feed/latest.json` を参照し、`darwin-aarch64` の署名付き artifact を取得する
+- 起動時は設定に従って更新確認を行う。`auto_install_on_startup=true` の場合のみ、自動でダウンロード・インストール・再起動まで進める
+- 更新署名の秘密鍵はリポジトリに含めず、ローカルまたは GitHub Actions secrets の `TAURI_SIGNING_PRIVATE_KEY` で管理する
+
 ### 3.2 初回起動ウィザード
 
 ```
@@ -120,7 +119,7 @@ GijirokuN.app/Contents/
 3. Whisper medium ダウンロード → プログレスバー
 4. macOS 権限リクエスト:
    → マイクアクセス
-   → 画面収録 (ScreenCaptureKit 用)
+   → システム音声取得
 5. 完了 → メイン画面
 ```
 
@@ -161,11 +160,10 @@ Seam/
 │   ├── src-tauri/           # Rust
 │   │   └── src/
 │   │       ├── main.rs
-│   │       └── sidecar.rs   # Python Backend + Swift sidecar 起動管理
+│   │       └── sidecar.rs   # Python Backend + native sidecar 起動管理
 │   ├── sidecar/
-│   │   └── audio-capture/   # Swift sidecar (ScreenCaptureKit)
-│   │       ├── Package.swift
-│   │       └── Sources/main.swift
+│   │   └── audio-capture/   # Objective-C sidecar (ScreenCaptureKit + Core Audio mic)
+│   │       └── Sources/main.m
 │   ├── src/                 # React
 │   │   ├── pages/
 │   │   ├── components/
@@ -195,9 +193,9 @@ Seam/
 | リスク | 影響 | 対策 |
 |--------|------|------|
 | PyInstaller バンドル ~3GB | 初回DLが大きい | UPX圧縮 + 不要依存除外 |
-| ScreenCaptureKit macOS 13+ 限定 | 古い macOS 非対応 | BlackHole フォールバック (Python完結) |
-| SCK の Swift sidecar 実装 | PoC が必要。リサンプリング (48kHz→16kHz) のレイテンシ | Swift sidecar をメインパスに採用。PoC を最優先で実施。BlackHole フォールバック |
-| Swift↔Python IPC 切断 | 音声データロス | RAW PCM を常にファイル書き込み。ロスなし |
+| ScreenCaptureKit macOS 13.0+ 限定 | 古い macOS 非対応 | 内部音声を要求した録音は開始失敗にし、OS/権限の確認を促す |
+| システム音声 sidecar 停止/無音化 | 相手音声が途中から消える | 録音中の表示アイドルスリープを抑止し、停止・RAW byte停止・途中無音化を検知して同じScreenCaptureKit経路を再生成する |
+| native sidecar 停止 | 音声データロス | RAW PCM を常にファイル書き込みし、Python 側で coverage を検証 |
 | ストリーミング Whisper 遅延蓄積 | 文字起こしが遅れる | チャンク長動的調整 + 1秒オーバーラップ + run_in_executor |
 | 3時間会議で Qwen3 コンテキスト超え | 議事録品質低下 | 話題ベースチャンク分割 + 段階的要約 |
 | Context Agent が 32K tokens 超え | 調査が中途半端 | スライディングウィンドウで古い結果をトランケート（先頭500文字） |

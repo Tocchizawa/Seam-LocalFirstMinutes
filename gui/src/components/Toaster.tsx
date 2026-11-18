@@ -51,7 +51,7 @@ function ToastBox({ item, onClose }: { item: ToastItem; onClose: () => void }) {
         boxShadow: "var(--shadow-md)",
         color: "var(--t1)",
       }}>
-      <span className="flex-1 truncate">{item.text}</span>
+      <span className="min-w-0 flex-1 wrap-anywhere" role={item.kind === "err" ? "alert" : "status"}>{item.text}</span>
       <button
         onClick={(e) => { e.stopPropagation(); onClose(); }}
         className="icon-btn !w-5 !h-5 shrink-0"

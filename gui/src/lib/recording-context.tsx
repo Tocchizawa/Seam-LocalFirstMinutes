@@ -4,10 +4,13 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  WS_URL, getRecordingStatus, type TranscriptSegment,
+  WS_URL, getRecordingStatus, getSessionSegments, getWhisperModels, setRecordingPaused, startRecording,
+  stopRecording, setMicMuted, updateSettings,
+  type TranscriptSegment,
+  type WhisperDownloadStatus,
 } from "./api";
 import { showToast } from "./toast";
-import { isByteSizeToken, parseHFProgress, parseSize } from "./parse-hf-progress";
+import { notifyNative } from "./notify";
 
 export interface LiveSegment extends TranscriptSegment {
   session_id?: string;
@@ -35,40 +38,45 @@ export interface StreamStatus {
   model_name?: string;
   /** model load 失敗時のメッセージ */
   model_error?: string | null;
+  model_download?: WhisperDownloadStatus | null;
 }
 
 interface Ctx {
   recording: boolean;
-  setRecording: (b: boolean) => void;
+  recordingStarting: boolean;
+  recordingStopping: boolean;
+  waitingForModel: boolean;
+  transcriptionDeferred: boolean;
+  startRecordingSession: (projectId: string) => Promise<void>;
+  cancelRecordingStart: () => void;
+  stopRecordingSession: () => Promise<void>;
   paused: boolean;
   togglePaused: () => void;
-  setPaused: (b: boolean) => void;
-  /** マイクのソフトミュート (system audio は無関係) */
   micMuted: boolean;
-  setMicMutedLocal: (b: boolean) => void;
+  toggleMicMuted: () => void;
   elapsedSec: number;
-  resetElapsed: () => void;
   level: number;
   activeSessionId: string | null;
-  setActiveSessionId: (s: string | null) => void;
   liveSegments: LiveSegment[];
-  resetLive: () => void;
   streamStatus: StreamStatus | null;
-  /** モデル DL / 読込進捗の直近ログ行 (HF tqdm 等を抜粋) */
   modelLoadLog: string | null;
-  /** 全 DL ファイル合算の進捗 (HF tqdm 行ベース) */
-  modelDownloadAggregate: {
-    percent: number;
-    currentBytes: number;
-    totalBytes: number;
-    filesCount: number;
-  } | null;
-  // device preferences shared between toolbar & banner
+  modelDownload: WhisperDownloadStatus | null;
   micDevice: number | null;
   setMicDevice: (n: number | null) => void;
   captureSystem: boolean;
   setCaptureSystem: (b: boolean) => void;
 }
+
+interface Session {
+  id: string;
+  phase: "recording" | "stopping";
+  paused: boolean;
+  muted: boolean;
+  transcriptionDeferred: boolean;
+  startedAt: number;
+}
+
+type Starting = "preparing" | "waiting-for-model" | null;
 
 const RecordingCtx = createContext<Ctx | null>(null);
 
@@ -81,249 +89,315 @@ export function useRecording(): Ctx {
 }
 
 export function RecordingProvider({ children }: { children: ReactNode }) {
-  const [recording, setRecording] = useState(false);
-  const [paused, setPaused] = useState(false);
+  const [session, setSession] = useState<Session | null>(null);
+  const [starting, setStarting] = useState<Starting>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [level, setLevel] = useState(0);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([]);
   const [streamStatus, setStreamStatus] = useState<StreamStatus | null>(null);
   const [micDevice, setMicDevice] = useState<number | null>(null);
-  const [captureSystem, setCaptureSystem] = useState(false);
+  const [captureSystem, setCaptureSystem] = useState(true);
   const [modelLoadLog, setModelLoadLog] = useState<string | null>(null);
-  const [micMuted, setMicMutedLocal] = useState(false);
-  /** filename → { current, total } (バイト) */
-  const downloadFilesRef = useRef<Map<string, { current: number; total: number }>>(new Map());
-  const [modelDownloadAggregate, setModelDownloadAggregate] = useState<
-    { percent: number; currentBytes: number; totalBytes: number; filesCount: number } | null
-  >(null);
+  const [modelDownload, setModelDownload] = useState<WhisperDownloadStatus | null>(null);
 
-  const startRef = useRef(0);
-  const recordingRef = useRef(recording);
-  const pausedRef = useRef(paused);
-  useEffect(() => { recordingRef.current = recording; }, [recording]);
-  useEffect(() => { pausedRef.current = paused; }, [paused]);
+  const sessionRef = useRef<Session | null>(null);
+  const lastReleased = useRef<string | null>(null);
+  const revision = useRef(0);
+  const startController = useRef<AbortController | null>(null);
+  const pendingControls = useRef(new Map<string, string>());
 
-  // 起動時に既存のセッションを復元
-  useEffect(() => {
-    getRecordingStatus().then((s) => {
-      if (s.recording) {
-        setRecording(true);
-        setElapsedSec(Math.floor(s.elapsed_sec));
-        if (typeof s.mic_muted === "boolean") setMicMutedLocal(s.mic_muted);
-      }
-    }).catch(() => {});
+  const apply = useCallback((next: Session | null) => {
+    const previous = sessionRef.current;
+    revision.current += 1;
+    sessionRef.current = next;
+    if (previous?.id !== next?.id) {
+      if (previous) lastReleased.current = previous.id;
+      setLevel(0);
+      setStreamStatus(null);
+      setModelDownload(null);
+      if (next) setLiveSegments([]);
+    }
+    setSession(next);
   }, []);
 
-  const resetLive = useCallback(() => setLiveSegments([]), []);
-  const resetElapsed = useCallback(() => setElapsedSec(0), []);
-  const togglePaused = useCallback(() => setPaused((p) => !p), []);
+  const syncStatus = useCallback(async () => {
+    const before = revision.current;
+    try {
+      const status = await getRecordingStatus();
+      if (before !== revision.current) return;
+      if (status.session_id && (status.recording || status.stopping)) {
+        apply({
+          id: status.session_id,
+          phase: status.stopping ? "stopping" : "recording",
+          paused: Boolean(status.paused),
+          muted: Boolean(status.mic_muted),
+          transcriptionDeferred: Boolean(status.transcription_deferred),
+          startedAt: performance.now() - (status.elapsed_sec || 0) * 1000,
+        });
+      } else {
+        apply(null);
+      }
+    } catch {
+      // Reconnect and the stop watchdog will retry.
+    }
+  }, [apply]);
 
-  // 単一 WebSocket: 録音関連イベントは内部 state へ、パイプライン系は CustomEvent で再配信
+  const startRecordingSession = async (projectId: string) => {
+    if (sessionRef.current || startController.current) return;
+    const controller = new AbortController();
+    startController.current = controller;
+    setModelLoadLog(null);
+    setStarting("preparing");
+    try {
+      const started = await startRecording(projectId, micDevice, captureSystem, {
+        signal: controller.signal,
+        onWaitingForModel: () => setStarting("waiting-for-model"),
+      });
+      if (!sessionRef.current && lastReleased.current !== started.session_id) {
+        apply({
+          id: started.session_id,
+          phase: "recording",
+          paused: false,
+          muted: false,
+          transcriptionDeferred: Boolean(started.transcription_deferred),
+          startedAt: performance.now(),
+        });
+      }
+      void updateSettings({
+        recording: {
+          last_project_id: projectId,
+          last_mic_device: micDevice,
+          last_capture_system: captureSystem,
+        },
+      }).catch(() => {});
+    } catch (error) {
+      void syncStatus();
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      startController.current = null;
+      setStarting(null);
+    }
+  };
+
+  const cancelRecordingStart = () => startController.current?.abort();
+
+  const stopRecordingSession = async () => {
+    const current = sessionRef.current;
+    if (!current || current.phase === "stopping") return;
+    apply({ ...current, phase: "stopping" });
+    try {
+      await stopRecording();
+    } catch (error) {
+      if (sessionRef.current?.id === current.id) {
+        apply({ ...sessionRef.current, phase: "recording" });
+        await syncStatus();
+      }
+      throw error;
+    }
+  };
+
+  const changeControl = async (key: "paused" | "muted") => {
+    const current = sessionRef.current;
+    if (!current || current.phase !== "recording" || pendingControls.current.get(key) === current.id) return;
+    pendingControls.current.set(key, current.id);
+    const next = !current[key];
+    try {
+      if (key === "paused") await setRecordingPaused(next);
+      else await setMicMuted(next);
+      if (sessionRef.current?.id === current.id) apply({ ...sessionRef.current, [key]: next });
+    } catch (error) {
+      showToast({ kind: "err", text: error instanceof Error ? error.message : "録音設定を変更できませんでした" });
+    } finally {
+      if (pendingControls.current.get(key) === current.id) pendingControls.current.delete(key);
+    }
+  };
+
   useEffect(() => {
     let ws: WebSocket | null = null;
-    let timer: number | null = null;
+    let timer = 0;
     let attempt = 0;
-    let stopped = false;
+    let disposed = false;
 
-    const dispatch = (type: string, detail: unknown) => {
-      window.dispatchEvent(new CustomEvent(`recording-ws:${type}`, { detail }));
-    };
+    const handle = (event: MessageEvent) => {
+      let message: { type?: string; data?: any };
+      try { message = JSON.parse(event.data); } catch { return; }
+      const { type, data } = message;
+      if (disposed || !type) return;
+      const current = sessionRef.current;
+      const sid: string | undefined = data?.session_id;
+      const matches = Boolean(current && (!sid || sid === current.id));
 
-    const handle = (e: MessageEvent) => {
-      let m: { type?: string; data?: any };
-      try { m = JSON.parse(e.data); } catch { return; }
-      const t = m.type;
-      if (!t) return;
-
-      if (t === "audio_level") {
-        if (typeof m.data?.mic === "number") setLevel(m.data.mic);
-        return;
-      }
-      if (t === "recording_status") {
-        if (typeof m.data?.elapsed_sec === "number") {
-          const sec = Math.floor(m.data.elapsed_sec);
-          setElapsedSec((prev) => (prev !== sec ? sec : prev));
-        }
-        return;
-      }
-      if (t === "transcript_chunk" && m.data) {
-        const seg: LiveSegment = m.data;
-        setLiveSegments((prev) => {
-          const next = [...prev, seg];
-          if (next.length <= MAX_LIVE_SEGMENTS) return next;
-          return next.slice(next.length - MAX_LIVE_SEGMENTS);
-        });
-        return;
-      }
-      if (t === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
-        const speakerId = String(m.data.speaker_id);
-        const speakerLabel = String(m.data.speaker_label);
-        setLiveSegments((prev) =>
-          prev.map((seg) => (
-            seg.speaker_id === speakerId ? { ...seg, speaker_label: speakerLabel } : seg
-          ))
-        );
-        // パイプライン側にも届ける必要があれば追加配信
-        dispatch(t, m.data);
-        return;
-      }
-      if (t === "streaming_status" && m.data) {
-        setStreamStatus(m.data);
-        return;
-      }
-      if (t === "mic_mute_changed" && m.data) {
-        if (typeof m.data.muted === "boolean") setMicMutedLocal(m.data.muted);
-        return;
-      }
-      if (t === "recording_idle_reminder") {
-        const thresholdSec = Number(m.data?.threshold_sec ?? 300);
-        const min = Math.max(1, Math.floor(thresholdSec / 60));
-        const text = `無音が${min}分続いています。録音停止忘れにご注意ください。`;
-        showToast({ kind: "info", text, ttl: 7000 });
-        if (
-          typeof window !== "undefined"
-          && "Notification" in window
-          && document.visibilityState === "hidden"
-          && Notification.permission === "granted"
-        ) {
-          new Notification("Seam", { body: text });
-        }
-        return;
-      }
-      if (t === "mic_silent_warning") {
-        showToast({
-          kind: "err",
-          text: "マイクの音声が検出されません。デバイス設定を確認してください。",
-          ttl: 12000,
-        });
-        return;
-      }
-      // パイプライン関連 / その他は MainView 側に再配信
-      dispatch(t, m.data);
-    };
-
-    const connect = () => {
-      if (stopped) return;
-      try { ws = new WebSocket(WS_URL); }
-      catch { scheduleReconnect(); return; }
-      ws.onopen = () => {
-        attempt = 0;
-        dispatch("__open", null);
-      };
-      ws.onmessage = handle;
-      ws.onclose = scheduleReconnect;
-      ws.onerror = () => { try { ws?.close(); } catch {} };
-    };
-
-    const scheduleReconnect = () => {
-      if (stopped || timer != null) return;
-      attempt++;
-      const delay = Math.min(8000, 500 * Math.pow(1.6, Math.min(attempt, 6)));
-      timer = window.setTimeout(() => { timer = null; connect(); }, delay);
-    };
-
-    connect();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-      try { ws?.close(); } catch {}
-    };
-  }, []);
-
-  // elapsed の細かい tick はクライアントで補完(無音時のみ backend からの recording_status が来ない可能性)
-  useEffect(() => {
-    if (!recording || paused) return;
-    startRef.current = Date.now() - elapsedSec * 1000;
-    const id = window.setInterval(() => {
-      const sec = Math.floor((Date.now() - startRef.current) / 1000);
-      setElapsedSec((prev) => (prev !== sec ? sec : prev));
-    }, 250);
-    return () => window.clearInterval(id);
-  }, [recording, paused, elapsedSec]);
-
-  // 録音停止時のクリーンアップ
-  useEffect(() => {
-    if (recording) return;
-    setLevel(0);
-    setPaused(false);
-    setMicMutedLocal(false);
-  }, [recording]);
-
-  // backend-log を購読: モデル DL / ロード関連の行を保持
-  useEffect(() => {
-    const stop = listen<string>("backend-log", (e) => {
-      const text = (e.payload || "").trim();
-      if (!text) return;
-      // HF Hub の tqdm / mlx-whisper のロードログを拾う
-      const isModelLog =
-        /%\|/.test(text) ||                            // tqdm bar
-        /\b(MB|GB|kB|B)\/s\b/.test(text) ||            // 速度表記
-        /\b(Downloading|Fetching|Loading|Resolving)\b/i.test(text) ||
-        /mlx-whisper|whisper.*model|huggingface_hub/i.test(text);
-      if (!isModelLog) return;
-
-      setModelLoadLog(text);
-
-      // 個別ファイルの DL 進捗を集計用に保持
-      const prog = parseHFProgress(text);
-      if (prog && prog.current && prog.total) {
-        const byteBased = isByteSizeToken(prog.current) && isByteSizeToken(prog.total);
-        if (byteBased && prog.filename) {
-          const cur = parseSize(prog.current);
-          const tot = parseSize(prog.total);
-          if (tot > 0) {
-            downloadFilesRef.current.set(prog.filename, { current: cur, total: tot });
-            let totalBytes = 0;
-            let currentBytes = 0;
-            for (const v of downloadFilesRef.current.values()) {
-              totalBytes += v.total;
-              currentBytes += v.current;
-            }
-            setModelDownloadAggregate({
-              percent: totalBytes > 0 ? (currentBytes / totalBytes) * 100 : 0,
-              currentBytes,
-              totalBytes,
-              filesCount: downloadFilesRef.current.size,
+      switch (type) {
+        case "recording_status":
+          if (sid && sid !== lastReleased.current && (!current || matches)) {
+            apply({
+              id: sid,
+              phase: current?.phase ?? "recording",
+              paused: data.paused ?? current?.paused ?? false,
+              muted: current?.muted ?? false,
+              transcriptionDeferred: data.transcription_deferred ?? current?.transcriptionDeferred ?? false,
+              startedAt: typeof data.elapsed_sec === "number"
+                ? performance.now() - data.elapsed_sec * 1000
+                : current?.startedAt ?? performance.now(),
             });
           }
           return;
-        }
-
-        // "Fetching 4 files: 50%|...| 2/4 [...]" のような件数ベース進捗。
-        // バイト総量は不明なので % のみ UI に反映する。
-        const curNum = Number.parseFloat(prog.current);
-        const totNum = Number.parseFloat(prog.total);
-        if (Number.isFinite(curNum) && Number.isFinite(totNum) && totNum > 0) {
-          const percent = Number.isFinite(prog.percent) ? prog.percent : ((curNum / totNum) * 100);
-          setModelDownloadAggregate({
-            percent: Math.max(0, Math.min(100, percent)),
-            currentBytes: 0,
-            totalBytes: 0,
-            filesCount: Math.round(totNum),
+        case "recording_stopped":
+          if (sid && matches) apply(null);
+          else if (!sid) void syncStatus();
+          break;
+        case "pipeline_progress":
+          if (sid && matches && data.state === "transcribing") apply(null);
+          if (sid && matches && data.state === "error") void syncStatus();
+          break;
+        case "pipeline_error":
+          if (sid && matches) void syncStatus();
+          break;
+        case "audio_level":
+          if (matches && typeof data?.mic === "number") setLevel(data.mic);
+          return;
+        case "streaming_status":
+          if (matches && data) {
+            setStreamStatus(data);
+            if (data.model_download) setModelDownload(data.model_download);
+          }
+          return;
+        case "mic_mute_changed":
+          if (current && matches && typeof data?.muted === "boolean") apply({ ...current, muted: data.muted });
+          return;
+        case "transcript_chunk":
+          if (matches && data) setLiveSegments((segments) => [...segments.slice(-(MAX_LIVE_SEGMENTS - 1)), data]);
+          break;
+        case "speaker_renamed":
+          if (data?.speaker_id && data.speaker_label) {
+            setLiveSegments((segments) => segments.map((segment) =>
+              segment.speaker_id === data.speaker_id ? { ...segment, speaker_label: data.speaker_label } : segment,
+            ));
+          }
+          break;
+        case "recording_idle_reminder":
+          if (!matches) return;
+          const minutes = Math.max(1, Math.floor(Number(data?.threshold_sec ?? 300) / 60));
+          const notice = `無音が${minutes}分続いています`;
+          showToast({ kind: "info", text: notice, ttl: 7000 });
+          if (document.visibilityState === "hidden") void notifyNative("録音中", notice);
+          return;
+        case "mic_silent_warning":
+          if (!matches) return;
+          const warning = "音声を検出できません。入力デバイスを確認してください。";
+          void notifyNative("録音中", warning).then((ok) => {
+            if (!ok) showToast({ kind: "err", text: warning, ttl: 12000 });
           });
-        }
+          return;
+      }
+      window.dispatchEvent(new CustomEvent(`recording-ws:${type}`, { detail: data }));
+    };
+
+    const reconnect = () => {
+      if (disposed || timer) return;
+      const delay = Math.min(8000, 500 * 1.6 ** Math.min(++attempt, 6));
+      timer = window.setTimeout(() => { timer = 0; connect(); }, delay);
+    };
+
+    function connect() {
+      if (disposed) return;
+      try { ws = new WebSocket(WS_URL); }
+      catch { reconnect(); return; }
+      ws.onopen = () => {
+        attempt = 0;
+        void syncStatus().then(() => {
+          if (disposed) return;
+          window.dispatchEvent(new CustomEvent("recording-ws:__open"));
+          const id = sessionRef.current?.id;
+          if (!id || sessionRef.current?.transcriptionDeferred) return;
+          void getSessionSegments(id).then((saved) => {
+            if (disposed || sessionRef.current?.id !== id || !Array.isArray(saved)) return;
+            setLiveSegments((received) => {
+              const byStart = new Map(saved.map((segment) => [segment.start, { ...segment, session_id: id }]));
+              for (const segment of received) byStart.set(segment.start, { ...segment, session_id: id });
+              return [...byStart.values()].sort((a, b) => a.start - b.start).slice(-MAX_LIVE_SEGMENTS);
+            });
+          }).catch(() => {});
+        });
+      };
+      ws.onmessage = handle;
+      ws.onclose = reconnect;
+      ws.onerror = () => ws?.close();
+    }
+
+    connect();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      ws?.close();
+    };
+  }, [apply, syncStatus]);
+
+  const recording = session !== null;
+  const recordingStopping = session?.phase === "stopping";
+  const recordingStarting = starting !== null;
+
+  useEffect(() => {
+    if (!recordingStopping) return;
+    const timer = window.setInterval(syncStatus, 1000);
+    return () => window.clearInterval(timer);
+  }, [recordingStopping, syncStatus]);
+
+  useEffect(() => {
+    if (!recording) return;
+    const tick = () => {
+      const current = sessionRef.current;
+      if (current) setElapsedSec(Math.max(0, Math.floor((performance.now() - current.startedAt) / 1000)));
+    };
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => window.clearInterval(timer);
+  }, [recording, session?.id]);
+
+  useEffect(() => {
+    if ((!recording && !recordingStarting) || session?.transcriptionDeferred) return;
+    let disposed = false;
+    let timer = 0;
+    const refresh = async () => {
+      try {
+        const catalog = await getWhisperModels();
+        if (!disposed) setModelDownload(catalog.download);
+      } catch {
+        // The next read will retry.
+      }
+      if (!disposed) timer = window.setTimeout(refresh, 1000);
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [recording, recordingStarting, session?.id, session?.transcriptionDeferred]);
+
+  useEffect(() => {
+    const stop = listen<string>("backend-log", (event) => {
+      const log = (event.payload || "").trim();
+      if (/%\||\b(MB|GB|kB|B)\/s\b|\b(Downloading|Fetching|Loading|Resolving)\b|mlx-whisper|whisper.*model|huggingface_hub/i.test(log)) {
+        setModelLoadLog(log);
       }
     });
-    return () => {
-      stop.then((un) => un()).catch(() => { /* noop */ });
-    };
+    return () => { void stop.then((unlisten) => unlisten()).catch(() => {}); };
   }, []);
 
-  const value: Ctx = {
-    recording, setRecording,
-    paused, togglePaused, setPaused,
-    micMuted, setMicMutedLocal,
-    elapsedSec, resetElapsed,
-    level,
-    activeSessionId, setActiveSessionId,
-    liveSegments, resetLive,
-    streamStatus,
-    modelLoadLog,
-    modelDownloadAggregate,
-    micDevice, setMicDevice,
-    captureSystem, setCaptureSystem,
-  };
-
-  return <RecordingCtx.Provider value={value}>{children}</RecordingCtx.Provider>;
+  return (
+    <RecordingCtx.Provider value={{
+      recording, recordingStarting, recordingStopping, waitingForModel: starting === "waiting-for-model",
+      startRecordingSession, cancelRecordingStart, stopRecordingSession,
+      transcriptionDeferred: session?.transcriptionDeferred ?? false,
+      paused: session?.paused ?? false,
+      togglePaused: () => { void changeControl("paused"); },
+      micMuted: session?.muted ?? false,
+      toggleMicMuted: () => { void changeControl("muted"); },
+      elapsedSec: recording ? elapsedSec : 0,
+      level, activeSessionId: session?.id ?? null, liveSegments, streamStatus, modelLoadLog,
+      modelDownload, micDevice, setMicDevice, captureSystem, setCaptureSystem,
+    }}>
+      {children}
+    </RecordingCtx.Provider>
+  );
 }

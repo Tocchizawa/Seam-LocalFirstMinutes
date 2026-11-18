@@ -13,6 +13,69 @@ from src.config import config
 
 logger = logging.getLogger(__name__)
 
+# pyannote.audio が hook へ渡してくる step 名のサブストリングマッチで、
+# (進捗範囲, 表示ラベル) を割り当てる。pyannote 3.x は
+# "speaker_segmentation" / "speaker_embedding" / "speaker_counting" /
+# "discrete_diarization" 等を発火する。
+_PYANNOTE_STAGE_RANGES: tuple[tuple[str, tuple[float, float], str], ...] = (
+    ("segmentation", (0.0, 0.45), "音声を分割中"),
+    ("embedd", (0.45, 0.90), "話者特徴を抽出中"),
+    ("counting", (0.90, 0.92), "話者数を推定中"),
+    ("clustering", (0.92, 0.98), "話者をクラスタリング中"),
+    ("discrete_diarization", (0.92, 0.98), "話者をクラスタリング中"),
+)
+
+
+class _PyannoteProgressHook:
+    """pyannote.audio Pipeline の進捗フック。
+
+    pipeline は内部の各ステージで hook(step_name, artifact, total=, completed=)
+    を呼ぶ。本フックはステージ名から大まかな進捗範囲を割り当て、コールバックに
+    0.0..1.0 のフラットな進捗値と日本語メッセージを流す。
+    """
+
+    def __init__(self, on_progress):
+        self._on_progress = on_progress
+        self._last_prog = 0.0
+
+    @staticmethod
+    def _match(step_name: str) -> tuple[tuple[float, float] | None, str]:
+        s = (step_name or "").lower()
+        for key, rng, label in _PYANNOTE_STAGE_RANGES:
+            if key in s:
+                return rng, label
+        return None, step_name
+
+    def __call__(
+        self,
+        step_name,
+        step_artifact=None,
+        file=None,
+        total=None,
+        completed=None,
+    ) -> None:
+        if not self._on_progress:
+            return
+        rng, label = self._match(step_name)
+        if rng is None:
+            return
+        start, end = rng
+        if total and completed is not None and total > 0:
+            frac = max(0.0, min(1.0, float(completed) / float(total)))
+            prog = start + (end - start) * frac
+            msg = f"{label}... {int(completed)}/{int(total)}"
+        else:
+            prog = start
+            msg = f"{label}..."
+        if prog < self._last_prog:
+            prog = self._last_prog
+        else:
+            self._last_prog = prog
+        try:
+            self._on_progress(prog, msg)
+        except Exception:
+            pass
+
 KEYRING_SERVICE = "seam-app"
 HF_TOKEN_KEY = "hf_token"
 
@@ -132,11 +195,17 @@ def _get_pipeline():
         return _pipeline
 
 
-def diarize_with_embeddings(wav_path: str | Path) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
+def diarize_with_embeddings(
+    wav_path: str | Path,
+    on_progress=None,
+) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
     """Run pyannote diarization. Returns (turns, centroids).
 
     turns: [{"start": float, "end": float, "speaker": "SPEAKER_00", ...}, ...]
     centroids: {"SPEAKER_00": ndarray (embedding_dim,), ...}  L2 正規化済み
+
+    on_progress(prog: float 0..1, message: str | None) を渡すと、pyannote 内部の
+    各ステージ進捗を細かく通知する。
     """
     pipeline = _get_pipeline()
     kwargs: dict[str, Any] = {}
@@ -147,7 +216,21 @@ def diarize_with_embeddings(wav_path: str | Path) -> tuple[list[dict[str, Any]],
     if max_speakers:
         kwargs["max_speakers"] = int(max_speakers)
 
-    raw = pipeline(str(wav_path), **kwargs)
+    if on_progress is not None:
+        kwargs["hook"] = _PyannoteProgressHook(on_progress)
+
+    try:
+        raw = pipeline(str(wav_path), **kwargs)
+    except TypeError as e:
+        # hook 引数を受け付けない pyannote 版へのフォールバック
+        if "hook" in kwargs and "hook" in str(e):
+            logger.warning(
+                "pyannote.audio が hook 引数を受け付けません。進捗表示なしで継続します: %s", e,
+            )
+            kwargs.pop("hook", None)
+            raw = pipeline(str(wav_path), **kwargs)
+        else:
+            raise
 
     # pyannote.audio 4.x: DiarizeOutput(speaker_diarization, speaker_embeddings, ...)
     # 3.x: tuple (diarization, embeddings) when return_embeddings=True, else Annotation

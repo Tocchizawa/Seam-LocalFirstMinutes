@@ -3,6 +3,7 @@
    初回は uv sync で torch / mlx-whisper など ~3GB をダウンロードするため
    5-10 分かかる。何が起きているかをユーザーに見せる。 */
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Spinner } from "./Spinner";
 
@@ -25,9 +26,21 @@ interface LogLine {
   text: string;
 }
 
+interface StartupSnapshot {
+  status?: BackendStatus | null;
+  logs?: string[];
+}
+
+export interface SplashStartupUpdate {
+  message: string;
+  progress: number | null;
+  detail?: string | null;
+  isError?: boolean;
+}
+
 const MAX_LOG_LINES = 80;
 
-export function Splash() {
+export function Splash({ startupUpdate }: { startupUpdate?: SplashStartupUpdate | null }) {
   const [status, setStatus] = useState<BackendStatus>(DEFAULT_STATUS);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const nextIdRef = useRef(0);
@@ -39,6 +52,32 @@ export function Splash() {
     });
     return () => {
       stop.then((un) => un()).catch(() => { /* noop */ });
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<StartupSnapshot>("get_startup_snapshot")
+      .then((snapshot) => {
+        if (cancelled) return;
+        if (snapshot.status) setStatus(snapshot.status);
+        const restored = snapshot.logs || [];
+        if (restored.length > 0) {
+          setLogs((prev) => {
+            const seen = new Set(prev.map((line) => line.text));
+            const missing = restored.filter((text) => text && !seen.has(text));
+            if (missing.length === 0) return prev;
+            const next = [
+              ...missing.map((text) => ({ id: nextIdRef.current++, text })),
+              ...prev,
+            ];
+            return next.slice(Math.max(0, next.length - MAX_LOG_LINES));
+          });
+        }
+      })
+      .catch(() => { /* older dev shells may not expose the command yet */ });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -74,58 +113,69 @@ export function Splash() {
     el.scrollTop = el.scrollHeight;
   }, [logs.length]);
 
-  const pct = typeof status.progress === "number"
-    ? Math.round(Math.max(0, Math.min(1, status.progress)) * 100)
+  const displayStatus: BackendStatus = startupUpdate
+    ? {
+      phase: startupUpdate.isError ? "error" : "update",
+      message: startupUpdate.message,
+      progress: startupUpdate.progress,
+      detail: startupUpdate.detail ?? null,
+    }
+    : status;
+  const pct = typeof displayStatus.progress === "number"
+    ? Math.round(Math.max(0, Math.min(1, displayStatus.progress)) * 100)
     : null;
-  const isReady = status.phase === "ready" && (pct ?? 0) >= 100;
+  const isReady = !startupUpdate && status.phase === "ready" && (pct ?? 0) >= 100;
+  const isError = Boolean(startupUpdate?.isError) || displayStatus.phase === "error";
 
   return (
     <div className="splash-shell">
       <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-9 z-50" />
       <div className="splash-card anim-fade-in">
-        <img
-          src="/icon.png"
-          width={88}
-          height={88}
-          alt="Seam"
-          className="splash-icon"
-          draggable={false}
-          onError={(e) => {
-            (e.target as HTMLImageElement).style.display = "none";
-          }}
-        />
-        <h1 className="splash-title">Seam</h1>
-
         <div className="splash-progress-wrap">
           <div className="splash-progress-track">
             <div
-              className={`splash-progress-fill ${pct === null ? "is-indeterminate" : ""}`}
+              className={[
+                "splash-progress-fill",
+                pct === null && !isError ? "is-indeterminate" : "",
+                isError ? "is-error" : "",
+              ].filter(Boolean).join(" ")}
               style={pct !== null ? { width: `${pct}%` } : undefined}
             />
-            {/* 完了前は常時走るシマー(画面に動きを残す) */}
-            {!isReady && <div className="splash-progress-shimmer" />}
+            {/* 不定進捗の区間だけを動かし、完了済みの進捗は静止させる */}
           </div>
-          {!isReady && <Spinner size={11} color="var(--accent)" />}
+          {!isReady && !isError && <Spinner size={11} color="var(--accent)" />}
           <span className="splash-progress-label num tabular-nums">
             {pct !== null ? `${pct}%` : "—"}
           </span>
         </div>
 
-        <p className="splash-message anim-fade-in" key={status.message}>
-          {status.message}
+        <p
+          className={`splash-message anim-fade-in ${isError ? "is-error" : ""}`}
+          key={displayStatus.message}
+        >
+          {displayStatus.message}
         </p>
 
-        <div ref={logScrollRef} className="splash-log">
-          {logs.length === 0 ? (
-            <div className="splash-log-empty">ログ待機中...</div>
-          ) : (
-            logs.map((line) => (
-              <div key={line.id} className="splash-log-line anim-log-in">
-                {line.text}
-              </div>
-            ))
-          )}
-        </div>
+        {displayStatus.detail && (
+          <p className={`splash-detail ${isError ? "is-error" : ""}`}>
+            {displayStatus.detail}
+          </p>
+        )}
+
+        {isError && (
+          <div className="splash-note is-error">
+            アプリを再起動してください。起動ログでエラーの詳細を確認できます。
+          </div>
+        )}
+
+        {(isError || logs.length > 0) && (
+          <details className="startup-details" open={isError || undefined}>
+            <summary>起動ログ</summary>
+            <div ref={logScrollRef} className="splash-log">
+              {logs.map((line) => <div key={line.id} className="splash-log-line">{line.text}</div>)}
+            </div>
+          </details>
+        )}
       </div>
     </div>
   );

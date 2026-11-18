@@ -5,12 +5,17 @@ import threading
 import time
 import types
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.transcribe import streaming
 
 
 class StreamingModelLoaderTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._old_ensure_model_downloaded = streaming.ensure_model_downloaded
+        streaming.ensure_model_downloaded = lambda model_name: streaming._resolve_repo(model_name)
         streaming._loaded_repo = None
         streaming._loading_repo = None
         streaming._loading_started_at = None
@@ -22,6 +27,7 @@ class StreamingModelLoaderTest(unittest.TestCase):
         self._old_mlx_load = sys.modules.get("mlx_whisper.load_models")
 
     def tearDown(self) -> None:
+        streaming.ensure_model_downloaded = self._old_ensure_model_downloaded
         if self._old_mlx_pkg is not None:
             sys.modules["mlx_whisper"] = self._old_mlx_pkg
         else:
@@ -63,7 +69,11 @@ class StreamingModelLoaderTest(unittest.TestCase):
         t.start()
         time.sleep(0.03)
 
-        repo = streaming.get_or_load_model("large-v3", timeout_sec=0.1)
+        repo = streaming.get_or_load_model(
+            "large-v3",
+            timeout_sec=0.1,
+            allow_stale_takeover=True,
+        )
         self.assertEqual("mlx-community/whisper-large-v3-mlx", repo)
 
         t.join(timeout=1.0)

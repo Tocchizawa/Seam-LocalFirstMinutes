@@ -218,12 +218,12 @@ def _discover_known_files(p: ProjectContext) -> list[str]:
 
 
 def _format_docs_hint(p: ProjectContext) -> str:
-    """CLI agent に対し、最初に Read tool で specific files を読むよう命令する。
+    """CLI agent に対し、必要時だけ参照する具体的なファイルパスを渡す。
 
     実装方針:
       - 抽象パスではなく **既存ファイルの絶対パス** を渡す (発見コスト削減)
-      - 命令は「STEP 1」として短く、強く、最初に置く
-      - ツールを持たない provider 用に「ツール無しなら飛ばせ」と保険
+      - ファイル全体の読み込みを強制せず、必要箇所の検索を促す
+      - ツールを持たない provider はパスを参照情報として扱う
     """
     must_read_files = _discover_known_files(p)
     if not must_read_files:
@@ -231,19 +231,16 @@ def _format_docs_hint(p: ProjectContext) -> str:
         return ""
 
     bullet = "\n".join(f"- {f}" for f in must_read_files)
-    # User prompt の冒頭に置かれる想定。"STEP 1" を最初に、命令的に。
+    # User prompt の冒頭に置くが、全量読み込みを誘発しない短い参照情報にする。
     return (
-        "STEP 1 (REQUIRED, before summarizing): If you have the `Read` tool, "
-        "read the following file(s) using the Read tool. "
-        "Use the absolute paths exactly as shown. "
-        "If you do not have the Read tool (e.g. plain API mode), skip this step.\n"
+        "参考ファイル (必要な場合のみ参照):\n"
         f"{bullet}\n\n"
-        "After reading, use the document content for:\n"
-        "- 正式表記 (project / stakeholder names)\n"
-        "- 用語集 (glossary)\n"
-        "- 人物の役職や所属の整合\n"
-        "Do NOT copy the doc content into the summary; it is reference only.\n\n"
-        "STEP 2: Then create the meeting minutes summary as instructed.\n"
+        "ファイル全体を最初から読み込まないでください。文字起こしに出てきた"
+        "固有名詞・用語・役職の確認が必要な場合だけ、Grep等で該当箇所を検索して"
+        "対象部分をReadしてください。関係する箇所がなければ読まずに進めてください。\n"
+        "確認した内容は正式表記・用語・人物情報の整合にだけ使い、"
+        "ドキュメント本文を議事録へコピーしないでください。\n\n"
+        "上記を踏まえ、文字起こしから議事録を作成してください。\n"
         "─────────────────────────────────────────────\n"
     )
 
@@ -269,6 +266,20 @@ def build_user_prompt(transcript: str, project: ProjectContext | None = None) ->
     return "\n\n".join(sections) + "\n"
 
 
+def get_system_prompt() -> str:
+    """有効な要約 system prompt を返す。
+
+    設定 (minutes_ai.custom_system_prompt) に非空のカスタムプロンプトがあれば
+    それを、無ければ既定の SYSTEM_PROMPT を返す。
+    """
+    from src.config import config
+
+    custom = config.get("minutes_ai", "custom_system_prompt", default="")
+    if isinstance(custom, str) and custom.strip():
+        return custom
+    return SYSTEM_PROMPT
+
+
 def build_messages(
     transcript: str,
     project: ProjectContext | None = None,
@@ -278,7 +289,7 @@ def build_messages(
     タイトル生成は別リクエスト (build_title_messages) で行うため、
     ここでは要約本体のみ生成する prompt を返す。
     """
-    return SYSTEM_PROMPT, build_user_prompt(transcript, project)
+    return get_system_prompt(), build_user_prompt(transcript, project)
 
 
 # ─── Token見積り ────────────────────────────────────────────

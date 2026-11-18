@@ -135,10 +135,15 @@ def _has_qwen_pulled(models: list[str]) -> bool:
     return any(m.lower().startswith("qwen3") for m in models)
 
 
-def _has_cli_binary(name: str) -> bool:
-    import shutil
+def _has_cli_binary(name: str, cfg: dict | None = None) -> bool:
+    from .cli_launcher import build_command_argv
 
-    return shutil.which(name) is not None
+    command, _ = build_command_argv(
+        cfg or {"binary_path": name},
+        default_binary=name,
+        command_args=["--version"],
+    )
+    return command is not None
 
 
 async def auto_detect_recommended(
@@ -182,12 +187,12 @@ async def auto_detect_recommended(
                 "reason": f"{label} のAPIキーが登録されています",
             }
 
-    if _has_cli_binary("claude"):
+    if _has_cli_binary("claude", config.get("claude_code", {}) or {}):
         return {
             "provider": PROVIDER_CLAUDE_CODE,
             "reason": "Claude Code CLI が PATH にあります (subscription利用)",
         }
-    if _has_cli_binary("codex"):
+    if _has_cli_binary("codex", config.get("codex", {}) or {}):
         return {
             "provider": PROVIDER_CODEX,
             "reason": "Codex CLI が PATH にあります (subscription利用)",

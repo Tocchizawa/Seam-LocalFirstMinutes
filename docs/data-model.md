@@ -20,10 +20,27 @@ minutes_ai:
   ollama:
     model: "qwen3:8b"
     num_ctx: 8192
+  claude_code:
+    binary_path: "claude"
+    model: "sonnet"
+    launcher_command: ""
+    launcher_shell: "/bin/zsh"
+    launcher_interactive: true
+    connect_timeout_sec: 12
+    extra_args: []
+  codex:
+    binary_path: "codex"
+    model: ""
+    reasoning_effort: "low"    # minimal / low / medium / high / xhigh
+    launcher_command: ""
+    launcher_shell: "/bin/zsh"
+    launcher_interactive: true
+    connect_timeout_sec: 30
+    extra_args: []
 
 # Whisper設定
 whisper:
-  model: "medium"               # tiny / base / small / medium / large-v3
+  model: "medium"               # tiny / base / small / medium / large-v1 / large-v2 / large-v3 / large-v3-turbo
   language: "ja"
   device: "auto"                # auto / cpu / mps
   streaming:
@@ -34,9 +51,30 @@ whisper:
 # 録音設定
 recording:
   mic_device: null              # null = システム既定
-  system_capture: "auto"        # auto / screencapturekit / blackhole
+  mic_capture: "coreaudio_sidecar" # coreaudio_sidecar / sounddevice
+  system_capture: "screencapturekit" # screencapturekit
   sample_rate: 16000
   channels: 1
+  system_capture_watchdog:
+    enabled: true               # 内部音声が途中で途切れた録音を正常完了扱いしない
+    min_duration_sec: 60
+    min_coverage_ratio: 0.85
+    max_missing_sec: 20
+    min_active_sec_before_restart: 30 # 有音取得後の無音化を判定する最低取得時間
+    silent_restart_sec: 20       # PCMは継続しているが波形が無音の場合に再生成
+    byte_stall_restart_sec: 5    # PCM byte増加停止時に再生成
+    restart_cooldown_sec: 10
+    restart_failure_backoff_sec: 0.5
+    max_restarts: 5              # capture source消失以外の連続再生成失敗の上限
+    max_silent_tail_sec: 60
+  audio_leveling:
+    enabled: true               # 録音中の自動ゲイン補正
+    realtime_enabled: true      # Whisper投入前のリアルタイム補正
+    target_rms: 0.08
+    noise_floor: 0.003
+    max_gain: 12.0
+    peak_limit: 0.95
+    frame_ms: 100
 
 # エージェント設定
 agent:
@@ -60,7 +98,14 @@ logging:
 # セットアップ状態
 setup:
   completed: true
+
+# アプリ更新
+app_update:
+  check_on_startup: true
+  auto_install_on_startup: false
 ```
+
+Whisper のモデル本体は設定ファイルや SQLite には保存せず、Hugging Face Hub のローカルキャッシュで管理する。設定画面から既知モデルのダウンロード・削除ができ、ダウンロード中の状態（進捗、サイズ、速度、エラー）は実行中メモリで管理する。
 
 **全フィールドにデフォルト値を持たせる**: 新バージョンでフィールドが追加された場合、欠落しているキーはコード側のデフォルト値で補完。`schema_version` でマイグレーション判定。
 
@@ -125,8 +170,9 @@ projects:
 ~/.seam/sessions/{session_id}/
 ├── state.json
 ├── mic.raw / mic.wav
-├── system.raw / system.wav
-├── combined.wav
+├── system.raw / system.meta.json
+├── system.wav
+├── combined.flac
 ├── streaming_transcript.json
 ├── context.json
 └── minutes.md
@@ -294,14 +340,14 @@ def build_transcript_text(transcript: list[dict]) -> str:
 ```
 録音開始
   │
-  ├── RAW PCM 書き込み (mic.raw, system.raw)   [一時]
+  ├── RAW PCM 書き込み (mic.raw, system.raw) [一時]
   ├── リアルタイムミックス → Whisper → GUI       [一時]
   │
 録音停止
   │
-  ├── Whisper バッファ flush                     [一時]
-  ├── RAW → WAV 変換                            [一時]
-  ├── ミックス → combined.wav                    [一時]
+  ├── Whisper バッファ flush                     [保存用 transcript の確定]
+  ├── system.raw → system.wav 変換               [一時]
+  ├── realtime mixed stream → combined.flac      [再生・手動再文字起こし用]
   │
 コンテキスト調査
   │

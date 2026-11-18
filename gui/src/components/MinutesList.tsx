@@ -1,15 +1,16 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   MagnifyingGlass, X, DownloadSimple, Trash, Spinner as PhSpinner,
-  WarningCircle, FolderOpen,
+  WarningCircle, FolderOpen, ArrowSquareOut, UploadSimple, FileAudio,
 } from "@phosphor-icons/react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { showToast } from "../lib/toast";
 import type {
   Minutes, MinutesSearchResult, PipelineStatus, Project,
 } from "../lib/api";
 import {
   searchMinutes, exportMinutes, deleteMinutes, moveMinutesToProject,
+  importAudioMinutes,
 } from "../lib/api";
 import { Spinner } from "./Spinner";
 import { MoveToProjectModal } from "./MoveToProjectModal";
@@ -26,9 +27,17 @@ interface Props {
   /** 進行中の要約ジョブ: minutes_id → state ("queued" / "running") */
   activeSummarizes: Map<string, string>;
   processing: PipelineStatus[];
+  loading?: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  error?: string;
+  moreError?: string;
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onOpenPipeline: (sessionId: string) => void;
   onDismissPipeline: (sessionId: string) => void;
+  onLoadMore?: () => void;
+  onRetry?: () => void;
+  onRetryMore?: () => void;
   onMutated: () => void;
 }
 
@@ -51,33 +60,19 @@ function fmtDate(iso: string) {
     return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
   } catch { return ""; }
 }
-function startOfDay(d: Date) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+function fmtShortDate(iso: string) {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return `${d.getMonth() + 1}/${d.getDate()} (${WEEKDAYS[d.getDay()]})`;
+  } catch { return ""; }
 }
-function isoToLocalDate(iso: string | undefined | null): string {
-  if (!iso) {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  }
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso.slice(0, 10);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function startedAtTs(iso: string | undefined | null): number {
+  if (!iso) return 0;
+  const t = new Date(iso).getTime();
+  return isNaN(t) ? 0 : t;
 }
-
-function groupKey(dateStr: string, now: Date): string {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "それ以前";
-  const today = startOfDay(now);
-  const that = startOfDay(d);
-  const dayMs = 86400000;
-  const diffDays = Math.round((today - that) / dayMs);
-  if (diffDays <= 0) return "今日";
-  if (diffDays === 1) return "昨日";
-  if (diffDays < 7) return "今週";
-  if (now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth()) return "今月";
-  return "それ以前";
-}
-const GROUP_ORDER = ["今日", "昨日", "今週", "今月", "それ以前"];
 
 function summaryPreview(s: string | undefined, len = 80): string {
   if (!s) return "";
@@ -134,26 +129,65 @@ function HighlightedText({
 
 export function MinutesList({
   minutes, projectId, allProjects, activeSummarizes, processing,
-  onOpenMin, onOpenPipeline, onDismissPipeline, onMutated,
+  loading = false, loadingMore = false, hasMore = false, error = "", moreError = "",
+  onOpenMin, onOpenPipeline, onDismissPipeline, onLoadMore, onRetry, onRetryMore, onMutated,
 }: Props) {
   const [q, setQ] = useState("");
   const [searched, setSearched] = useState<MinutesSearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [moveTarget, setMoveTarget] = useState<Minutes | MinutesSearchResult | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const importMenuRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const searchGenerationRef = useRef(0);
+  const processingSessionIds = useMemo(() => new Set(
+    processing
+      .filter((pipeline) => pipeline.state === "recording"
+        || pipeline.state === "stopping"
+        || pipeline.state === "transcribing")
+      .flatMap((pipeline) => pipeline.session_id ? [pipeline.session_id] : []),
+  ), [processing]);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
 
   useEffect(() => {
+    if (!importMenuOpen) return;
+    const onDown = (ev: MouseEvent) => {
+      if (!importMenuRef.current?.contains(ev.target as Node)) {
+        setImportMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [importMenuOpen]);
+
+  useEffect(() => {
+    const generation = ++searchGenerationRef.current;
     const trimmed = q.trim();
-    if (!trimmed) { setSearched(null); return; }
+    if (!trimmed) {
+      setSearched(null);
+      setSearching(false);
+      return () => {
+        if (searchGenerationRef.current === generation) searchGenerationRef.current += 1;
+      };
+    }
     setSearching(true);
     const id = setTimeout(async () => {
-      try { setSearched(await searchMinutes(trimmed, projectId)); }
-      catch { setSearched([]); }
-      finally { setSearching(false); }
+      try {
+        const results = await searchMinutes(trimmed, projectId);
+        if (generation === searchGenerationRef.current) setSearched(results);
+      } catch {
+        if (generation === searchGenerationRef.current) setSearched([]);
+      } finally {
+        if (generation === searchGenerationRef.current) setSearching(false);
+      }
     }, 280);
-    return () => clearTimeout(id);
+    return () => {
+      clearTimeout(id);
+      if (searchGenerationRef.current === generation) searchGenerationRef.current += 1;
+    };
   }, [q, projectId]);
 
   // 検索結果以外: パイプラインを minute 一致 / orphan に分類
@@ -165,7 +199,10 @@ export function MinutesList({
       for (const p of processing) {
         if (p.session_id && minSids.has(p.session_id)) {
           map.set(p.session_id, p);
-        } else if (p.session_id) {
+        } else if (
+          p.session_id
+          && (p.state === "stopping" || p.state === "transcribing")
+        ) {
           orphans.push(p);
         }
       }
@@ -177,30 +214,22 @@ export function MinutesList({
     | { kind: "min"; m: Minutes; pipeline?: PipelineStatus }
     | { kind: "orphan"; p: PipelineStatus };
 
-  type GroupItem = { label: string; items: Item[] };
-
-  const groups = useMemo<GroupItem[]>(() => {
+  const items = useMemo<Item[]>(() => {
     if (searched) return [];
-    const now = new Date();
-    const map = new Map<string, Item[]>();
-    for (const m of minutes) {
-      const k = groupKey(m.date, now);
-      if (!map.has(k)) map.set(k, []);
-      map.get(k)!.push({
-        kind: "min",
-        m,
-        pipeline: pipelineByMinSid.get(m.session_id),
-      });
-    }
+    const arr: Item[] = minutes.map((m) => ({
+      kind: "min" as const,
+      m,
+      pipeline: pipelineByMinSid.get(m.session_id),
+    }));
     for (const p of orphanPipelines) {
-      const dStr = isoToLocalDate(p.started_at);
-      const k = groupKey(dStr, now);
-      if (!map.has(k)) map.set(k, []);
-      map.get(k)!.unshift({ kind: "orphan", p });
+      arr.push({ kind: "orphan" as const, p });
     }
-    return GROUP_ORDER
-      .filter((k) => map.has(k))
-      .map((k) => ({ label: k, items: map.get(k)! }));
+    arr.sort((a, b) => {
+      const ta = a.kind === "min" ? startedAtTs(a.m.started_at) : startedAtTs(a.p.started_at);
+      const tb = b.kind === "min" ? startedAtTs(b.m.started_at) : startedAtTs(b.p.started_at);
+      return tb - ta;
+    });
+    return arr;
   }, [minutes, searched, orphanPipelines, pipelineByMinSid]);
 
   const handleExport = async (e: React.MouseEvent, id: string) => {
@@ -228,6 +257,62 @@ export function MinutesList({
     } finally { setBusyId(null); }
   };
 
+  const handleImportPick = async (kind: "file" | "folder") => {
+    if (importing) return;
+    setImportMenuOpen(false);
+    setImporting(true);
+    try {
+      const selected = await open(
+        kind === "folder"
+          ? {
+              title: "セッションフォルダを選択",
+              directory: true,
+              multiple: false,
+            }
+          : {
+              title: "音声ファイルを選択",
+              multiple: false,
+              filters: [{
+                name: "Audio",
+                extensions: [
+                  "wav", "flac", "mp3", "m4a", "aac", "ogg", "opus",
+                  "webm", "mp4", "mov", "aif", "aiff",
+                ],
+              }],
+            },
+      );
+      const sourcePath = Array.isArray(selected) ? selected[0] : selected;
+      if (!sourcePath) return;
+
+      const startRetranscribe = kind === "file"
+        ? true
+        : await ask("既存の文字起こしがある場合、再文字起こしも実行しますか?", {
+            title: "取り込み設定",
+            okLabel: "再文字起こしする",
+            cancelLabel: "取り込みのみ",
+          });
+
+      const result = await importAudioMinutes(projectId, sourcePath, { startRetranscribe });
+      showToast({
+        kind: "ok",
+        text: result.retranscribe
+          ? (result.used_existing_transcript
+              ? "取り込み開始: 既存文字起こしを読み込み、再文字起こし中"
+              : "取り込み開始: 文字起こし中")
+          : result.summary_enqueued
+            ? "取り込み完了: 要約を開始しました"
+            : result.used_existing_transcript
+              ? "取り込み完了: 既存文字起こしを読み込みました"
+              : "取り込み完了",
+      });
+      onMutated();
+    } catch (e) {
+      showToast({ kind: "err", text: `取り込み失敗: ${e instanceof Error ? e.message : ""}` });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   // 他に移動先となるプロジェクトがあるかどうか
   const hasOtherProjects = allProjects.some((p) => p.id !== projectId);
 
@@ -252,38 +337,118 @@ export function MinutesList({
   };
 
   const showSearchResults = searched !== null;
-  const empty = !showSearchResults && groups.length === 0;
+  const empty = !loading && !error && !showSearchResults && items.length === 0;
+
+  useEffect(() => {
+    if (showSearchResults || !hasMore || loadingMore || moreError || !onLoadMore) return;
+    const el = loadMoreRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        onLoadMore();
+      }
+    }, { root: null, rootMargin: "240px 0px", threshold: 0 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showSearchResults, hasMore, loadingMore, moreError, onLoadMore]);
+
+  const retryMore = onRetryMore ?? onLoadMore;
 
   return (
     <div className="flex flex-col">
-      {(minutes.length > 0 || showSearchResults) && (
-        <div className="px-5 pt-4 pb-2">
-          <div className="search-bar">
-            <MagnifyingGlass size={13} weight="regular" className="text-(--t3) shrink-0" />
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="タイトル・要約・本文を検索..."
-              className="search-bar-input"
-            />
-            {searching && <Spinner size={12} />}
-            {q && !searching && (
-              <button
-                onClick={() => setQ("")}
-                className="icon-btn !w-5 !h-5"
-                aria-label="クリア"
-              >
-                <X size={11} weight="bold" />
-              </button>
+      <div className="minutes-search-wrap">
+        <div className="minutes-list-toolbar">
+          <h2>議事録</h2>
+          {(minutes.length > 0 || showSearchResults) ? (
+            <div className="search-bar">
+              <MagnifyingGlass size={13} weight="regular" className="text-(--t3) shrink-0" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                aria-label="議事録を検索"
+                placeholder="議事録を検索"
+                className="search-bar-input"
+              />
+              {searching && <Spinner size={12} />}
+              {q && !searching && (
+                <button
+                  onClick={() => setQ("")}
+                  className="icon-btn !w-5 !h-5"
+                  aria-label="議事録の検索をクリア"
+                >
+                  <X size={11} weight="bold" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="minutes-list-toolbar-spacer" />
+          )}
+          <div className="minutes-import-menu-wrap" ref={importMenuRef}>
+            <button
+              type="button"
+              className="minutes-import-btn"
+              title="音声を取り込み"
+              aria-label="音声を取り込み"
+              aria-haspopup="menu"
+              aria-expanded={importMenuOpen}
+              disabled={importing}
+              onClick={() => setImportMenuOpen((v) => !v)}
+            >
+              {importing ? (
+                <PhSpinner size={13} className="anim-spin" />
+              ) : (
+                <UploadSimple size={14} weight="regular" />
+              )}
+              <span>{importing ? "追加中" : "音声を追加"}</span>
+            </button>
+            {importMenuOpen && (
+              <div className="minutes-import-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="minutes-import-menu-item"
+                  onClick={() => handleImportPick("file")}
+                >
+                  <FileAudio size={14} weight="regular" />
+                  <span>音声ファイル</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="minutes-import-menu-item"
+                  onClick={() => handleImportPick("folder")}
+                >
+                  <FolderOpen size={14} weight="regular" />
+                  <span>セッションフォルダ</span>
+                </button>
+              </div>
             )}
           </div>
+        </div>
+      </div>
+
+      {loading && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state">
+          <Spinner size={14} />
+          <span>読み込み中</span>
+        </div>
+      )}
+
+      {error && !showSearchResults && items.length === 0 && (
+        <div className="minutes-list-state is-error">
+          <span>{error}</span>
+          {onRetry && (
+            <button type="button" className="btn btn-ghost" onClick={onRetry}>
+              再試行
+            </button>
+          )}
         </div>
       )}
 
       {empty && (
-        <p className="text-[12px] text-(--t3) text-center py-12">
-          録音するとここに議事録が表示されます
-        </p>
+        <div className="minutes-empty-state">
+          <p>議事録はありません</p>
+        </div>
       )}
 
       {showSearchResults && (
@@ -293,6 +458,8 @@ export function MinutesList({
           searching={searching}
           busyId={busyId}
           canMove={hasOtherProjects}
+          activeSummarizes={activeSummarizes}
+          processingSessionIds={processingSessionIds}
           onOpenMin={onOpenMin}
           onExport={handleExport}
           onDelete={handleDelete}
@@ -300,10 +467,14 @@ export function MinutesList({
         />
       )}
 
-      {!showSearchResults && groups.map((g) => (
-        <section key={g.label} className="anim-fade-in">
-          <h3 className="flat-group-label">{g.label}</h3>
-          {g.items.map((it, idx) => {
+      {!showSearchResults && (
+        <div className="minutes-table">
+          {items.length > 0 && (
+            <div className="minutes-table-heading" aria-hidden="true">
+              <span>日時</span><span>会議名 / 状態</span>
+            </div>
+          )}
+          {items.map((it, idx) => {
             if (it.kind === "min") {
               return (
                 <MinutesRow key={it.m.id}
@@ -325,8 +496,35 @@ export function MinutesList({
                 onDismiss={() => it.p.session_id && onDismissPipeline(it.p.session_id)} />
             );
           })}
-        </section>
-      ))}
+          {(items.length > 0 || hasMore || loadingMore || moreError) && (
+            <div
+              ref={loadMoreRef}
+              className={`minutes-list-load-more ${moreError ? "is-error" : ""}`}
+              aria-live="polite"
+            >
+              {loadingMore ? (
+                <>
+                  <Spinner size={12} />
+                  <span>読み込み中</span>
+                </>
+              ) : moreError ? (
+                <>
+                  <span>{moreError}</span>
+                  {retryMore && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={retryMore}
+                    >
+                      再試行
+                    </button>
+                  )}
+                </>
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
 
       {moveTarget && (
         <MoveToProjectModal
@@ -342,7 +540,7 @@ export function MinutesList({
 }
 
 function SearchResults({
-  query, results, searching, busyId, canMove,
+  query, results, searching, busyId, canMove, activeSummarizes, processingSessionIds,
   onOpenMin, onExport, onDelete, onStartMove,
 }: {
   query: string;
@@ -350,6 +548,8 @@ function SearchResults({
   searching: boolean;
   busyId: string | null;
   canMove: boolean;
+  activeSummarizes: Map<string, string>;
+  processingSessionIds: Set<string>;
   onOpenMin: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onExport: (e: React.MouseEvent, id: string) => void;
   onDelete: (e: React.MouseEvent, id: string) => void;
@@ -365,13 +565,20 @@ function SearchResults({
     );
   }
   return (
-    <div className="px-5 py-2">
-      <p className="text-[10px] font-semibold tracking-wider uppercase text-(--t3) mb-3">
+    <div className="minutes-search-results">
+      <p className="minutes-result-count">
         検索結果 {results.length} 件
       </p>
       <div className="flex flex-col gap-2">
         {results.map((r) => {
           const hl = r.highlights ?? { title: null, summary: null, transcript: null };
+          const summaryState = activeSummarizes.get(r.id);
+          const isProcessing = summaryState !== undefined || processingSessionIds.has(r.session_id);
+          const processingLabel = summaryState === "dictionary_update"
+            ? "用語辞書を整理中"
+            : summaryState === "queued"
+              ? "要約待ち"
+              : summaryState ? "要約中" : "文字起こし中";
           const bestTab: "summary" | "transcript" | undefined =
             hasHighlight(hl.transcript) ? "transcript"
             : hasHighlight(hl.summary) ? "summary"
@@ -381,6 +588,8 @@ function SearchResults({
               key={r.id}
               r={r}
               busy={busyId === r.id}
+              processing={isProcessing}
+              processingLabel={processingLabel}
               canMove={canMove}
               onOpen={() => onOpenMin(r, { query, tab: bestTab })}
               onExport={(e) => onExport(e, r.id)}
@@ -395,10 +604,12 @@ function SearchResults({
 }
 
 function SearchResultCard({
-  r, busy, canMove, onOpen, onExport, onDelete, onStartMove,
+  r, busy, processing, processingLabel, canMove, onOpen, onExport, onDelete, onStartMove,
 }: {
   r: MinutesSearchResult;
   busy: boolean;
+  processing: boolean;
+  processingLabel: string;
   canMove: boolean;
   onOpen: () => void;
   onExport: (e: React.MouseEvent) => void;
@@ -422,49 +633,57 @@ function SearchResultCard({
     : null;
 
   return (
-    <div onClick={onOpen} className="search-result-card group">
-      <div className="flex items-start gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h4 className="text-[13px] font-medium text-(--t1) min-w-0">
+    <div className="search-result-card group">
+      <button type="button" onClick={onOpen} className="search-result-open">
+        <span className="search-result-copy flex-1 min-w-0">
+          <span className="flex items-center gap-2 flex-wrap">
+            <span className="text-[13px] font-medium text-(--t1) min-w-0">
               <HighlightedText text={hl.title} fallback={r.title} />
-            </h4>
+            </span>
             {matchedFields.map((f) => (
               <span key={f.key} className="match-badge">{f.label}</span>
             ))}
-          </div>
-          <p className="text-[10px] text-(--t3) mt-1 num">
+          </span>
+          <span className="text-[10px] text-(--t3) mt-1 num">
             {fmtDate(r.date)} · {fmtTime(r.started_at)} · {fmtDur(r.duration_sec)}
-          </p>
+          </span>
+          {processing && (
+            <span className="minutes-card-status mt-1">
+              <Spinner size={10} color="var(--accent)" />
+              <span>{processingLabel}</span>
+            </span>
+          )}
           {snippet && (
-            <div className="mt-2 text-[12px] text-(--t2) leading-relaxed">
+            <span className="mt-2 text-[12px] text-(--t2) leading-relaxed">
               {snippetLabel && (
                 <span className="text-[10px] text-(--t3) mr-1.5">{snippetLabel}:</span>
               )}
               <HighlightedText text={snippet} />
-            </div>
+            </span>
           )}
-        </div>
-        <div className="flat-row-actions flex items-center gap-0.5 shrink-0">
+        </span>
+      </button>
+      <div className="flat-row-actions flex items-center gap-0.5 shrink-0">
           {canMove && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartMove(); }}
-              disabled={busy}
+              disabled={busy || processing}
               className="icon-btn !w-7 !h-7"
-              title="他のプロジェクトへ移動"
+              aria-label="他のプロジェクトへ移動"
+              title={processing ? "処理中は移動できません" : "他のプロジェクトへ移動"}
             >
               <FolderOpen size={12} weight="regular" />
             </button>
           )}
           <button onClick={onExport} disabled={busy}
-            className="icon-btn !w-7 !h-7" title="Markdown を書き出し">
+            className="icon-btn !w-7 !h-7" aria-label="Markdown を書き出し" title="Markdown を書き出し">
             {busy ? <PhSpinner size={11} className="anim-spin" /> : <DownloadSimple size={12} weight="regular" />}
           </button>
-          <button onClick={onDelete} disabled={busy}
-            className="icon-btn !w-7 !h-7 hover:!text-(--danger)" title="削除">
+          <button onClick={onDelete} disabled={busy || processing}
+            className="icon-btn !w-7 !h-7 hover:!text-(--danger)" aria-label="削除"
+            title={processing ? "処理中は削除できません" : "削除"}>
             <Trash size={12} weight="regular" />
           </button>
-        </div>
       </div>
     </div>
   );
@@ -482,6 +701,7 @@ function ProcessingRow({
   const time = startedAt
     ? `${String(startedAt.getHours()).padStart(2, "0")}:${String(startedAt.getMinutes()).padStart(2, "0")}`
     : "";
+  const shortDate = p.started_at ? fmtShortDate(p.started_at) : "";
   const title = `${time} の会議`;
 
   type Phase = "active" | "leaving";
@@ -503,42 +723,44 @@ function ProcessingRow({
       : "文字起こし中";
 
   return (
-    <div className="flat-row proc-row group"
-      data-anim={phase}
-      onClick={onOpen}>
-      <div className="shrink-0 flex items-center justify-center w-4">
-        {isError ? (
-          <WarningCircle size={14} weight="fill" className="text-(--danger)" />
-        ) : (
-          <Spinner size={12} color="var(--accent)" />
-        )}
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <p className="text-[13px] truncate text-(--t1)">{title}</p>
-          <span className={`text-[11px] flex-1 min-w-0 truncate ${
-            isError ? "text-(--danger)" : "text-(--accent)"
-          }`}>
-            — {p.message || activeLabel}
-          </span>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-3 shrink-0 text-[11px] text-(--t3) num">
-        <span>{time}</span>
-      </div>
+    <article className="minutes-card proc-card group" data-anim={phase}>
+      <button type="button" onClick={onOpen} className="minutes-card-open">
+      <span className="minutes-card-body">
+        <span className="minutes-card-meta num">
+          {shortDate && <span className="minutes-card-date">{shortDate}</span>}
+          {time && <span>{time}</span>}
+        </span>
+        <span className="minutes-card-title">{title}</span>
+        <span className={`minutes-card-status ${isError ? "is-error" : ""}`}>
+          {isError ? (
+            <WarningCircle size={11} weight="fill" />
+          ) : (
+            <Spinner size={10} color="var(--accent)" />
+          )}
+          <span className="truncate">{p.message || activeLabel}</span>
+        </span>
+      </span>
+      </button>
 
       {isError && (
-        <div className="flat-row-actions flex items-center gap-0.5">
+        <div className="minutes-card-actions">
+          <button
+            onClick={onOpen}
+            className="icon-btn !w-7 !h-7"
+            aria-label="詳細を開く"
+            title="詳細を開く"
+          >
+            <ArrowSquareOut size={11} weight="regular" />
+          </button>
           <button onClick={(e) => { e.stopPropagation(); onDismiss(); }}
             className="icon-btn !w-7 !h-7"
+            aria-label="リストから消す"
             title="リストから消す">
             <X size={11} weight="bold" />
           </button>
         </div>
       )}
-    </div>
+    </article>
   );
 }
 
@@ -556,55 +778,64 @@ function MinutesRow({
   onDelete: (e: React.MouseEvent) => void;
   onStartMove: () => void;
 }) {
-  const preview = summaryPreview(m.summary);
+  const preview = summaryPreview(m.summary, 140);
   const time = fmtTime(m.started_at);
+  const shortDate = fmtShortDate(m.date || m.started_at);
   const isProcessing = pipeline && (
     pipeline.state === "stopping" || pipeline.state === "transcribing"
   );
   const isError = pipeline?.state === "error";
+  const isDictionaryUpdating = summarizeState === "dictionary_update";
   const isSummarizing = !isProcessing && !isError && summarizeState !== null
-    && (summarizeState === "queued" || summarizeState === "running");
+    && (summarizeState === "queued" || summarizeState === "running" || isDictionaryUpdating);
+  const isProcessingRecord = Boolean(isProcessing || isSummarizing);
 
   const statusText = (() => {
     if (pipeline) {
       if (isError) return pipeline.message || "エラー";
       if (pipeline.state === "stopping") return pipeline.message || "停止処理中";
-      if (pipeline.state === "transcribing") return pipeline.message || "再文字起こし中";
+      if (pipeline.state === "transcribing") return pipeline.message || "文字起こし中";
     }
     if (isSummarizing) {
-      return summarizeState === "queued" ? "要約キュー待ち" : "要約中";
+      if (isDictionaryUpdating) return "用語辞書を整理中";
+      return summarizeState === "queued" ? "要約待ち" : "要約中";
     }
     return null;
   })();
 
   return (
-    <div onClick={onOpen} className="flat-row group">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <p className="text-[13px] truncate text-(--t1)">{m.title}</p>
-          {statusText ? (
-            <span className={`flex items-center gap-1.5 text-[11px] truncate min-w-0 flex-1 ${
-              isError ? "text-(--danger)" : "text-(--accent)"
-            }`}>
-              {(isProcessing || isSummarizing) && <Spinner size={10} color="var(--accent)" />}
-              {isError && <WarningCircle size={11} weight="fill" />}
-              <span className="truncate">— {statusText}</span>
-            </span>
-          ) : preview ? (
-            <span className="text-[11px] text-(--t3) truncate flex-1 min-w-0">— {preview}</span>
-          ) : null}
-        </div>
-      </div>
-      <div className="flex items-center gap-3 shrink-0 num text-[11px] text-(--t3)">
-        <span>{time}</span>
-        {m.duration_sec > 0 && <span className="text-(--t4)">{fmtDur(m.duration_sec)}</span>}
-      </div>
-      <div className="flat-row-actions flex items-center gap-0.5">
+    <article className="minutes-card group">
+      <button type="button" onClick={onOpen} className="minutes-card-open">
+      <span className="minutes-card-body">
+        <span className="minutes-card-meta num">
+          {shortDate && <span className="minutes-card-date">{shortDate}</span>}
+          {time && <span>{time}</span>}
+          {m.duration_sec > 0 && <>
+            {time && <span className="minutes-card-meta-sep">·</span>}
+            <span>{fmtDur(m.duration_sec)}</span>
+          </>}
+        </span>
+        <span className="minutes-card-title">{m.title}</span>
+        {statusText ? (
+          <span className={`minutes-card-status ${isError ? "is-error" : ""}`}>
+            {isProcessingRecord && <Spinner size={10} color="var(--accent)" />}
+            {isError && <WarningCircle size={11} weight="fill" />}
+            <span className="truncate">{statusText}</span>
+          </span>
+        ) : preview ? (
+          <span className="minutes-card-preview">{preview}</span>
+        ) : (
+          null
+        )}
+      </span>
+      </button>
+      <div className="minutes-card-actions">
         {canMove && (
           <RowAction
             onClick={(e) => { e.stopPropagation(); onStartMove(); }}
-            title="他のプロジェクトへ移動"
+            title={isProcessingRecord ? "処理中は移動できません" : "他のプロジェクトへ移動"}
             busy={busy}
+            disabled={isProcessingRecord}
           >
             <FolderOpen size={12} weight="regular" />
           </RowAction>
@@ -612,25 +843,33 @@ function MinutesRow({
         <RowAction onClick={onExport} title="Markdown を書き出し" busy={busy}>
           <DownloadSimple size={12} weight="regular" />
         </RowAction>
-        <RowAction onClick={onDelete} title="削除" danger busy={busy}>
+        <RowAction
+          onClick={onDelete}
+          title={isProcessingRecord ? "処理中は削除できません" : "削除"}
+          danger
+          busy={busy}
+          disabled={isProcessingRecord}
+        >
           <Trash size={12} weight="regular" />
         </RowAction>
       </div>
-    </div>
+    </article>
   );
 }
 
 function RowAction({
-  children, onClick, title, danger, busy,
+  children, onClick, title, danger, busy, disabled,
 }: {
   children: React.ReactNode;
   onClick: (e: React.MouseEvent) => void;
   title: string;
   danger?: boolean;
   busy?: boolean;
+  disabled?: boolean;
 }) {
   return (
-    <button onClick={onClick} title={title} disabled={busy}
+    <button onClick={onClick} title={title} disabled={busy || disabled}
+      aria-label={title}
       className={`icon-btn !w-7 !h-7 ${danger ? "hover:!text-(--danger)" : ""}`}>
       {busy ? <PhSpinner size={11} className="anim-spin" /> : children}
     </button>

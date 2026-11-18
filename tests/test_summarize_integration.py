@@ -109,12 +109,24 @@ if minutes_records:
     tokens = estimate_tokens_jp(formatted)
     print(f"    estimated tokens: {tokens}")
 
-    # 16K context で fits か? (DEFAULT_MAX_OUTPUT_TOKENS=8192 を考慮)
+    # 実DBの議事録は長さがユーザー環境に依存するため、full transcript は
+    # fits / overflow のどちらも正しい分類として扱う。
     try:
         validate_context_budget(formatted, ctx_window=16384)
-        ok("transcript fits 16K ctx (16384)", True)
+        ok("full transcript context budget classified", True, "fits")
     except SummaryError as e:
-        ok("transcript fits 16K ctx (16384)", False, str(e.code))
+        ok(
+            "full transcript context budget classified",
+            e.code == SummaryErrorCode.CONTEXT_OVERFLOW,
+            str(e.code),
+        )
+
+    # 小さい transcript は必ず 16K に収まることを固定データで検証する。
+    try:
+        validate_context_budget(formatted[:1000], ctx_window=16384)
+        ok("trimmed transcript fits 16K ctx (16384)", True)
+    except SummaryError as e:
+        ok("trimmed transcript fits 16K ctx (16384)", False, str(e.code))
 
 
 # ─────────────────────────────────────────────────────────
@@ -151,9 +163,22 @@ class FakeProvider:
     async def health_check(self) -> ProviderHealth:
         return ProviderHealth(ok=True, code="READY", message="fake ready", model="fake-1")
 
-    async def generate(self, transcript, *, project=None, on_token=None, timeout_sec=300, generate_title=False):
+    async def generate(
+        self,
+        transcript,
+        *,
+        project=None,
+        on_token=None,
+        on_activity=None,
+        timeout_sec=300,
+        **_ignored,
+    ):
         if self._fail_with:
             raise SummaryError(self._fail_with, "fake error", provider=self.name)
+        if on_activity:
+            res = on_activity("FakeProvider running")
+            if asyncio.iscoroutine(res):
+                await res
         # ストリーム模擬
         chunks = ["## 概要\n", "テスト要約\n\n", "## 決定事項\n", "- なし\n"]
         for c in chunks:
@@ -189,33 +214,41 @@ async def _run_e2e():
     # FakeProvider を get_provider 経由で挿す
     import src.summarize.registry as reg
     orig_factories = reg._FACTORIES.copy()
+    orig_phase_b = SummaryRunner._run_phase_b
     reg._FACTORIES["fake"] = lambda cfg: FakeProvider()
 
-    # 既存DBの最小minutes idで実行 (DB read のみ)
-    if not minutes_records:
-        return None, captured
-    target_id = minutes_records[0]["id"]
-    runner.enqueue(target_id, provider_name="fake")
+    async def _noop_phase_b(self, minutes_id: str) -> None:
+        return None
 
-    # 完了を待つ (ポーリング、最長 5秒)
-    for _ in range(50):
-        st = runner.get_status(target_id)
-        if st and st.state in ("done", "failed", "cancelled", "skipped"):
-            break
-        await asyncio.sleep(0.1)
+    SummaryRunner._run_phase_b = _noop_phase_b
+    try:
+        # 既存DBの最小minutes idで実行 (検証後に元へ戻す)
+        if not minutes_records:
+            return None, captured, "", ""
+        target_id = minutes_records[0]["id"]
+        pre = db.get_minutes(target_id)
+        original_summary = pre.get("summary", "") if pre else ""
+        original_llm = pre.get("llm_model", "") if pre else ""
+        runner.enqueue(target_id, provider_name="fake")
 
-    # restore
-    reg._FACTORIES.clear()
-    reg._FACTORIES.update(orig_factories)
+        # 完了を待つ (ポーリング、最長 5秒)
+        for _ in range(50):
+            st = runner.get_status(target_id)
+            if st and st.state in ("done", "failed", "cancelled", "skipped"):
+                break
+            await asyncio.sleep(0.1)
 
-    final_status = runner.get_status(target_id)
-    await runner.shutdown()
-    return final_status, captured
+        final_status = runner.get_status(target_id)
+        return final_status, captured, original_summary, original_llm
+    finally:
+        await runner.shutdown()
+        reg._FACTORIES.clear()
+        reg._FACTORIES.update(orig_factories)
+        SummaryRunner._run_phase_b = orig_phase_b
 
 
-print("    実DB上の最初のminutesにFakeProviderで要約をかけ、DB上書き...")
-print("    ⚠️  実DB の summary を一時的に書き換えます (元の値は空なので影響なし)")
-final_status, ws_events = asyncio.run(_run_e2e())
+print("    実DB上の最初のminutesにFakeProviderで要約をかけ、検証後に元へ戻す...")
+final_status, ws_events, original_summary, original_llm = asyncio.run(_run_e2e())
 
 if final_status is not None:
     print(f"    final state: {final_status.state}")
@@ -241,7 +274,7 @@ if final_status is not None:
             ok("llm_model updated", "fake:fake-1" == updated.get("llm_model"))
 
             # 元に戻す (テスト副作用クリア)
-            db.update_summary(final_status.minutes_id, "", llm_model=None)
+            db.update_summary(final_status.minutes_id, original_summary, llm_model=original_llm or None)
             print(f"    cleanup: reverted summary on {final_status.minutes_id}")
     elif final_status.state == "skipped":
         ok("summary_skipped broadcasted", "summary_skipped" in types)
@@ -310,7 +343,20 @@ class SlowFakeProvider:
     async def health_check(self):
         return ProviderHealth(ok=True, code="READY", message="ok", model="slow-1")
 
-    async def generate(self, transcript, *, project=None, on_token=None, timeout_sec=300, generate_title=False):
+    async def generate(
+        self,
+        transcript,
+        *,
+        project=None,
+        on_token=None,
+        on_activity=None,
+        timeout_sec=300,
+        **_ignored,
+    ):
+        if on_activity:
+            res = on_activity("SlowFakeProvider running")
+            if asyncio.iscoroutine(res):
+                await res
         for i in range(50):
             if self._cancelled:
                 raise SummaryError(SummaryErrorCode.CANCELLED, "cancelled", provider=self.name)

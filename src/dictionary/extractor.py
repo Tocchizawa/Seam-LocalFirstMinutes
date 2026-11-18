@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Callable
 
 from src.summarize.base import SummaryError, SummaryErrorCode
-from src.summarize.cli_launcher import build_command_argv, normalize_extra_args
+from src.summarize.cli_launcher import (
+    build_command_argv,
+    classify_cli_error_code,
+    normalize_extra_args,
+    strip_cli_error,
+)
 from .prompts import (
     GLOSSARY_EXTRACT_SYSTEM_PROMPT,
     build_glossary_extract_user_prompt,
@@ -394,7 +399,7 @@ async def _claude_code_run(
 
     if not stream_mode:
         try:
-            stdout, _stderr = await asyncio.wait_for(
+            stdout, stderr = await asyncio.wait_for(
                 proc.communicate(full.encode("utf-8")), timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -407,9 +412,11 @@ async def _claude_code_run(
                 f"Claude Code が {timeout}秒以内に応答しませんでした",
             )
         if proc.returncode != 0:
+            err_text = stderr.decode("utf-8", errors="replace")
+            code = classify_cli_error_code(err_text)
             raise SummaryError(
-                SummaryErrorCode.PROVIDER_DOWN,
-                f"claude exited {proc.returncode}",
+                code,
+                f"claude exited {proc.returncode}: {strip_cli_error(err_text)}",
             )
         return stdout.decode("utf-8", errors="replace")
 
@@ -488,9 +495,16 @@ async def _claude_code_run(
             pass
 
     if proc.returncode not in (0, None):
+        stderr_text = ""
+        if proc.stderr is not None:
+            try:
+                stderr_text = (await proc.stderr.read()).decode("utf-8", errors="replace")
+            except Exception:
+                stderr_text = ""
+        code = classify_cli_error_code(stderr_text)
         raise SummaryError(
-            SummaryErrorCode.PROVIDER_DOWN,
-            f"claude exited {proc.returncode}",
+            code,
+            f"claude exited {proc.returncode}: {strip_cli_error(stderr_text)}",
         )
     return final_result or "".join(out_text)
 
@@ -557,7 +571,7 @@ async def _codex_run(
     await proc.stdin.drain()
     proc.stdin.close()
     try:
-        stdout, _stderr = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout,
         )
     except asyncio.TimeoutError:
@@ -570,9 +584,11 @@ async def _codex_run(
             f"Codex が {timeout}秒以内に応答しませんでした",
         )
     if proc.returncode != 0:
+        err_text = stderr.decode("utf-8", errors="replace")
+        code = classify_cli_error_code(err_text)
         raise SummaryError(
-            SummaryErrorCode.PROVIDER_DOWN,
-            f"codex exited {proc.returncode}",
+            code,
+            f"codex exited {proc.returncode}: {strip_cli_error(err_text)}",
         )
     # ANSI 除去 (codex.py で使ってる正規表現)
     import re

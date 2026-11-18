@@ -30,6 +30,15 @@ class HallucinationFilterTest(unittest.TestCase):
         text = "こちら6番目ですが、アカウントロックの期間は30分以上でお願いします。"
         self.assertFalse(self.filter.is_hallucination(text))
 
+    def test_allows_real_text_with_repeated_tail(self) -> None:
+        text = (
+            "大丈夫ですかね。いつもギリギリまですみません。"
+            "本日の朝会これで終わりたいと思います。"
+            "よろしくお願いします。よろしくお願いします。"
+            "よろしくお願いします。よろしくお願いします。"
+        )
+        self.assertFalse(self.filter.is_hallucination(text))
+
 
 if __name__ == "__main__":
     unittest.main()

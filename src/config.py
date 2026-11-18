@@ -18,13 +18,15 @@ DEFAULTS: dict[str, Any] = {
         "auto_install": True,
     },
     "minutes_ai": {
-        "provider": "ollama",         # ollama | claude_api | openai | gemini
+        "provider": "ollama",         # ollama | claude_api | openai | gemini | claude_code | codex
         "auto_generate": True,        # 録音停止時に自動要約 (provider未設定なら skip)
         "generate_title": True,       # 要約時に議事録タイトルも自動生成して上書き
         "auto_dictionary_update": True,  # 要約後に project.glossary / corrections を自動更新 (Phase B)
         "correction_confidence": 0.85,   # Phase B での誤転写ペア採用 confidence 閾値
         "timeout_sec": 300,
         "pull_timeout_sec": 1800,
+        # 要約 system prompt のカスタム上書き。空文字なら既定プロンプトを使用。
+        "custom_system_prompt": "",
         # provider 初使用時の同意フラグ (cloud のみ意味あり)
         "consent": {
             "claude_api": False,
@@ -66,6 +68,7 @@ DEFAULTS: dict[str, Any] = {
             "launcher_command": "",
             "launcher_shell": "/bin/zsh",
             "launcher_interactive": True,
+            "connect_timeout_sec": 12,
             "extra_args": [],
         },
         "codex": {
@@ -73,11 +76,13 @@ DEFAULTS: dict[str, Any] = {
             # codex CLI のモデル一覧は ~/.codex/models_cache.json から動的取得 (UI で選択)。
             # ここの default はフォールバック (キャッシュ未取得時)。空文字なら --model を付けない。
             "model": "",
+            "reasoning_effort": "low",
             # zsh function 等の特殊起動が必要な場合だけ使用。
             # 例: "source ~/.zshrc; my_codex_wrapper"
             "launcher_command": "",
             "launcher_shell": "/bin/zsh",
             "launcher_interactive": True,
+            "connect_timeout_sec": 30,
             "extra_args": [],
         },
     },
@@ -106,8 +111,27 @@ DEFAULTS: dict[str, Any] = {
             "max_direct_match_len": 64,
             "blocked_phrases": [],
         },
+        # 文字起こしの計算資源の使い方。
+        #   full = 常に全力 / auto = システム高負荷時のみ抑制 / eco = 常に抑えめ
+        "performance": {
+            "mode": "auto",
+            # auto モードで抑制を始める CPU 使用率 (%)
+            "cpu_high_threshold": 75.0,
+            # auto モードで抑制を始めるシステムメモリ使用率 (%)
+            "memory_high_threshold": 85.0,
+            # 抑制時: チャンク処理時間 × この係数だけ休止を挿入 (大きいほど遅く・軽く)
+            "throttle_ratio": 0.5,
+            # 1チャンクあたりの休止上限 (秒)
+            "max_throttle_sec": 3.0,
+            # 文字起こしワーカースレッドの nice 値 (0-19, 大きいほど低優先)
+            "worker_nice": 3,
+            # MLX Metal のメモリ目安 (搭載RAM比, 0.2-0.8)。relaxed のためハード上限ではない。
+            "mlx_memory_ratio": 0.4,
+        },
         # 話者記憶: 全プロジェクト共通で扱う。
         "speaker_memory": {
+            # 話者分離そのものの ON/OFF (OFF なら話者ラベルを一切付与しない)
+            "diarization_enabled": True,
             "enabled": True,
             "match_threshold": 0.82,
             "min_audio_sec": 1.0,
@@ -125,7 +149,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "recording": {
         "mic_device": None,
-        "system_capture": "auto",
+        "mic_capture": "coreaudio_sidecar",
+        "system_capture": "screencapturekit",
         "sample_rate": 16000,
         "channels": 1,
         "last_project_id": None,
@@ -140,12 +165,39 @@ DEFAULTS: dict[str, Any] = {
         "mic_stream": {
             "latency": "high",
             "block_ms": 160,
-            "max_block_ms": 320,
-            "overflow_reopen_streak": 6,
             "max_read_errors": 50,
             "max_reopen": 8,
-            "reopen_on_overflow": False,
+            "reset_backend_on_internal_error": True,
+            "internal_error_retries": 2,
+            "internal_error_retry_delay_sec": 0.4,
         },
+        # 内部音声が途中で途切れて mic のみの combined.flac が正常扱いされるのを防ぐ。
+        "system_capture_watchdog": {
+            "enabled": True,
+            "min_duration_sec": 60,
+            "min_coverage_ratio": 0.85,
+            "max_missing_sec": 20,
+            "min_active_sec_before_restart": 30,
+            "silent_restart_sec": 20,
+            "byte_stall_restart_sec": 5,
+            "restart_cooldown_sec": 10,
+            "restart_failure_backoff_sec": 0.5,
+            "max_restarts": 5,
+            "max_silent_tail_sec": 60,
+        },
+        # macOS 側の入力ゲイン変化やシステム音声側の音量低下を吸収する。
+        "audio_leveling": {
+            "enabled": True,
+            "realtime_enabled": True,
+            "target_rms": 0.08,
+            "noise_floor": 0.003,
+            "max_gain": 12.0,
+            "attack": 0.18,
+            "release": 0.55,
+            "peak_limit": 0.95,
+            "frame_ms": 100,
+        },
+        "finalize_timeout_sec": 300,
         # 完了済みパイプラインの保持上限(メモリガード)。
         "memory_guard": {
             "max_retained_pipelines": 40,
@@ -174,6 +226,10 @@ DEFAULTS: dict[str, Any] = {
     },
     "setup": {
         "completed": False,
+    },
+    "app_update": {
+        "check_on_startup": True,
+        "auto_install_on_startup": False,
     },
     "debug": {
         "enabled": False,
@@ -309,8 +365,9 @@ class Config:
             ai["timeout_sec"] = max(30, min(1800, int(ai.get("timeout_sec", 300))))
         except Exception:
             ai["timeout_sec"] = 300
+        prompt = ai.get("custom_system_prompt", "")
+        ai["custom_system_prompt"] = prompt if isinstance(prompt, str) else ""
         # 旧 keys 削除 (v1 設計レビューで除外した legacy provider)
-        ai.pop("codex", None)
         ai.pop("claude", None)
 
         consent = ai.setdefault("consent", {})
@@ -413,6 +470,12 @@ class Config:
         ai_claude_code.setdefault("launcher_command", "")
         ai_claude_code.setdefault("launcher_shell", "/bin/zsh")
         ai_claude_code.setdefault("launcher_interactive", True)
+        try:
+            ai_claude_code["connect_timeout_sec"] = max(
+                3, min(60, int(ai_claude_code.get("connect_timeout_sec", 12)))
+            )
+        except Exception:
+            ai_claude_code["connect_timeout_sec"] = 12
         if not isinstance(ai_claude_code.get("extra_args"), list):
             ai_claude_code["extra_args"] = []
 
@@ -423,9 +486,21 @@ class Config:
         ai_codex.setdefault("binary_path", "codex")
         # 既定は空文字: --model を付けず CLI 側デフォルトを使う
         ai_codex.setdefault("model", "")
+        reasoning_effort = str(ai_codex.get("reasoning_effort", "low") or "low").strip().lower()
+        if reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            reasoning_effort = "low"
+        ai_codex["reasoning_effort"] = reasoning_effort
         ai_codex.setdefault("launcher_command", "")
         ai_codex.setdefault("launcher_shell", "/bin/zsh")
         ai_codex.setdefault("launcher_interactive", True)
+        try:
+            codex_timeout = int(ai_codex.get("connect_timeout_sec", 30))
+            # beta12 以前の既定値 12 秒は、ユーザーがUIから変更できない値なので移行する。
+            if codex_timeout == 12:
+                codex_timeout = 30
+            ai_codex["connect_timeout_sec"] = max(3, min(60, codex_timeout))
+        except Exception:
+            ai_codex["connect_timeout_sec"] = 30
         if not isinstance(ai_codex.get("extra_args"), list):
             ai_codex["extra_args"] = []
 
@@ -446,21 +521,195 @@ class Config:
         if not isinstance(recording, dict):
             recording = {}
             self._data["recording"] = recording
+        method = str(recording.get("system_capture", "screencapturekit") or "screencapturekit").strip().lower().replace("-", "_")
+        method_aliases = {
+            "sck": "screencapturekit",
+            "screen_capture_kit": "screencapturekit",
+            "screen_capturekit": "screencapturekit",
+        }
+        method = method_aliases.get(method, method)
+        if method not in {"screencapturekit"}:
+            method = "screencapturekit"
+        recording["system_capture"] = method
+        mic_capture = str(recording.get("mic_capture", "coreaudio_sidecar") or "coreaudio_sidecar").strip().lower().replace("-", "_")
+        mic_aliases = {
+            "auto": "coreaudio_sidecar",
+            "coreaudio": "coreaudio_sidecar",
+            "core_audio": "coreaudio_sidecar",
+            "sidecar": "coreaudio_sidecar",
+            "mic_sidecar": "coreaudio_sidecar",
+            "coreaudio_mic": "coreaudio_sidecar",
+            "portaudio": "sounddevice",
+            "sound_device": "sounddevice",
+        }
+        mic_capture = mic_aliases.get(mic_capture, mic_capture)
+        if mic_capture not in {"coreaudio_sidecar", "sounddevice"}:
+            mic_capture = "coreaudio_sidecar"
+        recording["mic_capture"] = mic_capture
         mic_stream = recording.setdefault("mic_stream", {})
         if not isinstance(mic_stream, dict):
             mic_stream = {}
             recording["mic_stream"] = mic_stream
-        if "reopen_on_overflow" not in mic_stream:
-            mic_stream["reopen_on_overflow"] = False
+        mic_stream.setdefault("reset_backend_on_internal_error", True)
+        mic_stream.setdefault("internal_error_retries", 2)
+        mic_stream.setdefault("internal_error_retry_delay_sec", 0.4)
 
+        leveling = recording.setdefault("audio_leveling", {})
+        if not isinstance(leveling, dict):
+            leveling = {}
+            recording["audio_leveling"] = leveling
+        leveling["enabled"] = bool(leveling.get("enabled", True))
+        leveling["realtime_enabled"] = bool(leveling.get("realtime_enabled", True))
+        try:
+            leveling["target_rms"] = max(0.01, min(0.30, float(leveling.get("target_rms", 0.08))))
+        except Exception:
+            leveling["target_rms"] = 0.08
+        try:
+            leveling["noise_floor"] = max(0.0001, min(0.05, float(leveling.get("noise_floor", 0.003))))
+        except Exception:
+            leveling["noise_floor"] = 0.003
+        try:
+            leveling["max_gain"] = max(1.0, min(20.0, float(leveling.get("max_gain", 12.0))))
+        except Exception:
+            leveling["max_gain"] = 12.0
+        try:
+            leveling["attack"] = max(0.01, min(1.0, float(leveling.get("attack", 0.18))))
+        except Exception:
+            leveling["attack"] = 0.18
+        try:
+            leveling["release"] = max(0.01, min(1.0, float(leveling.get("release", 0.55))))
+        except Exception:
+            leveling["release"] = 0.55
+        try:
+            leveling["peak_limit"] = max(0.50, min(1.0, float(leveling.get("peak_limit", 0.95))))
+        except Exception:
+            leveling["peak_limit"] = 0.95
+        try:
+            leveling["frame_ms"] = max(50, min(5000, int(leveling.get("frame_ms", 100))))
+        except Exception:
+            leveling["frame_ms"] = 100
+        try:
+            recording["finalize_timeout_sec"] = max(
+                60, min(900, int(recording.get("finalize_timeout_sec", 300)))
+            )
+        except Exception:
+            recording["finalize_timeout_sec"] = 300
+        watchdog = recording.setdefault("system_capture_watchdog", {})
+        if not isinstance(watchdog, dict):
+            watchdog = {}
+            recording["system_capture_watchdog"] = watchdog
+        watchdog["enabled"] = bool(watchdog.get("enabled", True))
+        try:
+            watchdog["min_duration_sec"] = max(
+                10, min(600, float(watchdog.get("min_duration_sec", 60)))
+            )
+        except Exception:
+            watchdog["min_duration_sec"] = 60.0
+        try:
+            watchdog["min_coverage_ratio"] = max(
+                0.10, min(1.0, float(watchdog.get("min_coverage_ratio", 0.85)))
+            )
+        except Exception:
+            watchdog["min_coverage_ratio"] = 0.85
+        try:
+            watchdog["max_missing_sec"] = max(
+                5, min(600, float(watchdog.get("max_missing_sec", 20)))
+            )
+        except Exception:
+            watchdog["max_missing_sec"] = 20.0
+        try:
+            watchdog["min_active_sec_before_restart"] = max(
+                5, min(600, float(watchdog.get("min_active_sec_before_restart", 30)))
+            )
+        except Exception:
+            watchdog["min_active_sec_before_restart"] = 30.0
+        try:
+            watchdog["silent_restart_sec"] = max(
+                5, min(600, float(watchdog.get("silent_restart_sec", 20)))
+            )
+        except Exception:
+            watchdog["silent_restart_sec"] = 20.0
+        try:
+            watchdog["byte_stall_restart_sec"] = max(
+                1, min(60, float(watchdog.get("byte_stall_restart_sec", 5)))
+            )
+        except Exception:
+            watchdog["byte_stall_restart_sec"] = 5.0
+        try:
+            watchdog["restart_cooldown_sec"] = max(
+                1, min(600, float(watchdog.get("restart_cooldown_sec", 10)))
+            )
+        except Exception:
+            watchdog["restart_cooldown_sec"] = 10.0
+        try:
+            watchdog["restart_failure_backoff_sec"] = max(
+                0.1, min(10, float(watchdog.get("restart_failure_backoff_sec", 0.5)))
+            )
+        except Exception:
+            watchdog["restart_failure_backoff_sec"] = 0.5
+        try:
+            watchdog["max_restarts"] = max(0, min(20, int(watchdog.get("max_restarts", 5))))
+        except Exception:
+            watchdog["max_restarts"] = 5
+        try:
+            watchdog["max_silent_tail_sec"] = max(
+                10, min(1800, float(watchdog.get("max_silent_tail_sec", 60)))
+            )
+        except Exception:
+            watchdog["max_silent_tail_sec"] = 60.0
         whisper = self._data.setdefault("whisper", {})
         if not isinstance(whisper, dict):
             whisper = {}
             self._data["whisper"] = whisper
+        performance = whisper.setdefault("performance", {})
+        if not isinstance(performance, dict):
+            performance = {}
+            whisper["performance"] = performance
+        perf_mode = str(performance.get("mode", "auto")).strip().lower()
+        performance["mode"] = perf_mode if perf_mode in {"full", "auto", "eco"} else "auto"
+        try:
+            performance["cpu_high_threshold"] = max(
+                30.0, min(95.0, float(performance.get("cpu_high_threshold", 75.0)))
+            )
+        except Exception:
+            performance["cpu_high_threshold"] = 75.0
+        try:
+            performance["memory_high_threshold"] = max(
+                50.0, min(98.0, float(performance.get("memory_high_threshold", 85.0)))
+            )
+        except Exception:
+            performance["memory_high_threshold"] = 85.0
+        try:
+            performance["throttle_ratio"] = max(
+                0.1, min(3.0, float(performance.get("throttle_ratio", 0.5)))
+            )
+        except Exception:
+            performance["throttle_ratio"] = 0.5
+        try:
+            performance["max_throttle_sec"] = max(
+                0.5, min(10.0, float(performance.get("max_throttle_sec", 3.0)))
+            )
+        except Exception:
+            performance["max_throttle_sec"] = 3.0
+        try:
+            performance["worker_nice"] = max(
+                0, min(19, int(performance.get("worker_nice", 3)))
+            )
+        except Exception:
+            performance["worker_nice"] = 3
+        try:
+            performance["mlx_memory_ratio"] = max(
+                0.2, min(0.8, float(performance.get("mlx_memory_ratio", 0.4)))
+            )
+        except Exception:
+            performance["mlx_memory_ratio"] = 0.4
         speaker_memory = whisper.setdefault("speaker_memory", {})
         if not isinstance(speaker_memory, dict):
             speaker_memory = {}
             whisper["speaker_memory"] = speaker_memory
+        speaker_memory["diarization_enabled"] = bool(
+            speaker_memory.get("diarization_enabled", True)
+        )
         speaker_memory["enabled"] = bool(speaker_memory.get("enabled", True))
         try:
             speaker_memory["match_threshold"] = max(
@@ -530,6 +779,17 @@ class Config:
                 cleaned_origins.append(value)
         server["allowed_origins"] = cleaned_origins
         server["allow_remote_clients"] = bool(server.get("allow_remote_clients", False))
+
+        app_update = self._data.setdefault("app_update", {})
+        if not isinstance(app_update, dict):
+            app_update = {}
+            self._data["app_update"] = app_update
+        app_update["auto_install_on_startup"] = bool(
+            app_update.get("auto_install_on_startup", False)
+        )
+        app_update["check_on_startup"] = bool(
+            app_update.get("check_on_startup", True)
+        ) or app_update["auto_install_on_startup"]
 
 
 config = Config()

@@ -17,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.api.errors import bad_request, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.config import config
 from src.storage.db import db
 from src.summarize.base import SummaryError
@@ -28,7 +28,7 @@ from src.summarize.registry import (
     is_cloud_provider,
     is_known_provider,
 )
-from src.summarize.runner import get_runner
+from src.summarize.runner import get_codex_usage_summary, get_runner
 
 router = APIRouter(tags=["summarize"])
 
@@ -45,8 +45,19 @@ async def trigger_summarize(
     Query:
         provider: 省略時は config の minutes_ai.provider を使う
     """
-    if db.get_minutes(minutes_id) is None:
+    minute = db.get_minutes(minutes_id)
+    if minute is None:
         raise not_found("MINUTES_NOT_FOUND", f"minutes '{minutes_id}' が見つかりません")
+    session_id = str(minute.get("session_id") or "")
+    if session_id:
+        from src.api import recording as rec_mod
+
+        pipeline = rec_mod._pipelines.get(session_id)
+        if pipeline and pipeline.get("state") in ("recording", "stopping", "transcribing"):
+            raise conflict("MINUTES_BUSY", "この議事録の文字起こし中は要約できません")
+    runner = get_runner()
+    if runner.is_phase_b_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "用語辞書の整理が終わってから要約できます")
     if provider and not is_known_provider(provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {provider}")
     # cloud provider なら consent チェック
@@ -58,13 +69,36 @@ async def trigger_summarize(
                 "CONSENT_REQUIRED",
                 f"{target_provider} の利用同意が未取得です。POST /api/summarize/consent/{target_provider} で同意してください。",
             )
-    get_runner().enqueue(minutes_id, provider_name=provider)
+    ai_cfg = config.get("minutes_ai") or {}
+    try:
+        provider_impl = get_provider(target_provider, ai_cfg)
+        health = await provider_impl.health_check()
+    except SummaryError as e:
+        raise bad_request(e.code.value, e.message)
+    except Exception as e:
+        raise bad_request("PROVIDER_HEALTH_CHECK_FAILED", str(e))
+    if not health.ok:
+        raise bad_request(health.code, health.message)
+    if not runner.enqueue(minutes_id, provider_name=provider):
+        raise internal_error(
+            "SUMMARY_QUEUE_PERSIST_FAILED",
+            "要約キューを保存できなかったため、処理を開始できません",
+        )
     return {"job_id": minutes_id, "status": "queued"}
 
 
 @router.get("/api/minutes/{minutes_id}/summarize/status")
 async def summarize_status(minutes_id: str) -> dict:
-    status = get_runner().get_status(minutes_id)
+    runner = get_runner()
+    status = runner.get_status(minutes_id)
+    if runner.is_phase_b_busy(minutes_id):
+        payload = status.to_dict() if status is not None else {"minutes_id": minutes_id}
+        payload.update({
+            "state": "dictionary_update",
+            "stage": "dictionary_update",
+            "stage_label": "用語辞書を整理中",
+        })
+        return payload
     if status is None:
         return {"state": "none"}
     return status.to_dict()
@@ -84,7 +118,8 @@ async def summarize_active() -> list[dict]:
     """
     runner = get_runner()
     out: list[dict] = []
-    for mid in runner.list_active():
+    phase_b = set(runner.list_active_phase_b())
+    for mid in dict.fromkeys([*runner.list_active(), *phase_b]):
         m = db.get_minutes(mid)
         if m is None:
             continue
@@ -92,9 +127,17 @@ async def summarize_active() -> list[dict]:
         out.append({
             "minutes_id": mid,
             "project_id": m.get("project_id"),
-            "state": status.state if status is not None else None,
+            "state": "dictionary_update" if mid in phase_b else (
+                status.state if status is not None else None
+            ),
         })
     return out
+
+
+@router.get("/api/summarize/codex/usage")
+async def codex_usage(days: int = 30) -> dict:
+    """Seam経由で実行したCodex CLIの使用量集計。prompt本文は返さない。"""
+    return get_codex_usage_summary(days)
 
 
 # ───────── provider config ─────────

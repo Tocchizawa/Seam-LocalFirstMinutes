@@ -20,10 +20,17 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from src.api.errors import bad_request, conflict, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.api.ws import ws_manager
-from src.audio.recorder import SESSIONS_DIR, recorder
+from src.audio.converter import convert_audio_to_mp3
 from src.audio.mixer import RealtimeMixer
+from src.audio.mixed_writer import RealtimeMixedAudioWriter
+from src.audio.recorder import FFMPEG, SESSIONS_DIR, recorder
+from src.audio.resource_monitor import (
+    ResourceBusyError,
+    ResourceMonitor,
+    model_resource_gate,
+)
 from src.config import config
 from src.project.manager import project_manager
 from src.security import is_safe_session_id
@@ -34,8 +41,9 @@ logger = logging.getLogger(__name__)
 
 SESSION_META_FILENAME = "session_meta.json"
 TRANSCRIPT_JSONL_FILENAME = "transcript.jsonl"
-_RECOVERABLE_STATES = {"stopping", "transcribing", "rediarizing", "saving"}
-AUDIO_FILE_PRIORITY = ("combined.flac", "combined.wav", "system.wav", "mic.wav")
+AUDIO_FILE_PRIORITY = ("combined.mp3", "combined.flac", "combined.wav", "system.wav", "mic.wav")
+# 新規録音のMP3を優先し、既存FLACは再生時にseekable MP3へ変換する。
+PLAYBACK_AUDIO_FILE_PRIORITY = ("combined.mp3", "combined.play.mp3")
 
 router = APIRouter(prefix="/api/recording", tags=["recording"])
 
@@ -43,7 +51,7 @@ router = APIRouter(prefix="/api/recording", tags=["recording"])
 class StartRequest(BaseModel):
     project_id: str
     mic_device: int | None = None
-    capture_system: bool = False
+    capture_system: bool = True
 
 
 # ─── State ──────────────────────────────────────────────────────────────
@@ -53,9 +61,13 @@ class StartRequest(BaseModel):
 _pipelines: dict[str, dict] = {}
 # 現在録音中の session_id(録音終了でクリア)
 _active_session_id: str | None = None
+_recording_paused = False
+_recording_start_lock = asyncio.Lock()
+_finalize_tasks: dict[str, asyncio.Task] = {}
 # session ごとの streamer / mixer
 _streamers: dict[str, StreamingTranscriber] = {}
 _mixers: dict[str, RealtimeMixer] = {}
+_mix_writers: dict[str, RealtimeMixedAudioWriter] = {}
 
 # audio_level 用(録音中のみ意味あり)
 _level_task: asyncio.Task | None = None
@@ -63,7 +75,18 @@ _latest_level: float = 0.0       # マイク入力 RMS (0.0-1.0)
 _latest_system_level: float = 0.0  # システム音声 RMS (0.0-1.0)
 _last_result: dict | None = None
 
+# 起動時セッション復元の進捗 (GUI からの照会用)
+_recovery_state: dict = {
+    "state": "idle",   # idle | running | done
+    "total": 0,
+    "current": 0,
+    "item": None,      # 現在処理中の item
+    "recovered": 0,
+    "finished_at": None,
+}
+
 _ACTIVE_PIPELINE_STATES = {"recording", "stopping", "transcribing"}
+_resource_monitor = ResourceMonitor()
 
 
 def _watchdog_stall_sec() -> float:
@@ -122,6 +145,124 @@ def _require_safe_session_id(session_id: str) -> str:
     if not is_safe_session_id(sid):
         raise bad_request("INVALID_SESSION_ID", "不正な session_id です")
     return sid
+
+
+def _is_valid_audio_file(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_size > 44
+    except Exception:
+        return False
+
+
+def _pick_audio_file(session_dir: Path, priority: tuple[str, ...]) -> Path | None:
+    for name in priority:
+        path = session_dir / name
+        if _is_valid_audio_file(path):
+            return path
+    return None
+
+
+def _has_usable_audio_from_result(result: dict | None) -> bool:
+    """recorder.stop() の結果に、文字起こし継続可能な音声ファイルがあるか判定する。"""
+    if not isinstance(result, dict):
+        return False
+    for key in ("wav_path", "combined_wav", "mic_wav", "system_wav"):
+        raw = result.get(key)
+        if not raw:
+            continue
+        try:
+            if _is_valid_audio_file(Path(str(raw))):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _is_system_audio_failure(message: str) -> bool:
+    text = message.lower()
+    return (
+        "system audio" in text
+        or "core audio" in text
+        or "sidecar" in text
+        or "システム音声" in message
+        or "内部音声" in message
+        or "キャプチャ" in message
+    )
+
+
+def _finalize_realtime_mixed_audio(session_id: str, result: dict | None) -> dict:
+    updated = dict(result or {})
+    writer = _mix_writers.pop(session_id, None)
+    if writer is None:
+        return updated
+
+    try:
+        rec_cfg = config.get("recording", default={}) or {}
+        timeout_sec = max(60, min(900, int(rec_cfg.get("finalize_timeout_sec", 300))))
+    except Exception:
+        timeout_sec = 300
+
+    try:
+        mixed_path = writer.finalize(timeout_sec=timeout_sec)
+    except Exception as e:
+        logger.error("realtime mixed audio finalize failed [%s]: %s", session_id, e)
+        try:
+            writer.close()
+        except Exception:
+            pass
+        return updated
+
+    if mixed_path is None or not _is_valid_audio_file(mixed_path):
+        return updated
+
+    duration = round(float(writer.duration_sec), 1)
+    updated["wav_path"] = str(mixed_path)
+    updated["combined_wav"] = str(mixed_path)
+    updated["duration_sec"] = duration
+    _remove_intermediate_track_wavs(updated, keep=mixed_path)
+    return updated
+
+
+def _remove_intermediate_track_wavs(result: dict, *, keep: Path) -> None:
+    keep_resolved = keep.resolve()
+    for key in ("mic_wav", "system_wav"):
+        raw = result.get(key)
+        if not raw:
+            continue
+        try:
+            path = Path(str(raw))
+            if path.resolve() == keep_resolved:
+                continue
+            path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("Failed to remove intermediate %s: %s", raw, e)
+        result[key] = None
+
+
+def _pick_playback_audio(session_dir: Path) -> Path | None:
+    direct = _pick_audio_file(session_dir, PLAYBACK_AUDIO_FILE_PRIORITY)
+    if direct is not None:
+        return direct
+
+    flac = session_dir / "combined.flac"
+    if _is_valid_audio_file(flac):
+        playback = session_dir / "combined.play.mp3"
+        try:
+            if (
+                not _is_valid_audio_file(playback)
+                or playback.stat().st_mtime_ns < flac.stat().st_mtime_ns
+            ):
+                convert_audio_to_mp3(flac, playback, ffmpeg_bin=FFMPEG)
+            if _is_valid_audio_file(playback):
+                return playback
+        except Exception as e:
+            logger.warning("Failed to prepare seekable playback audio %s: %s", flac, e)
+        return flac
+
+    return _pick_audio_file(
+        session_dir,
+        ("combined.wav", "system.wav", "mic.wav", "combined.play.wav"),
+    )
 
 
 def build_pipeline_transcript_payload(segments: list[dict]) -> dict:
@@ -201,6 +342,10 @@ def get_runtime_debug_snapshot() -> dict:
             "max_retained_pipelines": _max_retained_pipelines(),
             "max_transcript_segments_per_pipeline": _max_transcript_segments(),
         },
+        "resource": {
+            "system": _resource_monitor.snapshot(),
+            "model_gate": model_resource_gate.snapshot(),
+        },
         "pipelines_by_state": states,
         "active_pipeline": active_pipeline,
         "active_streamer": active_streamer,
@@ -213,7 +358,7 @@ def _session_dir(session_id: str) -> Path:
     return SESSIONS_DIR / session_id
 
 
-def _write_session_meta(session_id: str, **fields) -> None:
+def _write_session_meta(session_id: str, **fields) -> bool:
     """セッションの永続メタ情報を atomic に上書き保存。
 
     クラッシュ後、起動時 recover_pending_sessions がこの meta を見て復元判定する。
@@ -234,14 +379,43 @@ def _write_session_meta(session_id: str, **fields) -> None:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
+        return True
     except Exception as e:
         logger.warning("session_meta write failed [%s]: %s", session_id, e)
+        return False
 
 
 def _delete_session_meta(session_id: str) -> None:
     try:
         (_session_dir(session_id) / SESSION_META_FILENAME).unlink(missing_ok=True)
     except Exception:
+        pass
+
+
+def _enqueue_auto_summary(minutes_id: str) -> bool:
+    """要約を永続キューへ積む。同じ議事録が既に待機中なら再投入しない。"""
+    try:
+        from src.summarize.runner import get_runner
+
+        runner = get_runner()
+        if runner.ensure_queued(minutes_id):
+            return True
+        logger.warning(
+            "[summary] auto-summary is active but its restart queue could not be saved: %s",
+            minutes_id,
+        )
+        return False
+    except Exception as e:
+        logger.warning("[summary] failed to enqueue auto-summary for %s: %s", minutes_id, e)
+        return False
+
+
+def _remove_empty_session_dir(session_id: str) -> None:
+    """初期化に失敗したセッションの空ディレクトリだけを片付ける。"""
+    try:
+        _session_dir(session_id).rmdir()
+    except OSError:
+        # 音声など何か残っていれば、救済できるようそのまま保持する。
         pass
 
 
@@ -277,10 +451,11 @@ def _load_persisted_segments(session_id: str) -> list[dict]:
     return out
 
 
-def _new_pipeline(session_id: str, project_id: str) -> dict:
+def _new_pipeline(session_id: str, project_id: str, capture_system: bool = False) -> dict:
     return {
         "session_id": session_id,
         "project_id": project_id,
+        "capture_system": capture_system,
         "state": "recording",
         "message": "",
         "result": None,
@@ -331,6 +506,8 @@ def _make_system_level_tap(forward):
 
 def _combined_level() -> float:
     """mic + system のうち大きい方を返す。無音判定はこの値で行う。"""
+    if _recording_paused:
+        return 0.0
     return max(_latest_level, _latest_system_level)
 
 
@@ -343,7 +520,6 @@ async def _stream_levels() -> None:
     last_status = 0.0
     last_stream = 0.0
     last_watchdog = 0.0
-    last_level_value = -1.0  # 初回は必ず送信
     reminder_enabled, reminder_silence_sec, reminder_level_threshold = _stop_forget_reminder_settings()
     silent_since: float | None = None
     reminded_in_current_silence = False
@@ -351,6 +527,7 @@ async def _stream_levels() -> None:
     started_at = _time.monotonic()
     mic_seen_audio = False
     mic_silent_warned = False
+    mic_failure_handled = False
     MIC_SILENT_WARN_SEC = 15.0   # 15秒以上 level がほぼ0なら警告
     MIC_AUDIO_THRESHOLD = 0.005  # この値を超えたら有効音声と判定
     while recorder.is_recording:
@@ -363,15 +540,16 @@ async def _stream_levels() -> None:
 
         now = _time.monotonic()
 
-        # audio_level: 値変化が小さい時はスキップ
-        if (now - last_level) >= 0.2 * scale:
-            level_rounded = round(_latest_level, 3)
-            if abs(level_rounded - last_level_value) >= 0.01 or last_level_value < 0:
-                await ws_manager.broadcast({
-                    "type": "audio_level",
-                    "data": {"mic": level_rounded, "session_id": sid},
-                })
-                last_level_value = level_rounded
+        # Fixed cadence so the meter also shows elapsed time and silence.
+        if (now - last_level) >= 0.1 * scale:
+            await ws_manager.broadcast({
+                "type": "audio_level",
+                "data": {
+                    "session_id": sid,
+                    "mic": 0.0 if _recording_paused else round(_latest_level, 3),
+                    "level": 0.0 if _recording_paused else round(_combined_level(), 3),
+                },
+            })
             last_level = now
 
             # 一度でも有効音声を検出したらフラグ立て (mic / system のどちらかでも OK)
@@ -409,13 +587,15 @@ async def _stream_levels() -> None:
                     "state": "recording",
                     "elapsed_sec": round(recorder.elapsed_sec, 1),
                     "session_id": sid,
+                    "paused": _recording_paused,
+                    "transcription_deferred": bool((_pipelines.get(sid) or {}).get("transcription_deferred")),
                 },
             })
             last_status = now
 
         # stop-forget reminder: 無音が一定時間続いたら通知(停止はしない)。
         # mic + system いずれも閾値未満のときだけ「無音」扱い。
-        if reminder_enabled and sid:
+        if reminder_enabled and sid and not _recording_paused:
             if _combined_level() < reminder_level_threshold:
                 if silent_since is None:
                     silent_since = now
@@ -442,6 +622,17 @@ async def _stream_levels() -> None:
         # watchdog: 5秒に1回ワーカースレッドの生死確認 + 死んでたら streamer 再起動
         if (now - last_watchdog) >= 5.0 and sid:
             try:
+                if (
+                    not mic_failure_handled
+                    and recorder.error
+                    and not recorder.mic_stream_alive
+                ):
+                    mic_failure_handled = True
+                    msg = str(recorder.error)
+                    logger.error("[watchdog] mic stream dead for %s: %s", sid, msg)
+                    await _stop_failed_active_recording(sid, msg)
+                    return
+
                 streamer = _streamers.get(sid)
                 mixer = _mixers.get(sid)
                 if mixer is not None and not mixer.consumer_alive:
@@ -494,11 +685,63 @@ def _make_emit_segment(session_id: str):
     return emit
 
 
+def _make_emit_preview(session_id: str):
+    async def emit(preview: dict) -> None:
+        if session_id == _active_session_id:
+            await ws_manager.broadcast({
+                "type": "transcript_preview",
+                "data": {**preview, "session_id": session_id},
+            })
+    return emit
+
+
 async def _broadcast_pipeline(session_id: str) -> None:
     p = _pipelines.get(session_id)
     if p is None:
         return
     await ws_manager.broadcast({"type": "pipeline_progress", "data": dict(p)})
+
+
+async def _mark_pipeline_error(session_id: str, message: str) -> None:
+    _set_state(session_id, state="error", message=message, error=message)
+    await ws_manager.broadcast({
+        "type": "pipeline_error",
+        "data": {"session_id": session_id, "message": message},
+    })
+    await _broadcast_pipeline(session_id)
+
+
+async def _stop_failed_active_recording(session_id: str, message: str) -> None:
+    """録音中の致命的な入力異常を停止状態へ寄せ、次の録音を塞がないようにする。"""
+    global _active_session_id, _last_result
+
+    _write_session_meta(session_id, state="stopping", error=message)
+    await _mark_pipeline_error(session_id, message)
+
+    result: dict | None = None
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, recorder.stop)
+        _last_result = result
+        _set_state(session_id, result=result)
+        _write_session_meta(
+            session_id,
+            state="stopping",
+            error=message,
+            wav_path=result.get("wav_path") if isinstance(result, dict) else None,
+        )
+        await ws_manager.broadcast({
+            "type": "recording_stopped",
+            "data": {**result, "session_id": session_id},
+        })
+    except Exception as e:
+        logger.error("failed to stop broken recording [%s]: %s", session_id, e)
+        _write_session_meta(session_id, state="stopping", error=f"{message}; stop failed: {e}")
+    finally:
+        if _active_session_id == session_id:
+            _active_session_id = None
+        _cleanup_session(session_id)
+        await _broadcast_pipeline(session_id)
 
 
 async def _finalize_session(session_id: str) -> None:
@@ -535,33 +778,52 @@ async def _finalize_session(session_id: str) -> None:
         _last_result = result
         _set_state(session_id, result=result)
 
-        if result.get("error"):
-            _set_state(session_id, state="error", message=result["error"], error=result["error"])
-            await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": result["error"]}})
-            await _broadcast_pipeline(session_id)
-            _cleanup_session(session_id)
-            _active_session_id = None
-            return
+        recorder_error = str(result.get("error") or "").strip()
+        if recorder_error:
+            system_audio_required = bool(p.get("capture_system"))
+            system_audio_failed = system_audio_required and _is_system_audio_failure(recorder_error)
+            if _has_usable_audio_from_result(result) and not system_audio_failed:
+                logger.warning(
+                    "recorder.stop returned error but usable audio exists [%s]: %s",
+                    session_id,
+                    recorder_error,
+                )
+            else:
+                msg = (
+                    f"内部音声の録音に失敗しました: {recorder_error}"
+                    if system_audio_failed else recorder_error
+                )
+                _set_state(session_id, state="error", message=msg, error=msg)
+                _write_session_meta(
+                    session_id,
+                    state="stopping",
+                    error=msg,
+                    wav_path=result.get("wav_path") if isinstance(result, dict) else None,
+                )
+                _cleanup_session(session_id)
+                _active_session_id = None
+                await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": msg}})
+                await _broadcast_pipeline(session_id)
+                return
 
-        await ws_manager.broadcast({
-            "type": "recording_stopped",
-            "data": {**result, "session_id": session_id},
-        })
         # ここで recorder は free → 次の録音開始可能
         _active_session_id = None
 
     except Exception as e:
         logger.error("recorder.stop failed [%s]: %s", session_id, e)
         _set_state(session_id, state="error", message=str(e), error=str(e))
-        await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": str(e)}})
-        await _broadcast_pipeline(session_id)
         _cleanup_session(session_id)
         _active_session_id = None
+        await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": str(e)}})
+        await _broadcast_pipeline(session_id)
         return
 
     # 2) Mixer を停止 → streamer flush
     _set_state(session_id, state="transcribing")
-    _set_record_stage(Stage.WHISPER_FLUSH, "残りの文字起こしを処理中...")
+    deferred = bool(p.get("transcription_deferred"))
+    _set_record_stage(
+        Stage.WHISPER_FLUSH, "音声を保存中" if deferred else "残りの文字起こしを処理中...",
+    )
     _write_session_meta(session_id, state="transcribing")
     await _broadcast_pipeline(session_id)
 
@@ -569,6 +831,42 @@ async def _finalize_session(session_id: str) -> None:
         mixer = _mixers.get(session_id)
         if mixer is not None:
             await loop.run_in_executor(None, mixer.stop)
+
+        result = await loop.run_in_executor(
+            None,
+            _finalize_realtime_mixed_audio,
+            session_id,
+            result,
+        )
+        _last_result = result
+        _set_state(session_id, result=result)
+        await ws_manager.broadcast({
+            "type": "recording_stopped",
+            "data": {**result, "session_id": session_id},
+        })
+
+        if deferred:
+            from src.api.minutes import _start_retranscribe_minutes
+
+            _mixers.pop(session_id, None)
+            _write_session_meta(session_id, duration_sec=result.get("duration_sec", 0))
+            minutes, _ = await _materialize_session_minutes(
+                session_id,
+                prefer_project_id=p["project_id"],
+                title_prefix="",
+                enqueue_summary=False,
+                remove_meta=False,
+                diarize_segments=False,
+            )
+            await _start_retranscribe_minutes(
+                str(minutes["id"]),
+                enqueue_summary_on_complete=True,
+            )
+            await ws_manager.broadcast({
+                "type": "minutes_saved",
+                "data": {"session_id": session_id, "minutes_id": minutes["id"]},
+            })
+            return
 
         segments: list[dict] = []
         streamer_error: str | None = None
@@ -626,15 +924,26 @@ async def _finalize_session(session_id: str) -> None:
             except Exception:
                 pass
 
-        transcript = await loop.run_in_executor(
-            None,
-            lambda: speaker_memory.rediarize_segments(
-                segments,
-                wav_path=wav_path,
-                session_id=session_id,
-                on_progress=_on_diarize_progress,
-            ),
-        )
+        diarization_lease = False
+        if config.get(
+            "whisper", "speaker_memory", "diarization_provider", default="legacy"
+        ) == "pyannote":
+            # pyannote も MPS メモリを使うため、Whisper/LLM と排他にする。
+            await model_resource_gate.acquire_llm_async()
+            diarization_lease = True
+        try:
+            transcript = await loop.run_in_executor(
+                None,
+                lambda: speaker_memory.rediarize_segments(
+                    segments,
+                    wav_path=wav_path,
+                    session_id=session_id,
+                    on_progress=_on_diarize_progress,
+                ),
+            )
+        finally:
+            if diarization_lease:
+                model_resource_gate.release_llm()
         # rediarize 完了したので、progress フィールドをクリア (次の SAVING で再計算)
         if session_id in _pipelines:
             _pipelines[session_id]["progress"] = 1.0
@@ -643,11 +952,8 @@ async def _finalize_session(session_id: str) -> None:
         _set_record_stage(Stage.SAVING, "DB に保存中...")
         _write_session_meta(session_id, state="saving")
         await _broadcast_pipeline(session_id)
-        _set_state(session_id, state="done",
-                   transcript=transcript_payload)
 
-        # DB 保存 (insert 成功時のみ minutes_id を set。失敗時は None のまま)
-        minutes_id: str | None = None
+        # DB 保存に成功してから done にする。SQLite が正本なので、失敗時は復旧対象として残す。
         try:
             from src.storage.db import db
 
@@ -673,44 +979,67 @@ async def _finalize_session(session_id: str) -> None:
                 "created_at": now,
                 "updated_at": now,
             })
+            if db.get_minutes(new_id) is None:
+                raise RuntimeError("inserted minutes not found")
             minutes_id = new_id
             logger.info("Minutes saved: %s (%d segments)", session_id, len(transcript))
-            _delete_session_meta(session_id)
         except Exception as e:
+            msg = f"DB保存に失敗しました: {e}"
             logger.error("Failed to save minutes [%s]: %s", session_id, e)
+            _set_state(
+                session_id,
+                state="error",
+                message=msg,
+                error=msg,
+                transcript=transcript_payload,
+            )
+            _write_session_meta(
+                session_id,
+                state="saving",
+                error=msg,
+                wav_path=wav_path,
+            )
+            await ws_manager.broadcast({
+                "type": "pipeline_error",
+                "data": {"session_id": session_id, "message": msg},
+            })
+            await _broadcast_pipeline(session_id)
+            return
+
+        _set_state(session_id, state="done",
+                   transcript=transcript_payload)
 
         await ws_manager.broadcast({
             "type": "pipeline_done",
-            "data": {"session_id": session_id, **transcript_payload},
+            "data": {
+                "session_id": session_id,
+                # 文字起こし完了時に作成した minutes の ID を伝える。
+                # pipeline-detail モードで詳細を開いていた DetailView が
+                # この ID を使って即座に DB から fetch し、currentMinutes を
+                # 切替える (= 救済ボタン誤表示と要約イベント取りこぼしを防ぐ)。
+                "minutes_id": minutes_id,
+                **transcript_payload,
+            },
         })
         await _broadcast_pipeline(session_id)
 
         # 自動要約トリガー (auto_generate=true 時のみ)
         auto_gen = bool(config.get("minutes_ai", "auto_generate", default=True))
+        summary_queued = False
         if minutes_id and auto_gen:
-            try:
-                from src.summarize.runner import get_runner
-
-                get_runner().enqueue(minutes_id)
+            summary_queued = _enqueue_auto_summary(minutes_id)
+            if summary_queued:
                 logger.info("[summary] auto-summary enqueued: %s", minutes_id)
-            except Exception as e:
-                logger.warning("[summary] failed to enqueue auto-summary: %s", e)
         elif not auto_gen:
             logger.info(
                 "[summary] auto_generate=false, skipping auto-summary for %s", session_id,
             )
-        elif not minutes_id:
-            logger.warning(
-                "[summary] skipping auto-summary: minutes_id is None (DB save failed) for %s",
-                session_id,
-            )
+        if minutes_id and (not auto_gen or summary_queued):
+            _delete_session_meta(session_id)
 
     except Exception as e:
         logger.error("Streaming finalize failed [%s]: %s", session_id, e)
-        _set_state(session_id, state="error", message=str(e), error=str(e))
-        await ws_manager.broadcast({"type": "pipeline_error",
-                                    "data": {"session_id": session_id, "message": str(e)}})
-        await _broadcast_pipeline(session_id)
+        await _mark_pipeline_error(session_id, str(e))
         _cleanup_session(session_id)
 
 
@@ -728,40 +1057,23 @@ def _cleanup_session(session_id: str) -> None:
             mixer.stop()
         except Exception:
             pass
+    writer = _mix_writers.pop(session_id, None)
+    if writer is not None:
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 
 # ─── Endpoints ──────────────────────────────────────────────────────────
 
-@router.post("/start")
-async def start_recording(req: StartRequest) -> dict:
-    global _active_session_id, _level_task, _latest_level, _latest_system_level
-    if recorder.is_recording or _active_session_id is not None:
-        raise conflict("ALREADY_RECORDING", "現在録音中です。停止してから新規録音してください")
-
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 衝突回避: 同秒に再開した場合は連番付与
-    suffix = 0
-    sid = session_id
-    while sid in _pipelines:
-        suffix += 1
-        sid = f"{session_id}_{suffix}"
-    session_id = sid
-
-    pipeline = _new_pipeline(session_id, req.project_id)
-    _pipelines[session_id] = pipeline
-    _evict_completed_pipelines()
-
-    _write_session_meta(
-        session_id,
-        project_id=req.project_id,
-        started_at=pipeline["started_at"],
-        capture_system=bool(req.capture_system),
-        mic_device=req.mic_device,
-        state="recording",
-    )
-
+def _start_live_transcriber(
+    session_id: str, project_id: str, loop: asyncio.AbstractEventLoop,
+) -> StreamingTranscriber | None:
+    if not model_resource_gate.can_acquire_whisper():
+        return None
     # プロジェクトの用語集を取得 (initial_prompt として whisper に渡す)
-    project = project_manager.get(req.project_id)
+    project = project_manager.get(project_id)
     glossary = list(project.glossary) if project else []
     # corrections の正式表記 (correct 側) も Whisper の initial_prompt に混ぜ込む
     # これにより既知の誤転写を未然に防ぐ。
@@ -777,16 +1089,20 @@ async def start_recording(req: StartRequest) -> dict:
     model_name = config.get("whisper", "model", default="medium")
     streaming_cfg = config.get("whisper", "streaming", default={}) or {}
     vad_provider = str(streaming_cfg.get("vad_provider", "silero")).lower()
+    # Keep long batch windows for retranscription. Live capture cuts smaller
+    # chunks so continuous speech doesn't leave the screen empty for 12 seconds.
+    mode = config.get("whisper", "performance", "mode", default="auto")
+    live_max_ms = 8000 if mode == "eco" else 4500
     chunker_kwargs: dict = {
-        "silence_duration_ms": streaming_cfg.get("silence_duration_ms", 500),
-        "min_chunk_ms": streaming_cfg.get("min_chunk_ms", 1000),
-        "max_chunk_ms": streaming_cfg.get("max_chunk_ms", 12000),
+        "silence_duration_ms": min(400, int(streaming_cfg.get("silence_duration_ms", 500))),
+        "min_chunk_ms": min(500, int(streaming_cfg.get("min_chunk_ms", 1000))),
+        "max_chunk_ms": min(live_max_ms, int(streaming_cfg.get("max_chunk_ms", 12000))),
+        "smart_cut_lookback_ms": 750,
     }
     if vad_provider == "silero":
         chunker_kwargs["threshold"] = float(streaming_cfg.get("silero_threshold", 0.5))
     else:
         chunker_kwargs["rms_threshold"] = float(streaming_cfg.get("rms_threshold", 0.005))
-    loop = asyncio.get_running_loop()
     model_load_timeout_sec = max(
         900.0,
         float(streaming_cfg.get("model_load_timeout_sec", 900.0)),
@@ -795,6 +1111,7 @@ async def start_recording(req: StartRequest) -> dict:
         model_name=model_name,
         language=config.get("whisper", "language", default="ja"),
         on_segment=_make_emit_segment(session_id),
+        on_preview=_make_emit_preview(session_id),
         session_id=session_id,
         chunker_kwargs=chunker_kwargs,
         # 録音中のバックプレッシャで欠落しないよう queue は無制限で運用する。
@@ -807,11 +1124,110 @@ async def start_recording(req: StartRequest) -> dict:
         corrections=corrections_list,
         vad_provider=vad_provider,
     )
-    streamer.start(loop)
-    mixer = RealtimeMixer(on_chunk=streamer.feed)
-    mixer.start(has_system=req.capture_system)
-    _streamers[session_id] = streamer
+    try:
+        streamer.start(loop)
+    except ResourceBusyError:
+        return None
+    except Exception:
+        streamer.cleanup()
+        raise
+    return streamer
+
+
+@router.post("/start")
+async def start_recording(req: StartRequest) -> dict:
+    async with _recording_start_lock:
+        return await _start_recording(req)
+
+
+async def _start_recording(req: StartRequest) -> dict:
+    global _active_session_id, _level_task, _latest_level, _latest_system_level, _recording_paused
+    if recorder.is_recording or _active_session_id is not None:
+        raise conflict("ALREADY_RECORDING", "現在録音中です。停止してから新規録音してください")
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 衝突回避: 同秒に再開した場合は連番付与
+    suffix = 0
+    sid = session_id
+    while sid in _pipelines or _session_dir(sid).exists():
+        suffix += 1
+        sid = f"{session_id}_{suffix}"
+    session_id = sid
+
+    pipeline = _new_pipeline(session_id, req.project_id, bool(req.capture_system))
+    _pipelines[session_id] = pipeline
+    _evict_completed_pipelines()
+
+    _write_session_meta(
+        session_id,
+        project_id=req.project_id,
+        started_at=pipeline["started_at"],
+        capture_system=bool(req.capture_system),
+        mic_device=req.mic_device,
+        state="recording",
+    )
+
+    loop = asyncio.get_running_loop()
+    try:
+        streamer = _start_live_transcriber(session_id, req.project_id, loop)
+    except Exception as e:
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
+        logger.exception("Failed to initialize streaming transcriber [%s]", session_id)
+        raise internal_error(
+            "TRANSCRIBER_START_FAILED",
+            f"文字起こしの準備に失敗したため録音を開始できません: {e}",
+        )
+    # A busy model delays transcription while the mixer still saves the audio.
+    pipeline["transcription_deferred"] = streamer is None
+    if streamer is not None:
+        _streamers[session_id] = streamer
+
+    rec_cfg = config.get("recording", default={}) or {}
+    mix_writer = RealtimeMixedAudioWriter(_session_dir(session_id))
+    try:
+        mix_writer.start()
+    except Exception as e:
+        try:
+            mix_writer.close()
+        except Exception:
+            pass
+        _cleanup_session(session_id)
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
+        raise conflict("MIXED_AUDIO_WRITER_FAILED", f"録音音声の保存準備に失敗: {e}")
+
+    def _on_mixed_chunk(samples) -> None:
+        if _recording_paused:
+            import numpy as np
+
+            samples = np.zeros_like(samples)
+        try:
+            mix_writer.feed(samples)
+        except Exception as e:
+            logger.error("Realtime mixed audio write failed [%s]: %s", session_id, e)
+        if streamer is not None:
+            streamer.feed(samples)
+
+    mixer = RealtimeMixer(
+        on_chunk=_on_mixed_chunk,
+        audio_leveling=rec_cfg.get("audio_leveling"),
+    )
     _mixers[session_id] = mixer
+    _mix_writers[session_id] = mix_writer
+    try:
+        mixer.start(has_system=req.capture_system)
+    except Exception as e:
+        _cleanup_session(session_id)
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
+        logger.exception("Failed to initialize realtime audio mixer [%s]", session_id)
+        raise internal_error(
+            "AUDIO_MIXER_START_FAILED",
+            f"音声入力の準備に失敗したため録音を開始できません: {e}",
+        )
 
     try:
         result = recorder.start(
@@ -823,16 +1239,36 @@ async def start_recording(req: StartRequest) -> dict:
             session_id=session_id,
         )
     except Exception as e:
+        if req.capture_system and "内部音声" in str(e):
+            code = "SYSTEM_AUDIO_START_FAILED"
+            message = f"内部音声の録音開始失敗: {e}"
+        else:
+            code = "RECORDER_START_FAILED"
+            message = f"録音開始失敗: {e}"
         _cleanup_session(session_id)
         _pipelines.pop(session_id, None)
         _delete_session_meta(session_id)
-        raise conflict("RECORDER_START_FAILED", f"録音開始失敗: {e}")
+        _remove_empty_session_dir(session_id)
+        raise conflict(code, message)
+    if req.capture_system and not result.get("has_system_audio"):
+        system_error = str(result.get("system_error") or "内部音声を開始できませんでした")
+        try:
+            await loop.run_in_executor(None, recorder.stop)
+        except Exception as e:
+            logger.warning("Failed to stop recorder after system audio start failure: %s", e)
+        _cleanup_session(session_id)
+        _pipelines.pop(session_id, None)
+        _delete_session_meta(session_id)
+        _remove_empty_session_dir(session_id)
+        raise conflict("SYSTEM_AUDIO_START_FAILED", f"内部音声の録音開始失敗: {system_error}")
 
     _active_session_id = session_id
+    _recording_paused = False
     _latest_level = 0.0
     _latest_system_level = 0.0
     result["project_id"] = req.project_id
     result["session_id"] = session_id
+    result["transcription_deferred"] = bool(pipeline.get("transcription_deferred"))
 
     _level_task = asyncio.create_task(_stream_levels())
     await _broadcast_pipeline(session_id)
@@ -842,23 +1278,70 @@ async def start_recording(req: StartRequest) -> dict:
 
 @router.post("/stop")
 async def stop_recording() -> dict:
-    global _level_task
-    if not recorder.is_recording or _active_session_id is None:
+    global _level_task, _recording_paused
+    sid = _active_session_id
+    if sid is None:
         raise conflict("NOT_RECORDING", "録音中ではありません")
+
+    existing_task = _finalize_tasks.get(sid)
+    if existing_task is not None and not existing_task.done():
+        return {"status": "stopping", "session_id": sid}
+    if not recorder.is_recording:
+        raise conflict("NOT_RECORDING", "録音を停止できません。状態を再取得してください")
 
     if _level_task:
         _level_task.cancel()
         _level_task = None
 
-    sid = _active_session_id
-    asyncio.create_task(_finalize_session(sid))
+    _recording_paused = False
+    task = asyncio.create_task(_finalize_session(sid))
+    _finalize_tasks[sid] = task
+
+    def _finalize_done(done: asyncio.Task, session_id: str = sid) -> None:
+        if _finalize_tasks.get(session_id) is done:
+            _finalize_tasks.pop(session_id, None)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Recording finalize task crashed [%s]", session_id)
+
+    task.add_done_callback(_finalize_done)
 
     return {"status": "stopping", "session_id": sid}
 
 
 @router.get("/status")
 async def recording_status() -> dict:
-    return {**recorder.get_status(), "session_id": _active_session_id}
+    return {
+        **recorder.get_status(),
+        "session_id": _active_session_id,
+        "paused": _recording_paused,
+        "transcription_deferred": bool((_pipelines.get(_active_session_id) or {}).get("transcription_deferred")),
+        "stopping": bool(
+            _active_session_id
+            and (_finalize_tasks.get(_active_session_id) is not None)
+            and not _finalize_tasks[_active_session_id].done()
+        ),
+    }
+
+
+@router.post("/pause")
+async def set_recording_paused(body: dict) -> dict:
+    """録音音声への入力を無音にし、録音時間軸を保ったまま一時停止する。"""
+    global _recording_paused
+    if not recorder.is_recording or _active_session_id is None:
+        raise conflict("NOT_RECORDING", "録音中ではありません")
+    _recording_paused = bool(body.get("paused", False))
+    payload = {
+        "state": "recording",
+        "elapsed_sec": round(recorder.elapsed_sec, 1),
+        "session_id": _active_session_id,
+        "paused": _recording_paused,
+    }
+    await ws_manager.broadcast({"type": "recording_status", "data": payload})
+    return {"status": "ok", "paused": _recording_paused}
 
 
 @router.post("/mic-mute")
@@ -929,16 +1412,25 @@ async def last_result() -> dict:
     return {"error": "まだ録音がありません"}
 
 
+@router.get("/recovery/status")
+async def recovery_status() -> dict:
+    """起動時のセッション復元の現在状態を返す (GUI 同期用)。"""
+    return dict(_recovery_state)
+
+
 @router.get("/play/{session_id}")
 async def play_audio(session_id: str) -> FileResponse:
     from src.config import APP_DIR
     sid = _require_safe_session_id(session_id)
     session_dir = APP_DIR / "sessions" / sid
-    for name in AUDIO_FILE_PRIORITY:
-        wav = session_dir / name
-        if wav.exists() and wav.stat().st_size > 44:
-            media_type = "audio/flac" if wav.suffix.lower() == ".flac" else "audio/wav"
-            return FileResponse(str(wav), media_type=media_type)
+    audio = _pick_playback_audio(session_dir)
+    if audio is not None:
+        media_type = {
+            ".mp3": "audio/mpeg",
+            ".flac": "audio/flac",
+            ".wav": "audio/wav",
+        }.get(audio.suffix.lower(), "application/octet-stream")
+        return FileResponse(str(audio), media_type=media_type)
     raise not_found("FILE_NOT_FOUND", f"音声ファイルが見つかりません: {sid}")
 
 
@@ -956,36 +1448,81 @@ async def get_session_segments(session_id: str) -> list[dict]:
 @router.get("/sessions/{session_id}/audio_info")
 async def get_session_audio_info(session_id: str) -> dict:
     """セッションの再生対象音声ファイルのメタ情報を返す。
-    優先: combined.flac → combined.wav → system.wav → mic.wav (play_audio の picker と同じ)。
+    優先: combined.mp3 → combined.play.mp3 → 旧FLACの再生用MP3 → WAV系。
     """
     from src.config import APP_DIR
     sid = _require_safe_session_id(session_id)
     session_dir = APP_DIR / "sessions" / sid
-    for name in AUDIO_FILE_PRIORITY:
-        wav = session_dir / name
-        if wav.exists() and wav.stat().st_size > 44:
-            return {
-                "name": name,
-                "size_bytes": int(wav.stat().st_size),
-            }
+    audio = _pick_playback_audio(session_dir)
+    if audio is not None:
+        return {
+            "name": audio.name,
+            "size_bytes": int(audio.stat().st_size),
+        }
     raise not_found("FILE_NOT_FOUND", f"音声ファイルが見つかりません: {sid}")
 
 
-def _pick_recovery_wav(session_dir: Path) -> Path | None:
-    for name in AUDIO_FILE_PRIORITY:
-        wav = session_dir / name
-        if wav.exists() and wav.stat().st_size > 44:
-            return wav
-    return None
+@router.post("/sessions/{session_id}/recover")
+async def recover_session_minutes(session_id: str, start_retranscribe: bool = False) -> dict:
+    """セッション断片(音声/既存 transcript)から minutes を救済生成する。
+
+    - 既に minutes が存在する場合はそれを返す (idempotent)
+    - start_retranscribe=true かつ音声があれば、minutes 化後に再文字起こしを起動
+    """
+    sid = _require_safe_session_id(session_id)
+    pipeline = _pipelines.get(sid) or {}
+    prefer_project_id = pipeline.get("project_id")
+
+    minutes, info = await _materialize_session_minutes(
+        sid,
+        prefer_project_id=str(prefer_project_id) if prefer_project_id else None,
+        title_prefix="[救済] ",
+    )
+
+    # 既存エラー行を残し続けないよう、救済後は pipeline を done 側へ寄せる。
+    p = _pipelines.get(sid)
+    if p is not None and p.get("state") == "error":
+        transcript = minutes.get("transcript") if isinstance(minutes.get("transcript"), list) else []
+        p.update({
+            "state": "done",
+            "message": "救済保存済み",
+            "error": None,
+            "transcript": build_pipeline_transcript_payload(transcript),
+        })
+        _evict_completed_pipelines()
+        await _broadcast_pipeline(sid)
+
+    resp = {
+        "status": "ok",
+        "created": bool(info.get("created", False)),
+        "used_audio": bool(info.get("used_audio", False)),
+        "used_segments": bool(info.get("used_segments", False)),
+        "minutes": minutes,
+    }
+
+    if start_retranscribe:
+        if not info.get("used_audio", False):
+            resp["retranscribe"] = {
+                "status": "skipped",
+                "reason": "audio_not_found",
+            }
+        else:
+            from src.api import minutes as minutes_mod
+            resp["retranscribe"] = await minutes_mod.retranscribe_minutes(minutes["id"])
+    return resp
 
 
-def _wav_duration_sec(wav: Path) -> int:
+def _pick_recovery_audio(session_dir: Path) -> Path | None:
+    return _pick_audio_file(session_dir, AUDIO_FILE_PRIORITY)
+
+
+def _audio_duration_sec(audio: Path) -> int:
     try:
-        if wav.suffix.lower() == ".flac":
+        if audio.suffix.lower() == ".flac":
             from src.audio.recorder import _flac_duration_sec
-            return int(_flac_duration_sec(wav))
+            return int(_flac_duration_sec(audio))
         import wave
-        with wave.open(str(wav), "rb") as wf:
+        with wave.open(str(audio), "rb") as wf:
             rate = wf.getframerate()
             if rate <= 0:
                 return 0
@@ -994,80 +1531,123 @@ def _wav_duration_sec(wav: Path) -> int:
         return 0
 
 
-def _recover_one_session(session_dir: Path, meta: dict) -> bool:
-    """1セッション分の救済処理。成功なら True / 対象外なら False。"""
+def _parse_date_from_started_at(started_at: str | None) -> str:
+    if started_at:
+        try:
+            date_str = str(started_at)[:10]
+            datetime.strptime(date_str, "%Y-%m-%d")
+            return date_str
+        except Exception:
+            pass
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _guess_hhmm(session_id: str, started_at: str | None = None) -> str:
+    if len(session_id) >= 13 and session_id[8] == "_":
+        return f"{session_id[9:11]}:{session_id[11:13]}"
+    if started_at and len(started_at) >= 16:
+        try:
+            return str(started_at)[11:16]
+        except Exception:
+            pass
+    return "??:??"
+
+
+async def _materialize_session_minutes(
+    session_id: str,
+    *,
+    prefer_project_id: str | None = None,
+    title_prefix: str = "[復元] ",
+    enqueue_summary: bool = True,
+    remove_meta: bool = True,
+    diarize_segments: bool = True,
+) -> tuple[dict, dict]:
+    """session ディレクトリ上の音声/文字起こし断片から minutes を生成(または既存を返す)。"""
     from src.storage.db import db
 
-    session_id = meta.get("session_id") or session_dir.name
+    existing = db.get_minutes_by_session(session_id)
+    if existing is not None:
+        return existing, {
+            "created": False,
+            "used_audio": _pick_recovery_audio(_session_dir(session_id)) is not None,
+            "used_segments": bool(existing.get("transcript")),
+        }
 
-    # 既に DB に存在(=保存成功後に meta 削除に失敗しただけ)→ meta だけ消して終了
-    if db.has_minutes_for_session(session_id):
+    session_dir = _session_dir(session_id)
+    if not session_dir.exists():
+        raise not_found("SESSION_NOT_FOUND", f"セッションが見つかりません: {session_id}")
+
+    meta: dict = {}
+    meta_path = session_dir / SESSION_META_FILENAME
+    if meta_path.exists():
         try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
-            pass
-        return False
-
-    state = meta.get("state")
-    if state not in _RECOVERABLE_STATES:
-        # state="recording" (録音中に強制終了) などは復旧不能 = 残しても意味が無い。
-        # session_meta.json は削除して次回起動のスキャン対象から外す。
-        # session_dir 自体は WAV 等が残っている可能性があるので残す。
-        logger.info(
-            "[recovery] cleaning up unrecoverable session %s (state=%s)",
-            session_id, state,
-        )
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning("[recovery] failed to remove stale meta %s: %s",
-                           session_id, e)
-        return False
+            meta = {}
 
     segments = _load_persisted_segments(session_id)
-    wav_path = _pick_recovery_wav(session_dir)
-
-    if not segments and wav_path is None:
-        logger.info("[recovery] skipping session %s (no transcript, no wav)", session_id)
-        try:
-            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-        except Exception:
-            pass
-        return False
+    audio_path = _pick_recovery_audio(session_dir)
+    if not segments and audio_path is None:
+        raise not_found("SESSION_DATA_NOT_FOUND", "音声と文字起こしデータが見つかりません")
 
     transcript: list[dict] = segments
-    if segments and wav_path is not None:
+    if segments and audio_path is not None and diarize_segments:
         try:
-            transcript = speaker_memory.rediarize_segments(
-                segments,
-                wav_path=str(wav_path),
-                session_id=session_id,
-            )
+            diarization_lease = False
+            if config.get(
+                "whisper", "speaker_memory", "diarization_provider", default="legacy"
+            ) == "pyannote":
+                await model_resource_gate.acquire_llm_async()
+                diarization_lease = True
+            try:
+                transcript = await asyncio.to_thread(
+                    speaker_memory.rediarize_segments,
+                    segments,
+                    wav_path=str(audio_path),
+                    session_id=session_id,
+                )
+            finally:
+                if diarization_lease:
+                    model_resource_gate.release_llm()
         except Exception as e:
-            logger.warning("[recovery] rediarize failed for %s, using raw segments: %s", session_id, e)
+            logger.warning("[recover] rediarize failed for %s, using raw segments: %s", session_id, e)
             transcript = segments
 
-    duration_sec = _wav_duration_sec(wav_path) if wav_path else 0
-
-    started_at = meta.get("started_at") or datetime.now(timezone.utc).isoformat()
     try:
-        date_str = started_at[:10]
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except Exception:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        duration_sec = int(float(meta.get("duration_sec") or 0))
+    except (TypeError, ValueError, OverflowError):
+        duration_sec = 0
+    if duration_sec <= 0 and audio_path:
+        duration_sec = _audio_duration_sec(audio_path)
+    if duration_sec <= 0 and transcript:
+        try:
+            duration_sec = int(max(float(seg.get("end", 0.0)) for seg in transcript))
+        except Exception:
+            duration_sec = 0
 
-    hhmm = "??:??"
-    if len(session_id) >= 13 and session_id[8] == "_":
-        hhmm = f"{session_id[9:11]}:{session_id[11:13]}"
-    title = f"[復元] {hhmm} の会議"
+    pipeline = _pipelines.get(session_id) or {}
+    started_at = (
+        meta.get("started_at")
+        or pipeline.get("started_at")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    date_str = _parse_date_from_started_at(started_at)
+    hhmm = _guess_hhmm(session_id, started_at)
+
     minutes_id = uuid.uuid4().hex[:12]
     now = datetime.now(timezone.utc).isoformat()
+    project_id = (
+        prefer_project_id
+        or meta.get("project_id")
+        or pipeline.get("project_id")
+        or "default"
+    )
 
     db.insert_minutes({
         "id": minutes_id,
         "session_id": session_id,
-        "project_id": meta.get("project_id") or "default",
-        "title": title,
+        "project_id": project_id,
+        "title": f"{title_prefix}{hhmm} の会議",
         "date": date_str,
         "started_at": started_at,
         "duration_sec": int(duration_sec),
@@ -1078,40 +1658,45 @@ def _recover_one_session(session_dir: Path, meta: dict) -> bool:
         "created_at": now,
         "updated_at": now,
     })
-    try:
-        (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
-    except Exception:
-        pass
-    logger.info(
-        "[recovery] recovered: %s (%d segments, wav=%s, prior_state=%s)",
-        session_id, len(transcript), wav_path.name if wav_path else None, state,
+    minutes = db.get_minutes(minutes_id)
+    if minutes is None:
+        raise RuntimeError("minutes insert failed")
+
+    auto_summary_requested = (
+        enqueue_summary
+        and bool(transcript)
+        and bool(config.get("minutes_ai", "auto_generate", default=True))
     )
+    summary_queued = _enqueue_auto_summary(minutes_id) if auto_summary_requested else False
+    if summary_queued:
+        logger.info("[recover] auto-summary enqueued: %s", minutes_id)
 
-    # 復元した議事録にも自動要約をかける (auto_generate=true 時)
-    if transcript and bool(config.get("minutes_ai", "auto_generate", default=True)):
+    if remove_meta and (not auto_summary_requested or summary_queued):
         try:
-            from src.summarize.runner import get_runner
+            (session_dir / SESSION_META_FILENAME).unlink(missing_ok=True)
+        except Exception:
+            pass
 
-            get_runner().enqueue(minutes_id)
-            logger.info("[recovery] auto-summary enqueued for recovered: %s", minutes_id)
-        except Exception as e:
-            logger.warning(
-                "[recovery] failed to enqueue auto-summary for %s: %s", minutes_id, e,
-            )
-    return True
+    return minutes, {
+        "created": True,
+        "used_audio": audio_path is not None,
+        "used_segments": bool(segments),
+    }
 
 
-def recover_pending_sessions() -> int:
-    """起動時、finalize 中に落ちたセッションを DB に書き戻す。
+def _run_recovery_coro_sync(coro):
+    """同期 API 互換用: 復旧コルーチンを同期実行する。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError("sync recovery API cannot run inside an active event loop")
 
-    対象: ~/.seam/sessions/<id>/session_meta.json が state in {stopping, transcribing,
-    rediarizing, saving} かつ DB に対応 minutes 行が無いもの。
-    録音中(state=recording)で落ちたセッションは対象外。
-    """
+
+def _iter_pending_recovery_metas() -> list[tuple[Path, dict]]:
     if not SESSIONS_DIR.exists():
-        return 0
-
-    recovered = 0
+        return []
+    out: list[tuple[Path, dict]] = []
     for session_dir in sorted(SESSIONS_DIR.iterdir()):
         if not session_dir.is_dir():
             continue
@@ -1123,11 +1708,222 @@ def recover_pending_sessions() -> int:
         except Exception as e:
             logger.warning("[recovery] failed to read meta %s: %s", session_dir, e)
             continue
+        out.append((session_dir, meta))
+    return out
+
+
+def _recover_one_session(session_dir: Path, meta: dict) -> bool:
+    """同期版互換 API。実体は async 実装を利用する。"""
+    return _run_recovery_coro_sync(_recover_one_session_async(session_dir, meta))
+
+
+async def _recover_one_session_async(session_dir: Path, meta: dict) -> bool:
+    """1セッション分の救済処理(非同期版)。成功なら True / 対象外なら False。"""
+    from src.storage.db import db
+
+    session_id = meta.get("session_id") or session_dir.name
+    state = meta.get("state")
+    audio_path = _pick_recovery_audio(session_dir)
+    existing = db.get_minutes_by_session(session_id)
+    existing_segments = existing.get("transcript") if existing else None
+    if isinstance(existing_segments, str):
         try:
-            if _recover_one_session(session_dir, meta):
+            existing_segments = json.loads(existing_segments)
+        except Exception:
+            existing_segments = []
+
+    retry_minutes_id = str(meta.get("retry_minutes_id") or "").strip()
+    if retry_minutes_id:
+        if existing is None or str(existing.get("id") or "") != retry_minutes_id:
+            logger.warning(
+                "[recovery] retry target missing for session %s (minutes_id=%s)",
+                session_id,
+                retry_minutes_id,
+            )
+            return False
+        if state == "retry_saved":
+            summary = str(existing.get("summary") or "").strip()
+            auto_generate = bool(
+                config.get("minutes_ai", "auto_generate", default=True)
+            )
+            if auto_generate and not summary:
+                if not _enqueue_auto_summary(retry_minutes_id):
+                    return False
+                logger.info(
+                    "[recovery] re-queued summary after retranscription: %s",
+                    retry_minutes_id,
+                )
+            _delete_session_meta(session_id)
+            return True
+
+        try:
+            from src.api.minutes import _start_retranscribe_minutes
+
+            await _start_retranscribe_minutes(
+                retry_minutes_id,
+                enqueue_summary_on_complete=bool(
+                    config.get("minutes_ai", "auto_generate", default=True)
+                ),
+            )
+            logger.info(
+                "[recovery] resumed interrupted retranscription: %s",
+                retry_minutes_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "[recovery] retranscription resume deferred (%s): %s",
+                retry_minutes_id,
+                e,
+            )
+            return False
+
+    # DB insert 完了前に落ちたセッションは音声から文字起こしを再実行する。
+    # 先に空の minutes を作り、処理に失敗しても音声と復元メタデータを残す。
+    should_retranscribe = bool(audio_path) and (
+        existing is None or not isinstance(existing_segments, list) or not existing_segments
+    )
+    if existing is not None and not should_retranscribe:
+        if (
+            isinstance(existing_segments, list)
+            and existing_segments
+            and not str(existing.get("summary") or "").strip()
+            and bool(config.get("minutes_ai", "auto_generate", default=True))
+        ):
+            if not _enqueue_auto_summary(str(existing["id"])):
+                return False
+            logger.info(
+                "[recovery] re-queued auto-summary for saved minutes: %s",
+                existing["id"],
+            )
+            _delete_session_meta(session_id)
+            return True
+        _delete_session_meta(session_id)
+        return False
+
+    if existing is None:
+        has_segments = bool(_load_persisted_segments(session_id))
+        if not audio_path and not has_segments:
+            logger.info(
+                "[recovery] removing session metadata without recoverable data %s (state=%s)",
+                session_id, state,
+            )
+            _delete_session_meta(session_id)
+            return False
+
+    try:
+        if existing is not None:
+            minutes = existing
+            info = {
+                "created": False,
+                "used_audio": audio_path is not None,
+                "used_segments": bool(existing_segments),
+            }
+        else:
+            minutes, info = await _materialize_session_minutes(
+                session_id,
+                prefer_project_id=meta.get("project_id"),
+                title_prefix="[復元] ",
+                enqueue_summary=not should_retranscribe,
+                remove_meta=not should_retranscribe,
+                diarize_segments=not should_retranscribe,
+            )
+
+        if should_retranscribe:
+            from src.api.minutes import _start_retranscribe_minutes
+
+            await _start_retranscribe_minutes(
+                str(minutes["id"]),
+                enqueue_summary_on_complete=bool(
+                    config.get("minutes_ai", "auto_generate", default=True)
+                ),
+            )
+            logger.info("[recovery] full audio transcription queued: %s", session_id)
+    except Exception as e:
+        logger.warning("[recovery] retaining session %s for a later retry: %s", session_id, e)
+        return False
+
+    logger.info(
+        "[recovery] recovered: %s (minutes_id=%s, prior_state=%s, used_audio=%s, used_segments=%s)",
+        session_id,
+        minutes.get("id"),
+        state,
+        info.get("used_audio"),
+        info.get("used_segments"),
+    )
+    return bool(info.get("created", False) or should_retranscribe)
+
+
+def recover_pending_sessions() -> int:
+    """同期版互換 API。実体は async 実装を利用する。"""
+    return _run_recovery_coro_sync(recover_pending_sessions_async())
+
+
+async def recover_pending_sessions_async() -> int:
+    """非同期版の起動時セッション復旧。
+
+    DB 書き込みはメインスレッドで行い、重い再話者分離だけ thread offload する。
+    """
+    metas = _iter_pending_recovery_metas()
+    if not metas:
+        _recovery_state.update({
+            "state": "idle", "total": 0, "current": 0,
+            "item": None, "recovered": 0,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return 0
+
+    total = len(metas)
+    _recovery_state.update({
+        "state": "running", "total": total, "current": 0,
+        "item": None, "recovered": 0, "finished_at": None,
+    })
+    try:
+        await ws_manager.broadcast({
+            "type": "session_recovery_started",
+            "data": {"total": total},
+        })
+    except Exception:
+        pass
+
+    recovered = 0
+    for idx, (session_dir, meta) in enumerate(metas, start=1):
+        session_id = meta.get("session_id") or session_dir.name
+        started_at = meta.get("started_at")
+        item = {
+            "session_id": session_id,
+            "started_at": started_at,
+            "date": _parse_date_from_started_at(started_at),
+            "hhmm": _guess_hhmm(session_id, started_at),
+            "prior_state": meta.get("state"),
+        }
+        _recovery_state.update({"current": idx, "item": item})
+        try:
+            await ws_manager.broadcast({
+                "type": "session_recovery_progress",
+                "data": {"current": idx, "total": total, "item": item},
+            })
+        except Exception:
+            pass
+        try:
+            if await _recover_one_session_async(session_dir, meta):
                 recovered += 1
+                _recovery_state["recovered"] = recovered
         except Exception as e:
             logger.error("[recovery] failed for %s: %s", session_dir.name, e)
+        await asyncio.sleep(0)
+
+    _recovery_state.update({
+        "state": "done", "item": None,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    })
+    try:
+        await ws_manager.broadcast({
+            "type": "session_recovery_finished",
+            "data": {"total": total, "recovered": recovered},
+        })
+    except Exception:
+        pass
 
     if recovered:
         logger.info("[recovery] recovered %d pending session(s)", recovered)

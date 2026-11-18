@@ -1,14 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
-import type { Project, Minutes, PipelineStatus } from "../lib/api";
+import { useState, useEffect, useCallback, useRef } from "react";
+import type {
+  Project, Minutes, PipelineStatus,
+} from "../lib/api";
 import type { OpenMinutesOpts } from "../components/MinutesList";
 import {
-  listMinutes, getMinutes, getPipelines, dismissPipeline, listDevices,
-  getSettings, getDebugStatus,
+  listMinutes, getMinutes, dismissPipeline, getSettings, getDebugStatus,
 } from "../lib/api";
-import { RecordToolbar } from "../components/RecordToolbar";
 import { MinutesList } from "../components/MinutesList";
-import { DeviceSettingsModal } from "../components/DeviceSettingsModal";
-import { LatestSegmentPreview } from "../components/LatestSegmentPreview";
 import { useRecording } from "../lib/recording-context";
 
 interface Props {
@@ -18,47 +16,33 @@ interface Props {
   activeSummarizes: Map<string, string>;
   onOpenMinutes: (m: Minutes, opts?: OpenMinutesOpts) => void;
   onOpenPipelineSession: (sessionId: string) => void;
-  onOpenLive: () => void;
+  pipelines: PipelineStatus[];
+  refreshPipelines: () => void;
 }
+
+const MINUTES_PAGE_SIZE = 20;
 
 export function MainView({
   project, allProjects, activeSummarizes,
-  onOpenMinutes, onOpenPipelineSession, onOpenLive,
+  onOpenMinutes, onOpenPipelineSession, pipelines, refreshPipelines,
 }: Props) {
-  const {
-    recording, streamStatus,
-    setActiveSessionId, micDevice, setMicDevice,
-    captureSystem, setCaptureSystem,
-  } = useRecording();
+  const { recording, streamStatus } = useRecording();
 
   const [minutes, setMinutes] = useState<Minutes[]>([]);
-  const [pipelines, setPipelines] = useState<PipelineStatus[]>([]);
-  const [showDevices, setShowDevices] = useState(false);
+  const [minutesLoading, setMinutesLoading] = useState(false);
+  const [minutesLoadingMore, setMinutesLoadingMore] = useState(false);
+  const [minutesHasMore, setMinutesHasMore] = useState(false);
+  const [minutesError, setMinutesError] = useState("");
+  const [minutesMoreError, setMinutesMoreError] = useState("");
+  const loadingMoreRef = useRef(false);
+  const projectIdRef = useRef(project.id);
+  const minutesRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  useEffect(() => () => { detailRequestRef.current += 1; }, []);
+  projectIdRef.current = project.id;
   const [debugMode, setDebugMode] = useState(false);
   const [debugStatus, setDebugStatus] = useState<Record<string, any> | null>(null);
   const [debugError, setDebugError] = useState("");
-
-  // 起動時に device 設定を復元
-  useEffect(() => {
-    Promise.all([listDevices(), getSettings().catch(() => null)]).then(([r, s]) => {
-      const rec = (s?.recording as any) || {};
-      const savedCapture = typeof rec.last_capture_system === "boolean"
-        ? rec.last_capture_system : null;
-      if (savedCapture !== null) {
-        setCaptureSystem(savedCapture && r.screen_capture_available);
-      } else if (r.screen_capture_available) {
-        setCaptureSystem(true);
-      }
-      const savedMic = typeof rec.last_mic_device === "number" ? rec.last_mic_device : null;
-      if (savedMic !== null && r.devices.some((d) => d.id === savedMic)) {
-        setMicDevice(savedMic);
-        return;
-      }
-      const mic = r.devices.find((d) => d.is_default && !d.is_blackhole);
-      if (mic && micDevice === null) setMicDevice(mic.id);
-    }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     getSettings()
@@ -108,61 +92,124 @@ export function MainView({
     };
   }, [debugMode, recording]);
 
-  const refreshMinutes = useCallback(async () => {
-    try { setMinutes(await listMinutes(project.id)); }
-    catch { setMinutes([]); }
+  const loadInitialMinutes = useCallback(async () => {
+    const requestId = ++minutesRequestRef.current;
+    const requestedProjectId = project.id;
+    loadingMoreRef.current = false;
+    setMinutesLoadingMore(false);
+    setMinutesLoading(true);
+    setMinutesError("");
+    setMinutesMoreError("");
+    setMinutesHasMore(false);
+    setMinutes([]);
+    try {
+      const page = await listMinutes(requestedProjectId, MINUTES_PAGE_SIZE, 0);
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
+      setMinutes(page);
+      setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
+    } catch (e) {
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
+      setMinutes([]);
+      setMinutesHasMore(false);
+      setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
+    } finally {
+      if (requestId === minutesRequestRef.current && projectIdRef.current === requestedProjectId) {
+        setMinutesLoading(false);
+      }
+    }
   }, [project.id]);
 
-  const refreshPipelines = useCallback(async () => {
-    try { setPipelines(await getPipelines()); }
-    catch { setPipelines([]); }
-  }, []);
+  const refreshMinutes = useCallback(async () => {
+    const requestId = ++minutesRequestRef.current;
+    const requestedProjectId = project.id;
+    loadingMoreRef.current = false;
+    setMinutesLoadingMore(false);
+    const limit = Math.max(MINUTES_PAGE_SIZE, minutes.length || MINUTES_PAGE_SIZE);
+    setMinutesMoreError("");
+    try {
+      const page = await listMinutes(requestedProjectId, limit, 0);
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
+      setMinutes(page);
+      setMinutesHasMore(page.length === limit);
+      setMinutesError("");
+    } catch (e) {
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
+      if (minutes.length === 0) {
+        setMinutes([]);
+        setMinutesHasMore(false);
+        setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
+      } else {
+        setMinutesMoreError(e instanceof Error ? e.message : "議事録一覧を更新できませんでした");
+      }
+    } finally {
+      if (requestId === minutesRequestRef.current && projectIdRef.current === requestedProjectId) {
+        setMinutesLoading(false);
+      }
+    }
+  }, [project.id, minutes.length]);
 
-  useEffect(() => { refreshMinutes(); }, [refreshMinutes]);
-  useEffect(() => { refreshPipelines(); }, [refreshPipelines]);
+  const loadMoreMinutes = useCallback(async () => {
+    if (loadingMoreRef.current || minutesLoading || minutesLoadingMore || !minutesHasMore) return;
+    const requestId = ++minutesRequestRef.current;
+    const requestedProjectId = project.id;
+    loadingMoreRef.current = true;
+    setMinutesLoadingMore(true);
+    setMinutesMoreError("");
+    try {
+      const page = await listMinutes(requestedProjectId, MINUTES_PAGE_SIZE, minutes.length);
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
+      setMinutes((prev) => {
+        const seen = new Set(prev.map((m) => m.id));
+        const unique = page.filter((m) => !seen.has(m.id));
+        return unique.length > 0 ? [...prev, ...unique] : prev;
+      });
+      setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
+    } catch (e) {
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
+      setMinutesMoreError(e instanceof Error ? e.message : "過去の議事録を読み込めませんでした");
+    } finally {
+      if (requestId === minutesRequestRef.current && projectIdRef.current === requestedProjectId) {
+        loadingMoreRef.current = false;
+        setMinutesLoadingMore(false);
+      }
+    }
+  }, [project.id, minutes.length, minutesHasMore, minutesLoading, minutesLoadingMore]);
 
   useEffect(() => {
-    const onUpdated = () => refreshMinutes();
-    window.addEventListener("minutes-updated", onUpdated as EventListener);
-    return () => window.removeEventListener("minutes-updated", onUpdated as EventListener);
+    loadingMoreRef.current = false;
+    setMinutesLoadingMore(false);
+    loadInitialMinutes();
+  }, [loadInitialMinutes]);
+
+  const refreshMinutesAndPipelines = useCallback(() => {
+    void refreshMinutes();
+    refreshPipelines();
+  }, [refreshMinutes, refreshPipelines]);
+
+  useEffect(() => {
+    const events = [
+      "minutes-updated",
+      ...[
+        "__open", "pipeline_done", "minutes_saved", "session_recovery_finished", "summary_done",
+        "summary_failed", "summary_cancelled", "summary_skipped",
+        "transcript_corrected", "minutes_title_updated",
+      ].map((name) => `recording-ws:${name}`),
+    ];
+    events.forEach((event) => window.addEventListener(event, refreshMinutes));
+    return () => events.forEach((event) => window.removeEventListener(event, refreshMinutes));
   }, [refreshMinutes]);
 
-  // RecordingProvider が再配信する WS イベントを listen
-  useEffect(() => {
-    const onPipeline = () => { refreshPipelines(); };
-    const onDone = () => { refreshPipelines(); refreshMinutes(); };
-    const onOpen = () => { refreshPipelines(); refreshMinutes(); };
-    window.addEventListener("recording-ws:pipeline_progress", onPipeline);
-    window.addEventListener("recording-ws:pipeline_error", onPipeline);
-    window.addEventListener("recording-ws:recording_stopped", onPipeline);
-    window.addEventListener("recording-ws:pipeline_done", onDone);
-    window.addEventListener("recording-ws:__open", onOpen);
-    return () => {
-      window.removeEventListener("recording-ws:pipeline_progress", onPipeline);
-      window.removeEventListener("recording-ws:pipeline_error", onPipeline);
-      window.removeEventListener("recording-ws:recording_stopped", onPipeline);
-      window.removeEventListener("recording-ws:pipeline_done", onDone);
-      window.removeEventListener("recording-ws:__open", onOpen);
-    };
-  }, [refreshPipelines, refreshMinutes]);
-
   const handleOpenMin = async (m: Minutes, opts?: OpenMinutesOpts) => {
-    try { onOpenMinutes(await getMinutes(m.id), opts); }
-    catch { onOpenMinutes(m, opts); }
+    const request = ++detailRequestRef.current;
+    const full = await getMinutes(m.id).catch(() => m);
+    if (detailRequestRef.current === request) onOpenMinutes(full, opts);
   };
-
-  // 現在録音中の session_id を pipelines から特定して context へ
-  useEffect(() => {
-    const rec = pipelines.find((p) => p.state === "recording");
-    setActiveSessionId(rec?.session_id ?? null);
-  }, [pipelines, setActiveSessionId]);
 
   const activePipelines = pipelines.filter((p) =>
     p.project_id === project.id &&
     (p.state === "stopping" || p.state === "transcribing"
       || p.state === "done" || p.state === "error")
   );
-
   const handleDismiss = async (sid: string) => {
     try { await dismissPipeline(sid); } catch {}
     refreshPipelines();
@@ -170,17 +217,6 @@ export function MainView({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <RecordToolbar
-        project={project}
-        onStopped={() => { refreshMinutes(); refreshPipelines(); }}
-        onOpenDeviceSettings={() => setShowDevices(true)}
-      />
-
-      {recording && streamStatus && (
-        <StreamStatusBar status={streamStatus} />
-      )}
-
-      {recording && <LatestSegmentPreview onExpand={onOpenLive} />}
       {debugMode && (
         <DebugPanel
           status={debugStatus}
@@ -191,99 +227,28 @@ export function MainView({
 
       {/* 録音中でも MinutesList を常に表示(過去議事録を閲覧可能) */}
       <div className="flex-1 overflow-hidden">
-        <div className="h-full overflow-y-auto" key={project.id}>
+        <section className="minutes-page" aria-label="議事録">
           <MinutesList
             minutes={minutes}
             projectId={project.id}
             allProjects={allProjects}
             activeSummarizes={activeSummarizes}
             processing={activePipelines}
+            loading={minutesLoading}
+            loadingMore={minutesLoadingMore}
+            hasMore={minutesHasMore}
+            error={minutesError}
+            moreError={minutesMoreError}
             onOpenMin={handleOpenMin}
             onOpenPipeline={onOpenPipelineSession}
             onDismissPipeline={handleDismiss}
-            onMutated={refreshMinutes}
+            onLoadMore={loadMoreMinutes}
+            onRetry={loadInitialMinutes}
+            onMutated={refreshMinutesAndPipelines}
+            onRetryMore={loadMoreMinutes}
           />
-        </div>
+        </section>
       </div>
-
-      {showDevices && (
-        <DeviceSettingsModal
-          micDevice={micDevice}
-          captureSystem={captureSystem}
-          onChangeMicDevice={setMicDevice}
-          onChangeCaptureSystem={setCaptureSystem}
-          onClose={() => setShowDevices(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-function StreamStatusBar({ status }: {
-  status: {
-    queue_size: number;
-    queue_maxsize?: number;
-    total_segments: number;
-    current_chunk_audio_sec?: number;
-    current_processing_sec?: number;
-    avg_speed_ratio?: number;
-    pending_audio_sec?: number;
-    worker_alive?: boolean;
-    worker_restarts?: number;
-    dropped_chunks?: number;
-    dropped_audio_sec?: number;
-    last_processed_age_sec?: number | null;
-    transcribe_errors?: number;
-    filtered_segments?: number;
-  };
-}) {
-  const isProcessing = (status.current_chunk_audio_sec ?? 0) > 0;
-  const speed = status.avg_speed_ratio ?? 0;
-  const pending = status.pending_audio_sec ?? 0;
-  const cur = status.current_chunk_audio_sec ?? 0;
-  const proc = status.current_processing_sec ?? 0;
-
-  return (
-    <div className="flex items-center gap-4 px-4 py-1.5 border-b border-(--border) text-[10px] text-(--t3) num">
-      {isProcessing ? (
-        <span className="flex items-center gap-1.5 text-(--accent)">
-          <span className="status-dot status-dot--pulse" />
-          {cur.toFixed(1)}秒の音声を処理中 · {proc.toFixed(1)}秒経過
-        </span>
-      ) : (
-        <span className="text-(--t4)">待機中</span>
-      )}
-      <span className="ml-auto flex items-center gap-3">
-        {speed > 0 && (
-          <span title="直近の処理速度(>1 で実時間より速い)">
-            速度 ×{speed.toFixed(1)}
-          </span>
-        )}
-        {pending > 0 && (
-          <span title="未処理の音声合計">
-            未処理 {pending.toFixed(1)}秒
-          </span>
-        )}
-        <span title="キューサイズ">
-          待機中 {status.queue_size}{status.queue_maxsize ? `/${status.queue_maxsize}` : ""}
-        </span>
-        {status.dropped_chunks ? (
-          <span className="text-(--warning)" title="過負荷で破棄した音声">
-            drop {status.dropped_chunks}件 ({(status.dropped_audio_sec ?? 0).toFixed(1)}秒)
-          </span>
-        ) : null}
-        {status.transcribe_errors ? (
-          <span className="text-(--danger)" title="文字起こし失敗回数">
-            err {status.transcribe_errors}
-          </span>
-        ) : null}
-        {status.filtered_segments ? (
-          <span className="text-(--t3)" title="ハルシネーションとして除外した件数">
-            filter {status.filtered_segments}
-          </span>
-        ) : null}
-        <span>確定 {status.total_segments}件</span>
-      </span>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../lib/dialog-focus";
 /* 用語集管理モーダル。
    保存形式は string[] のままだが、UI 上では {term, description} に parse して扱う。
    形式: "term" または "term: description" / "term：description"。
@@ -47,6 +48,7 @@ function serialize(entries: GlossaryEntry[]): string[] {
 }
 
 export function GlossaryManagerModal({ open, value, onChange, onClose }: Props) {
+  const dialogFocus = useDialogFocus(open);
   const [closing, setClosing] = useState(false);
   const [entries, setEntries] = useState<GlossaryEntry[]>(() => parse(value));
   const [query, setQuery] = useState("");
@@ -65,7 +67,7 @@ export function GlossaryManagerModal({ open, value, onChange, onClose }: Props) 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") handleClose();
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) handleClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -178,11 +180,11 @@ export function GlossaryManagerModal({ open, value, onChange, onClose }: Props) 
 
       <div
         {...imeHandlers}
-        className={`dialog-shell relative w-[640px] max-w-[92vw] max-h-[88vh] flex flex-col ${closing ? "anim-modal-out" : "anim-modal-in"}`}
+        ref={dialogFocus} role="dialog" aria-modal="true" aria-label="用語集" tabIndex={-1} className={`dialog-shell dictionary-dialog relative w-[640px] max-w-[92vw] max-h-[88vh] flex flex-col ${closing ? "anim-modal-out" : "anim-modal-in"}`}
       >
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border) shrink-0">
           <div>
-            <h2 className="text-[14px] font-semibold text-(--t1)">用語集の管理</h2>
+            <h2 className="text-[14px] font-semibold text-(--t1)">用語集</h2>
             <p className="text-[11px] text-(--t3) mt-0.5">
               {entries.length} 件{duplicates.size > 0 && (
                 <span className="text-(--danger) ml-2">· 重複 {duplicates.size}</span>
@@ -195,11 +197,13 @@ export function GlossaryManagerModal({ open, value, onChange, onClose }: Props) 
         </header>
 
         {/* 検索 / ソート */}
-        <div className="px-5 pt-3 pb-2 flex items-center gap-2 border-b border-(--border) shrink-0">
-          <div className="flex items-center gap-1.5 flex-1 px-2.5 h-8 rounded-md border border-(--border) bg-(--surface)">
+        <div className="dictionary-toolbar">
+          <div className="dictionary-search" role="search">
             <MagnifyingGlass size={12} weight="regular" className="text-(--t3) shrink-0" />
             <input
               type="text"
+              data-initial-focus
+              aria-label="用語集を検索"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="用語または説明で検索"
@@ -229,8 +233,8 @@ export function GlossaryManagerModal({ open, value, onChange, onClose }: Props) 
         </div>
 
         {/* 新規追加 */}
-        <div className="px-5 py-2.5 flex items-stretch gap-2 border-b border-(--border) shrink-0">
-          <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+        <div className="dictionary-toolbar dictionary-add">
+          <div className="dictionary-fields">
             <input
               type="text"
               value={newTerm}
