@@ -4,7 +4,7 @@ import {
 } from "@phosphor-icons/react";
 import { Waveform } from "./Waveform";
 import {
-  startRecording, stopRecording, updateSettings, setMicMuted,
+  stopRecording, updateSettings, setMicMuted, getRecordingStatus,
 } from "../lib/api";
 import { useRecording } from "../lib/recording-context";
 import type { Project } from "../lib/api";
@@ -27,6 +27,8 @@ export function RecordToolbar({
 }: Props) {
   const {
     recording, setRecording, recordingStarting, setRecordingStarting, paused, togglePaused,
+    recordingStopping, setRecordingStopping, waitingForModel,
+    startRecordingSession, cancelRecordingStart,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed, level,
     resetLive, micDevice, captureSystem, setActiveSessionId,
@@ -49,7 +51,7 @@ export function RecordToolbar({
     setError("");
     setRecordingStarting(true);
     try {
-      const started = await startRecording(project.id, micDevice, captureSystem);
+      const started = await startRecordingSession(project.id, micDevice, captureSystem);
       void updateSettings({
         recording: {
           last_project_id: project.id,
@@ -62,21 +64,41 @@ export function RecordToolbar({
       setActiveSessionId(started.session_id);
       setRecording(true);
     } catch (e: any) {
-      setError(e.message || "録音の開始に失敗しました");
-    } finally {
-      setRecordingStarting(false);
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setError(e.message || "録音の開始に失敗しました");
+      }
     }
   };
 
-  const handleStop = useCallback(async () => {
-    try { await stopRecording(); } catch {}
-    setRecording(false);
-    setActiveSessionId(null);
-    setError("");
-    onStopped();
-  }, [setRecording, setActiveSessionId, onStopped]);
+  const cancelStart = cancelRecordingStart;
 
-  const handleMainClick = recording ? handleStop : handleStart;
+  const handleStop = useCallback(async () => {
+    if (recordingStopping) return;
+    setRecordingStopping(true);
+    setError("");
+    try {
+      const result = await stopRecording();
+      if (result.session_id) setActiveSessionId(result.session_id);
+      onStopped();
+    } catch (e: any) {
+      setRecordingStopping(false);
+      setError(e.message || "録音を停止できませんでした");
+      void getRecordingStatus().then((status) => {
+        setRecording(status.recording);
+        setRecordingStopping(Boolean(status.stopping));
+        setActiveSessionId(status.session_id ?? null);
+      }).catch(() => {});
+    }
+  }, [recordingStopping, setRecordingStopping, setActiveSessionId, onStopped]);
+
+  const handleMainClick = recordingStarting
+    ? cancelStart
+    : recording ? handleStop : handleStart;
+  const stateLabel = recordingStopping
+    ? "停止中"
+    : recordingStarting
+      ? waitingForModel ? "処理待ち · クリックで取消" : "準備中 · クリックで取消"
+      : recording ? paused ? "一時停止中" : "録音中" : "待機中";
 
   const display = useMemo(() => fmt(elapsedSec), [elapsedSec]);
 
@@ -88,17 +110,17 @@ export function RecordToolbar({
           <span className={`num text-[22px] leading-none ${recording ? "text-(--t1)" : "text-(--t3)"}`}>
             <span>{display}</span>
           </span>
-          <span className="flex items-center gap-1.5 mt-1 h-[14px]">
-            {recording ? (
+          <span className="flex items-center gap-2 mt-1 h-4 text-xs text-(--t3)" aria-live="polite">
+            {recording || recordingStarting || recordingStopping ? (
               <>
                 <span
-                  className={`status-dot ${paused ? "" : "status-dot--pulse"}`}
-                  style={{ background: paused ? "var(--t3)" : "var(--accent)" }}
+                  className={`status-dot ${((recording && !paused && !recordingStopping) || recordingStarting) ? "status-dot--pulse" : ""}`}
+                  style={{ background: ((recording && !paused && !recordingStopping) || recordingStarting) ? "var(--accent)" : "var(--t3)" }}
                 />
-                <span className="text-[10px] text-(--t3)">{paused ? "Paused" : "Speaking"}</span>
+                <span>{stateLabel}</span>
               </>
             ) : (
-              <span className="text-[10px] text-(--t4)">Idle</span>
+              <span className="text-(--t4)">{stateLabel}</span>
             )}
           </span>
         </div>
@@ -129,21 +151,24 @@ export function RecordToolbar({
         </button>
 
         <div className="rec-controls" data-state={recording ? "rec" : "idle"}>
-          <button
-            onClick={togglePaused}
-            className="rec-pause"
-            title={paused ? "再開" : "一時停止"}
-            tabIndex={recording ? 0 : -1}>
-            {paused ? <Play size={13} weight="fill" /> : <Pause size={13} weight="fill" />}
-          </button>
+          {recording && (
+            <button
+              onClick={togglePaused}
+              className="rec-pause"
+              title={paused ? "録音を再開" : "録音を一時停止"}
+              aria-label={paused ? "録音を再開" : "録音を一時停止"}>
+              {paused ? <Play size={14} weight="regular" /> : <Pause size={14} weight="regular" />}
+            </button>
+          )}
 
           <button
             onClick={handleMainClick}
-            disabled={recordingStarting}
+            disabled={recordingStopping}
             className="rec-main"
-            title={recording ? "停止" : "録音開始"}>
+            aria-label={recordingStarting ? "録音開始をキャンセル" : recordingStopping ? "録音停止中" : recording ? "録音を停止" : "録音開始"}
+            title={recordingStarting ? "録音開始をキャンセル" : recordingStopping ? "録音停止中" : recording ? "録音停止" : "録音開始"}>
             <span className="rec-main-icon rec-main-icon-mic">
-              <Microphone size={18} weight="fill" />
+              {recordingStarting ? <Stop size={14} weight="fill" /> : <Microphone size={18} weight="fill" />}
             </span>
             <span className="rec-main-icon rec-main-icon-stop">
               <Stop size={14} weight="fill" />

@@ -1,7 +1,7 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { Microphone, Stop, Pause, Play } from "@phosphor-icons/react";
 import { useRecording } from "../lib/recording-context";
-import { stopRecording } from "../lib/api";
+import { getRecordingStatus, stopRecording } from "../lib/api";
 
 function fmt(s: number) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
@@ -22,15 +22,27 @@ interface Props {
  */
 export function RecordingBanner({ isOnLive, onBackToList }: Props) {
   const {
-    recording, paused, togglePaused, elapsedSec, level,
-    setRecording, setActiveSessionId, liveSegments,
+    recording, setRecording, paused, togglePaused, elapsedSec, level,
+    recordingStopping, setRecordingStopping, setActiveSessionId, liveSegments,
   } = useRecording();
+  const [error, setError] = useState("");
 
   const handleStop = useCallback(async () => {
-    try { await stopRecording(); } catch {}
-    setRecording(false);
-    setActiveSessionId(null);
-  }, [setRecording, setActiveSessionId]);
+    if (recordingStopping) return;
+    setRecordingStopping(true);
+    setError("");
+    try {
+      await stopRecording();
+    } catch (e) {
+      setRecordingStopping(false);
+      setError(e instanceof Error ? e.message : "録音を停止できませんでした");
+      void getRecordingStatus().then((status) => {
+        setRecording(status.recording);
+        setRecordingStopping(Boolean(status.stopping));
+        setActiveSessionId(status.session_id ?? null);
+      }).catch(() => {});
+    }
+  }, [recordingStopping, setRecording, setRecordingStopping, setActiveSessionId]);
 
   if (!recording) return null;
 
@@ -53,7 +65,7 @@ export function RecordingBanner({ isOnLive, onBackToList }: Props) {
         {fmt(elapsedSec)}
       </span>
       <span className="text-[11px] text-(--t3) shrink-0">
-        {paused ? "一時停止中" : speakingDot ? "Speaking" : "録音中"}
+        {recordingStopping ? "停止中" : paused ? "一時停止中" : speakingDot ? "発話を検出" : "録音中"}
       </span>
       <span className="text-[11px] text-(--t4) shrink-0">
         · 確定 {liveSegments.length} 件
@@ -74,6 +86,7 @@ export function RecordingBanner({ isOnLive, onBackToList }: Props) {
           type="button"
           onClick={togglePaused}
           className="icon-btn"
+          disabled={recordingStopping}
           title={paused ? "再開" : "一時停止"}
         >
           {paused
@@ -84,6 +97,7 @@ export function RecordingBanner({ isOnLive, onBackToList }: Props) {
           type="button"
           onClick={handleStop}
           className="icon-btn"
+          disabled={recordingStopping}
           title="録音停止"
           style={{ color: "var(--danger)" }}
         >
@@ -91,6 +105,7 @@ export function RecordingBanner({ isOnLive, onBackToList }: Props) {
         </button>
         <Microphone size={12} weight="regular" className="text-(--t4)" aria-hidden />
       </div>
+      {error && <span className="text-xs text-(--danger)" role="alert">{error}</span>}
     </div>
   );
 }

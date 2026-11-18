@@ -374,9 +374,8 @@ function AppInner() {
     setMode((m) => (m.kind === "live" ? m.previous : m));
   };
 
-  // 録音中で main ビュー以外 (= detail / pipeline-detail / live) ならフル RecordToolbar を出す。
-  // main ビューには MainView 内に既に RecordToolbar があるのでここでは出さない (重複回避)。
-  const showAppLevelToolbar = recording && mode.kind !== "main" && selectedProject;
+  // main ビューには MainView 内に既に RecordToolbar がある。それ以外では常に録音操作を表示する。
+  const showAppLevelToolbar = mode.kind !== "main" && Boolean(selectedProject);
 
   return (
     <div className="shell flex flex-col h-screen">

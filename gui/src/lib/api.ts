@@ -1,5 +1,17 @@
 const BASE_URL = "http://127.0.0.1:18900";
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(message: string, status: number, code: string | null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -7,7 +19,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
-    throw new Error(err.error?.message || err.detail?.message || res.statusText);
+    throw new ApiError(
+      err.error?.message || err.detail?.message || res.statusText,
+      res.status,
+      err.error?.code || err.detail?.code || null,
+    );
   }
   return res.json();
 }
@@ -325,11 +341,62 @@ export const listDevices = (options: { refresh?: boolean } = {}) => {
 };
 
 // Recording
-export const startRecording = (projectId: string, micDevice?: number | null, captureSystem = true) =>
-  request<{ session_id: string; has_system_audio: boolean }>("/api/recording/start", {
-    method: "POST",
-    body: JSON.stringify({ project_id: projectId, mic_device: micDevice ?? null, capture_system: captureSystem }),
+export interface StartRecordingOptions {
+  signal?: AbortSignal;
+  onWaitingForModel?: () => void;
+}
+
+export const startRecording = async (
+  projectId: string,
+  micDevice?: number | null,
+  captureSystem = true,
+  options: StartRecordingOptions = {},
+) => {
+  const abortError = () => new DOMException("録音開始をキャンセルしました", "AbortError");
+  const waitToRetry = () => new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, 1000);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(abortError());
+    };
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
   });
+
+  while (true) {
+    if (options.signal?.aborted) throw abortError();
+    try {
+      const started = await request<{ session_id: string; has_system_audio: boolean }>(
+        "/api/recording/start",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            project_id: projectId,
+            mic_device: micDevice ?? null,
+            capture_system: captureSystem,
+          }),
+        },
+      );
+      if (options.signal?.aborted) {
+        await stopRecording().catch(() => {});
+        throw abortError();
+      }
+      return started;
+    } catch (error) {
+      if (options.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        throw error;
+      }
+      if (!(error instanceof ApiError) || error.code !== "LOCAL_MODEL_BUSY") {
+        throw error;
+      }
+      options.onWaitingForModel?.();
+      await waitToRetry();
+    }
+  }
+};
 
 export interface RecordingResult {
   session_id: string;
@@ -339,12 +406,18 @@ export interface RecordingResult {
 }
 
 export const stopRecording = () =>
-  request<{ status: string }>("/api/recording/stop", { method: "POST" });
+  request<{ status: string; session_id?: string }>("/api/recording/stop", { method: "POST" });
 
 export const getRecordingStatus = () =>
-  request<{ recording: boolean; elapsed_sec: number; session_id?: string | null; mic_muted?: boolean }>(
+  request<{ recording: boolean; elapsed_sec: number; session_id?: string | null; mic_muted?: boolean; paused?: boolean; stopping?: boolean }>(
     "/api/recording/status",
   );
+
+export const setRecordingPaused = (paused: boolean) =>
+  request<{ status: string; paused: boolean }>("/api/recording/pause", {
+    method: "POST",
+    body: JSON.stringify({ paused }),
+  });
 
 export const setMicMuted = (muted: boolean) =>
   request<{ status: string; muted: boolean }>("/api/recording/mic-mute", {

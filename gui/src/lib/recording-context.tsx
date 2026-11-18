@@ -4,7 +4,8 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  WS_URL, getRecordingStatus, getWhisperModels, type TranscriptSegment,
+  WS_URL, getRecordingStatus, getWhisperModels, setRecordingPaused, startRecording,
+  type TranscriptSegment,
   type WhisperDownloadStatus,
 } from "./api";
 import { showToast } from "./toast";
@@ -44,6 +45,11 @@ interface Ctx {
   setRecording: (b: boolean) => void;
   recordingStarting: boolean;
   setRecordingStarting: (b: boolean) => void;
+  recordingStopping: boolean;
+  setRecordingStopping: (b: boolean) => void;
+  waitingForModel: boolean;
+  startRecordingSession: (projectId: string, micDevice: number | null, captureSystem: boolean) => Promise<{ session_id: string; has_system_audio: boolean }>;
+  cancelRecordingStart: () => void;
   paused: boolean;
   togglePaused: () => void;
   setPaused: (b: boolean) => void;
@@ -82,6 +88,8 @@ export function useRecording(): Ctx {
 export function RecordingProvider({ children }: { children: ReactNode }) {
   const [recording, setRecording] = useState(false);
   const [recordingStarting, setRecordingStarting] = useState(false);
+  const [recordingStopping, setRecordingStopping] = useState(false);
+  const [waitingForModel, setWaitingForModel] = useState(false);
   const [paused, setPaused] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [level, setLevel] = useState(0);
@@ -98,25 +106,59 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const recordingRef = useRef(recording);
   const activeSessionIdRef = useRef(activeSessionId);
   const pausedRef = useRef(paused);
+  const statusGenerationRef = useRef(0);
+  const startControllerRef = useRef<AbortController | null>(null);
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
 
-  // 起動時に既存のセッションを復元
-  useEffect(() => {
-    getRecordingStatus().then((s) => {
-      if (s.recording) {
-        setRecording(true);
-        setActiveSessionId(s.session_id ?? null);
-        setElapsedSec(Math.floor(s.elapsed_sec));
-        if (typeof s.mic_muted === "boolean") setMicMutedLocal(s.mic_muted);
-      }
-    }).catch(() => {});
-  }, []);
-
   const resetLive = useCallback(() => setLiveSegments([]), []);
   const resetElapsed = useCallback(() => setElapsedSec(0), []);
-  const togglePaused = useCallback(() => setPaused((p) => !p), []);
+  const updateRecording = useCallback((value: boolean) => {
+    statusGenerationRef.current += 1;
+    recordingRef.current = value;
+    setRecording(value);
+  }, []);
+  const updateActiveSessionId = useCallback((sessionId: string | null) => {
+    activeSessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
+  }, []);
+  const updatePaused = useCallback((value: boolean) => {
+    pausedRef.current = value;
+    setPaused(value);
+  }, []);
+  const startRecordingSession = useCallback(async (
+    projectId: string,
+    device: number | null,
+    system: boolean,
+  ) => {
+    if (startControllerRef.current) throw new Error("録音開始処理はすでに進行中です");
+    const controller = new AbortController();
+    startControllerRef.current = controller;
+    setRecordingStarting(true);
+    setWaitingForModel(false);
+    try {
+      return await startRecording(projectId, device, system, {
+        signal: controller.signal,
+        onWaitingForModel: () => setWaitingForModel(true),
+      });
+    } finally {
+      if (startControllerRef.current === controller) startControllerRef.current = null;
+      setWaitingForModel(false);
+      setRecordingStarting(false);
+    }
+  }, []);
+  const cancelRecordingStart = useCallback(() => startControllerRef.current?.abort(), []);
+  const togglePaused = useCallback(() => {
+    const next = !pausedRef.current;
+    pausedRef.current = next;
+    setPaused(next);
+    void setRecordingPaused(next).catch((error) => {
+      pausedRef.current = !next;
+      setPaused(!next);
+      showToast({ kind: "err", text: error instanceof Error ? error.message : "一時停止を変更できませんでした" });
+    });
+  }, []);
 
   // 単一 WebSocket: 録音関連イベントは内部 state へ、パイプライン系は CustomEvent で再配信
   useEffect(() => {
@@ -127,6 +169,30 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
     const dispatch = (type: string, detail: unknown) => {
       window.dispatchEvent(new CustomEvent(`recording-ws:${type}`, { detail }));
+    };
+
+    const applyRecordingStatus = (status: Awaited<ReturnType<typeof getRecordingStatus>>) => {
+      statusGenerationRef.current += 1;
+      recordingRef.current = Boolean(status.recording);
+      setRecording(Boolean(status.recording));
+      setRecordingStopping(Boolean(status.stopping));
+      pausedRef.current = Boolean(status.paused);
+      setPaused(Boolean(status.paused));
+      updateActiveSessionId(status.session_id ?? null);
+      setElapsedSec(Math.floor(Number(status.elapsed_sec) || 0));
+      if (typeof status.mic_muted === "boolean") setMicMutedLocal(status.mic_muted);
+    };
+
+    const syncRecordingStatus = async () => {
+      const generation = ++statusGenerationRef.current;
+      try {
+        const status = await getRecordingStatus();
+        if (!stopped && generation === statusGenerationRef.current) {
+          applyRecordingStatus(status);
+        }
+      } catch {
+        // 起動中や再接続中は次の WS 接続で状態を同期する。
+      }
     };
 
     const handle = (e: MessageEvent) => {
@@ -140,22 +206,39 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (t === "recording_status") {
+        statusGenerationRef.current += 1;
+        recordingRef.current = true;
+        setRecording(true);
+        setRecordingStopping(false);
         if (typeof m.data?.elapsed_sec === "number") {
           const sec = Math.floor(m.data.elapsed_sec);
           setElapsedSec((prev) => (prev !== sec ? sec : prev));
         }
         if (typeof m.data?.session_id === "string") {
-          setActiveSessionId(m.data.session_id);
+          updateActiveSessionId(m.data.session_id);
+        }
+        if (typeof m.data?.paused === "boolean") {
+          pausedRef.current = m.data.paused;
+          setPaused(m.data.paused);
         }
         return;
       }
       if (t === "recording_stopped") {
         const stoppedSession = typeof m.data?.session_id === "string" ? m.data.session_id : null;
         const activeSession = activeSessionIdRef.current;
-        if (!stoppedSession || stoppedSession === activeSession || (recordingRef.current && !activeSession)) {
+        if (!stoppedSession || stoppedSession === activeSession) {
+          statusGenerationRef.current += 1;
+          recordingRef.current = false;
           setRecording(false);
-          setActiveSessionId(null);
+          setRecordingStopping(false);
+          pausedRef.current = false;
+          setPaused(false);
+          updateActiveSessionId(null);
           setStreamStatus(null);
+        } else if (recordingRef.current && !activeSession) {
+          // Session IDs can arrive before React commits the matching active ID.
+          // Reconcile with the backend instead of letting an old stop event hide a new session.
+          void syncRecordingStatus();
         }
         dispatch(t, m.data);
         return;
@@ -164,9 +247,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         const failedSession = typeof m.data?.session_id === "string" ? m.data.session_id : null;
         const activeSession = activeSessionIdRef.current;
         if (failedSession && recordingRef.current && (failedSession === activeSession || !activeSession)) {
-          setRecording(false);
-          setActiveSessionId(null);
-          setStreamStatus(null);
+          setRecordingStopping(false);
+          void syncRecordingStatus();
         }
         dispatch(t, m.data);
         return;
@@ -239,7 +321,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       catch { scheduleReconnect(); return; }
       ws.onopen = () => {
         attempt = 0;
-        dispatch("__open", null);
+        void syncRecordingStatus().finally(() => dispatch("__open", null));
       };
       ws.onmessage = handle;
       ws.onclose = scheduleReconnect;
@@ -253,6 +335,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       timer = window.setTimeout(() => { timer = null; connect(); }, delay);
     };
 
+    void syncRecordingStatus();
     connect();
     return () => {
       stopped = true;
@@ -287,18 +370,19 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
   // elapsed の細かい tick はクライアントで補完(無音時のみ backend からの recording_status が来ない可能性)
   useEffect(() => {
-    if (!recording || paused) return;
+    if (!recording) return;
     startRef.current = Date.now() - elapsedSec * 1000;
     const id = window.setInterval(() => {
       const sec = Math.floor((Date.now() - startRef.current) / 1000);
       setElapsedSec((prev) => (prev !== sec ? sec : prev));
     }, 250);
     return () => window.clearInterval(id);
-  }, [recording, paused, elapsedSec]);
+  }, [recording, elapsedSec]);
 
   // 録音停止時のクリーンアップ
   useEffect(() => {
     if (recording) return;
+    pausedRef.current = false;
     setLevel(0);
     setPaused(false);
     setMicMutedLocal(false);
@@ -325,13 +409,15 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value: Ctx = {
-    recording, setRecording,
+    recording, setRecording: updateRecording,
     recordingStarting, setRecordingStarting,
-    paused, togglePaused, setPaused,
+    recordingStopping, setRecordingStopping,
+    waitingForModel, startRecordingSession, cancelRecordingStart,
+    paused, togglePaused, setPaused: updatePaused,
     micMuted, setMicMutedLocal,
     elapsedSec, resetElapsed,
     level,
-    activeSessionId, setActiveSessionId,
+    activeSessionId, setActiveSessionId: updateActiveSessionId,
     liveSegments, resetLive,
     streamStatus,
     modelLoadLog,
