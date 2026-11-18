@@ -1,17 +1,13 @@
-import { useState, useMemo, useRef, useLayoutEffect, type DragEvent } from "react";
-import {
-  MagnifyingGlass, Plus, Gear, SlidersHorizontal, ArrowsDownUp,
-} from "@phosphor-icons/react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type CSSProperties } from "react";
+import { Folder, Gear, MagnifyingGlass, Plus, SlidersHorizontal, X } from "@phosphor-icons/react";
 import type { Project } from "../lib/api";
-import { PulseDot } from "./PulseDot";
 
 interface Props {
   projects: Project[];
   selected: Project | null;
   editingProjectId: string | null;
   settingsActive: boolean;
-  /** タスクが進行中の project_id 集合(録音/文字起こし/要約)。 */
-  activeProjectIds?: Set<string>;
+  activeProjectIds: Set<string>;
   onSelect: (p: Project) => void;
   onNewProject: () => void;
   onReorder: (projectIds: string[]) => Promise<void>;
@@ -19,285 +15,231 @@ interface Props {
   onOpenSettings: () => void;
 }
 
+const ROW_HEIGHT = 40;
+
+interface Drag {
+  pointerId: number;
+  from: number;
+  to: number;
+  startX: number;
+  startY: number;
+  startScroll: number;
+  clientY: number;
+  offset: number;
+  active: boolean;
+}
+
 export function Sidebar({
   projects, selected, editingProjectId, settingsActive, activeProjectIds,
   onSelect, onNewProject, onReorder, onOpenProjectSettings, onOpenSettings,
 }: Props) {
-  const [q, setQ] = useState("");
-  const [previewIds, setPreviewIds] = useState<string[] | null>(null);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<{ id: string; position: "before" | "after" } | null>(null);
-  const [savingOrder, setSavingOrder] = useState(false);
-  const [orderAnnouncement, setOrderAnnouncement] = useState("");
-  const rowRefs = useRef(new Map<string, HTMLDivElement>());
-  const previousRects = useRef<Map<string, DOMRect> | null>(null);
-  const flipAnimations = useRef(new Map<string, Animation>());
-  const dropCommitted = useRef(false);
+  const [query, setQuery] = useState("");
+  const [preview, setPreview] = useState<Drag | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
+  const list = useRef<HTMLDivElement>(null);
+  const drag = useRef<Drag | null>(null);
+  const frame = useRef(0);
+  const suppressClick = useRef(false);
+  const orderPending = useRef(false);
+  const slots = useRef(new Map<string, HTMLDivElement>());
+  const beforeMove = useRef<Map<string, number> | null>(null);
 
-  const reordered = useMemo(() => {
-    if (!previewIds) return projects;
-    const byId = new Map<string, Project>(
-      projects.map((project) => [project.id, project] as const),
-    );
-    const ordered = previewIds.flatMap((id) => {
-      const project = byId.get(id);
-      return project ? [project] : [];
-    });
-    const included = new Set(ordered.map((project) => project.id));
-    return [...ordered, ...projects.filter((project) => !included.has(project.id))];
-  }, [projects, previewIds]);
+  const filter = query.trim().toLocaleLowerCase();
+  const visible = projects.filter((project) => project.name.toLocaleLowerCase().includes(filter));
+  const reorderable = visible.length > 1 && !saving;
 
-  const filtered = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    if (!s) return reordered;
-    return reordered.filter((p) => p.name.toLowerCase().includes(s));
-  }, [reordered, q]);
-
-  const reorderable = !q.trim() && projects.length > 1 && !savingOrder;
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
 
   useLayoutEffect(() => {
-    const firstRects = previousRects.current;
-    previousRects.current = null;
-    if (!firstRects || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-    for (const [id, element] of rowRefs.current) {
-      const before = firstRects.get(id);
-      if (!before) continue;
-      const after = element.getBoundingClientRect();
-      const offset = before.top - after.top;
+    const prior = beforeMove.current;
+    beforeMove.current = null;
+    if (!prior || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    for (const [id, node] of slots.current) {
+      const top = prior.get(id);
+      if (top === undefined) continue;
+      const offset = top - node.getBoundingClientRect().top;
       if (Math.abs(offset) < 1) continue;
-      flipAnimations.current.get(id)?.cancel();
-      const animation = element.animate(
-        [
-          { transform: `translateY(${offset}px)` },
-          { transform: "translateY(0)" },
-        ],
-        { duration: 210, easing: "cubic-bezier(0.2, 0.75, 0.25, 1)" },
-      );
-      flipAnimations.current.set(id, animation);
-      animation.onfinish = () => {
-        if (flipAnimations.current.get(id) === animation) flipAnimations.current.delete(id);
-      };
+      node.animate([{ transform: `translateY(${offset}px)` }, { transform: "translateY(0)" }], {
+        duration: 180, easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+      });
     }
-  }, [previewIds]);
+  }, [projects]);
 
-  const previewOrder = (nextIds: string[]) => {
-    previousRects.current = new Map<string, DOMRect>(
-      [...rowRefs.current].map(([id, element]) => [id, element.getBoundingClientRect()] as const),
-    );
-    setPreviewIds(nextIds);
-  };
+  async function move(from: number, to: number) {
+    if (from === to || orderPending.current) return;
+    const ordered = visible.map((p) => p.id);
+    const [moved] = ordered.splice(from, 1);
+    if (!moved) return;
+    ordered.splice(to, 0, moved);
+    const visibleIds = new Set(ordered);
+    let index = 0;
+    const ids = projects.map((p) => visibleIds.has(p.id) ? ordered[index++] : p.id);
 
-  const commitOrder = async (projectIds: string[]) => {
-    setSavingOrder(true);
+    beforeMove.current = new Map([...slots.current].map(([id, node]) => [id, node.getBoundingClientRect().top]));
+    orderPending.current = true;
+    setSaving(true);
     try {
-      await onReorder(projectIds);
-    } catch (error) {
-      console.warn("[projects] reorder request failed", error);
+      await onReorder(ids);
+      setAnnouncement(`${visible[from].name}を${to + 1}番目に移動しました`);
+    } catch {
+      setAnnouncement("並び順を保存できませんでした");
     } finally {
-      setPreviewIds(null);
-      setSavingOrder(false);
+      orderPending.current = false;
+      setSaving(false);
     }
-  };
+  }
 
-  const moveProject = (projectId: string, delta: -1 | 1) => {
-    const ids = reordered.map((project) => project.id);
-    const index = ids.indexOf(projectId);
-    const targetIndex = index + delta;
-    if (index < 0 || targetIndex < 0 || targetIndex >= ids.length || !reorderable) return;
-    [ids[index], ids[targetIndex]] = [ids[targetIndex], ids[index]];
-    setOrderAnnouncement(`${reordered[index].name} を ${targetIndex + 1} 番目に移動しました`);
-    previewOrder(ids);
-    void commitOrder(ids);
-  };
+  function begin(event: PointerEvent, index: number) {
+    suppressClick.current = false;
+    if (!event.isPrimary || event.button !== 0 || !reorderable) return;
+    if (event.target instanceof Element && event.target.closest(".project-row-action")) return;
+    drag.current = {
+      pointerId: event.pointerId, from: index, to: index,
+      startX: event.clientX, startY: event.clientY, clientY: event.clientY,
+      startScroll: list.current?.scrollTop ?? 0, offset: 0, active: false,
+    };
+  }
 
-  const handleDragOver = (
-    event: DragEvent<HTMLDivElement>,
-    targetId: string,
-  ) => {
-    if (!draggingId || !reorderable) return;
-    if (draggingId === targetId) {
-      setDropTarget(null);
-      return;
+  function updateDrag(current: Drag, scrollTop: number) {
+    current.offset = current.clientY - current.startY + scrollTop - current.startScroll;
+    current.offset = Math.min((visible.length - 1 - current.from) * ROW_HEIGHT + 8, Math.max(-current.from * ROW_HEIGHT - 8, current.offset));
+    current.to = Math.min(visible.length - 1, Math.max(0, current.from + Math.round(current.offset / ROW_HEIGHT)));
+    setPreview({ ...current });
+  }
+
+  function scrollWhileDragging() {
+    const current = drag.current;
+    const viewport = list.current;
+    if (!current?.active || !viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const delta = current.clientY < rect.top + 28 ? -8 : current.clientY > rect.bottom - 28 ? 8 : 0;
+    if (delta) {
+      const top = viewport.scrollTop;
+      viewport.scrollTop += delta;
+      if (top !== viewport.scrollTop) updateDrag(current, viewport.scrollTop);
     }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    const rect = event.currentTarget.getBoundingClientRect();
-    const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
-    setDropTarget((previous) => (
-      previous?.id === targetId && previous.position === position
-        ? previous
-        : { id: targetId, position }
-    ));
+    frame.current = requestAnimationFrame(scrollWhileDragging);
+  }
 
-    const ids = reordered.map((project) => project.id).filter((id) => id !== draggingId);
-    let insertAt = ids.indexOf(targetId);
-    if (insertAt < 0) return;
-    if (position === "after") insertAt += 1;
-    ids.splice(insertAt, 0, draggingId);
-    if (ids.some((id, index) => id !== reordered[index]?.id)) previewOrder(ids);
-  };
-
-  const finishDrop = (commit: boolean) => {
-    const orderChanged = previewIds?.some((id, index) => id !== projects[index]?.id) ?? false;
-    if (commit && !dropCommitted.current && draggingId && orderChanged && previewIds) {
-      dropCommitted.current = true;
-      void commitOrder(previewIds);
+  function follow(event: PointerEvent<HTMLDivElement>) {
+    const current = drag.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    if (!current.active) {
+      if (Math.hypot(event.clientX - current.startX, event.clientY - current.startY) < 5) return;
+      current.active = true;
+      suppressClick.current = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      frame.current = requestAnimationFrame(scrollWhileDragging);
     }
-    setDraggingId(null);
-    setDropTarget(null);
-    if (!commit || !previewIds) setPreviewIds(null);
-  };
+    current.clientY = event.clientY;
+    updateDrag(current, event.currentTarget.scrollTop);
+  }
+
+  function finish(commit: boolean) {
+    const current = drag.current;
+    if (!current) return;
+    drag.current = null;
+    cancelAnimationFrame(frame.current);
+    if (list.current?.hasPointerCapture(current.pointerId)) {
+      list.current.releasePointerCapture(current.pointerId);
+    }
+    setPreview(null);
+    if (commit && current.active) void move(current.from, current.to);
+  }
+
+  function rowOffset(index: number) {
+    if (!preview) return 0;
+    if (index === preview.from) return preview.offset;
+    if (index > preview.from && index <= preview.to) return -ROW_HEIGHT;
+    if (index < preview.from && index >= preview.to) return ROW_HEIGHT;
+    return 0;
+  }
 
   return (
-    <aside className="sidebar-shell">
-      <div className="sidebar-brand" data-tauri-drag-region>
-        <span className="sidebar-brand-mark" aria-hidden="true"><i /><i /><i /></span>
-        <span className="sidebar-brand-copy">
-          <strong>Seam</strong>
-          <span>会議の記録</span>
-        </span>
-      </div>
-
+    <aside className="sidebar-shell" aria-label="プロジェクト">
       <div className="sidebar-project-heading">
-        <span>プロジェクト</span>
-        <button
-          type="button"
-          className="sidebar-add-project"
-          onClick={onNewProject}
-          title="新しいプロジェクト"
-          aria-label="新しいプロジェクト"
-        >
-          <Plus size={15} weight="regular" />
+        <h2>プロジェクト</h2>
+        <button type="button" className="icon-btn" onClick={onNewProject} title="新規プロジェクト" aria-label="新規プロジェクト">
+          <Plus size={16} />
         </button>
       </div>
-
-      {/* search */}
-      <div className="px-3 pt-3 pb-2 relative">
-        <MagnifyingGlass size={12} weight="regular"
-          className="absolute left-[22px] top-1/2 -translate-y-1/2 text-(--t3) pointer-events-none" />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="プロジェクトを検索"
-          aria-label="プロジェクトを検索"
-          className="sidebar-search"
-        />
+      <div className="project-filter">
+        <MagnifyingGlass size={16} aria-hidden />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="プロジェクトを検索" aria-label="プロジェクトを検索" />
+        {query && <button type="button" className="icon-btn" onClick={() => setQuery("")} aria-label="検索をクリア"><X size={14} /></button>}
       </div>
-
-      {/* project list */}
-      <div className="flex-1 overflow-y-auto pb-2">
-        {projects.length > 1 && (
-          <div
-            className={`project-order-hint ${q.trim() ? "is-filtered" : ""}`}
-            role={savingOrder || draggingId ? "status" : undefined}
-            aria-live="polite"
-          >
-            <ArrowsDownUp size={12} weight="regular" aria-hidden="true" />
-            <span>
-              {q.trim()
-                ? "検索をクリアすると並び替えできます"
-                : savingOrder
-                  ? "並び順を保存中..."
-                  : draggingId
-                    ? "移動先で離して配置"
-                    : "ドラッグで並べ替え · ⌥ + ↑↓"}
-            </span>
-          </div>
-        )}
-        {filtered.length === 0 ? (
-          <p className="text-[11px] text-(--t3) text-center py-6 px-3">
-            {q ? "見つかりません" : "プロジェクトなし"}
-          </p>
+      <div
+        ref={list}
+        className="project-list-scroll"
+        onPointerMove={follow}
+        onPointerUp={() => finish(true)}
+        onPointerCancel={() => finish(false)}
+        onLostPointerCapture={() => finish(false)}
+        onPointerLeave={() => { if (!drag.current?.active) finish(false); }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && drag.current) {
+            event.preventDefault();
+            finish(false);
+          }
+        }}
+      >
+        {visible.length === 0 ? (
+          <p className="project-list-empty">{filter ? "該当するプロジェクトがありません" : "プロジェクトなし"}</p>
         ) : (
-          <div className="flex flex-col" role="list" aria-label="プロジェクト一覧">
-            {filtered.map((p, index) => {
+          <div className="project-list" data-sorting={Boolean(preview) || undefined} role="list" aria-label="プロジェクト一覧" style={{ "--project-row-height": `${ROW_HEIGHT}px` } as CSSProperties}>
+            {visible.map((p, index) => {
               const active = p.id === selected?.id;
-              const editing = p.id === editingProjectId;
-              const busy = activeProjectIds?.has(p.id) ?? false;
-              const dropPosition = dropTarget?.id === p.id ? dropTarget.position : null;
+              const picked = preview?.from === index;
               return (
                 <div
                   key={p.id}
-                  ref={(node) => {
-                    if (node) rowRefs.current.set(p.id, node);
-                    else rowRefs.current.delete(p.id);
-                  }}
-                  draggable={reorderable}
                   role="listitem"
-                  onDragStart={(event) => {
-                    if (!reorderable || (event.target as HTMLElement).closest(".project-row-action")) {
-                      event.preventDefault();
-                      return;
-                    }
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/plain", p.id);
-                    dropCommitted.current = false;
-                    setDraggingId(p.id);
-                    setPreviewIds(projects.map((project) => project.id));
+                  ref={(node) => {
+                    if (node) slots.current.set(p.id, node);
+                    else slots.current.delete(p.id);
                   }}
-                  onDragOver={(event) => handleDragOver(event, p.id)}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    finishDrop(true);
-                  }}
-                  onDragEnd={() => finishDrop(false)}
-                  onKeyDown={(event) => {
-                    if ((event.target as HTMLElement).closest(".project-row-action")) return;
-                    if (!event.altKey || event.shiftKey || !reorderable) return;
-                    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-                      event.preventDefault();
-                      moveProject(p.id, event.key === "ArrowUp" ? -1 : 1);
-                    }
-                  }}
-                  className={`project-row group ${active ? "active" : ""} ${editing ? "editing" : ""} ${reorderable ? "is-reorderable" : ""} ${draggingId === p.id ? "is-dragging" : ""} ${dropPosition ? `drop-${dropPosition}` : ""}`}
-                  title={p.name}
+                  className="project-slot"
+                  data-picked={picked || undefined}
+                  style={{ transform: `translateY(${rowOffset(index)}px)` }}
+                  onPointerDown={(event) => begin(event, index)}
                 >
-                  <button
-                    onClick={() => onSelect(p)}
-                    aria-keyshortcuts={reorderable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
-                    aria-label={`${p.name}、${index + 1} / ${filtered.length}`}
-                    aria-pressed={active}
-                    className="flex-1 min-w-0 truncate text-left bg-transparent border-none p-0 cursor-pointer flex items-center gap-1.5"
-                    style={{ font: "inherit", color: "inherit" }}
-                  >
-                    <span className="truncate flex-1 min-w-0">{p.name}</span>
-                    {busy && (
-                      <span title="タスク実行中" className="shrink-0">
-                        <PulseDot size={9} color="var(--accent)" />
-                      </span>
-                    )}
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenProjectSettings(p);
-                    }}
-                    className={`project-row-action ${editing ? "is-editing" : ""}`}
-                    title={`${p.name} の設定`}
-                    aria-label={`${p.name} の設定`}
-                  >
-                    <SlidersHorizontal size={12} weight={editing ? "bold" : "regular"} />
-                  </button>
+                  <div className="project-item" data-selected={active || undefined} data-editing={p.id === editingProjectId || undefined}>
+                    <button
+                      type="button"
+                      className="project-select"
+                      aria-current={active ? "page" : undefined}
+                      aria-keyshortcuts={reorderable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+                      onClick={(event) => {
+                        if (event.detail && suppressClick.current) return;
+                        onSelect(p);
+                      }}
+                      onKeyDown={(event) => {
+                        if (!reorderable || !event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                        event.preventDefault();
+                        const to = index + (event.key === "ArrowUp" ? -1 : 1);
+                        if (to >= 0 && to < visible.length) void move(index, to);
+                      }}
+                      title={p.name}
+                    >
+                      <Folder size={16} aria-hidden />
+                      <span className="truncate">{p.name}</span>
+                      {activeProjectIds.has(p.id) && <span className="project-busy" aria-label="処理中" title="処理中" />}
+                    </button>
+                    <button type="button" className="icon-btn project-row-action" onClick={() => onOpenProjectSettings(p)} aria-label={`${p.name}の設定`} title={`${p.name}の設定`}>
+                      <SlidersHorizontal size={16} />
+                    </button>
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
-        <span className="sr-only" aria-live="polite">{orderAnnouncement}</span>
       </div>
-
-      {/* footer: global settings */}
+      <span className="sr-only" aria-live="polite">{announcement}</span>
       <div className="sidebar-footer">
-        <button
-          onClick={onOpenSettings}
-          className={`sidebar-settings ${settingsActive ? "is-active" : ""}`}
-          title="設定"
-          aria-label="設定"
-          aria-pressed={settingsActive}
-        >
-          <Gear size={16} weight={settingsActive ? "fill" : "regular"} />
-          <span>設定</span>
+        <button type="button" onClick={onOpenSettings} className="sidebar-settings" aria-pressed={settingsActive}>
+          <Gear size={16} /> 設定
         </button>
       </div>
     </aside>

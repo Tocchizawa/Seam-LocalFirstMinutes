@@ -358,6 +358,7 @@ export function MinutesList({
     <div className="flex flex-col">
       <div className="minutes-search-wrap">
         <div className="minutes-list-toolbar">
+          <h2>議事録</h2>
           {(minutes.length > 0 || showSearchResults) ? (
             <div className="search-bar">
               <MagnifyingGlass size={13} weight="regular" className="text-(--t3) shrink-0" />
@@ -365,7 +366,7 @@ export function MinutesList({
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 aria-label="議事録を検索"
-                placeholder="タイトルや本文を検索"
+                placeholder="議事録を検索"
                 className="search-bar-input"
               />
               {searching && <Spinner size={12} />}
@@ -373,7 +374,7 @@ export function MinutesList({
                 <button
                   onClick={() => setQ("")}
                   className="icon-btn !w-5 !h-5"
-                  aria-label="クリア"
+                  aria-label="議事録の検索をクリア"
                 >
                   <X size={11} weight="bold" />
                 </button>
@@ -446,9 +447,7 @@ export function MinutesList({
 
       {empty && (
         <div className="minutes-empty-state">
-          <div className="minutes-empty-mark" aria-hidden="true"><span /></div>
-          <h2>ここに会議の記録が並びます</h2>
-          <p>上の録音ボタンで会議を記録するか、「音声を追加」から既存の音声を取り込めます。</p>
+          <p>議事録はありません</p>
         </div>
       )}
 
@@ -469,7 +468,12 @@ export function MinutesList({
       )}
 
       {!showSearchResults && (
-        <div className="anim-fade-in">
+        <div className="minutes-table">
+          {items.length > 0 && (
+            <div className="minutes-table-heading" aria-hidden="true">
+              <span>日時</span><span>会議名 / 状態</span>
+            </div>
+          )}
           {items.map((it, idx) => {
             if (it.kind === "min") {
               return (
@@ -561,8 +565,8 @@ function SearchResults({
     );
   }
   return (
-    <div className="px-5 py-2">
-      <p className="text-[12px] font-medium text-(--t2) mb-3">
+    <div className="minutes-search-results">
+      <p className="minutes-result-count">
         検索結果 {results.length} 件
       </p>
       <div className="flex flex-col gap-2">
@@ -573,7 +577,7 @@ function SearchResults({
           const processingLabel = summaryState === "dictionary_update"
             ? "用語辞書を整理中"
             : summaryState === "queued"
-              ? "要約キュー待ち"
+              ? "要約待ち"
               : summaryState ? "要約中" : "文字起こし中";
           const bestTab: "summary" | "transcript" | undefined =
             hasHighlight(hl.transcript) ? "transcript"
@@ -723,8 +727,7 @@ function ProcessingRow({
       <button type="button" onClick={onOpen} className="minutes-card-open">
       <span className="minutes-card-body">
         <span className="minutes-card-meta num">
-          {shortDate && <span>{shortDate}</span>}
-          {shortDate && time && <span className="minutes-card-meta-sep">·</span>}
+          {shortDate && <span className="minutes-card-date">{shortDate}</span>}
           {time && <span>{time}</span>}
         </span>
         <span className="minutes-card-title">{title}</span>
@@ -795,7 +798,7 @@ function MinutesRow({
     }
     if (isSummarizing) {
       if (isDictionaryUpdating) return "用語辞書を整理中";
-      return summarizeState === "queued" ? "要約キュー待ち" : "要約中";
+      return summarizeState === "queued" ? "要約待ち" : "要約中";
     }
     return null;
   })();
@@ -805,11 +808,10 @@ function MinutesRow({
       <button type="button" onClick={onOpen} className="minutes-card-open">
       <span className="minutes-card-body">
         <span className="minutes-card-meta num">
-          {shortDate && <span>{shortDate}</span>}
-          {shortDate && time && <span className="minutes-card-meta-sep">·</span>}
+          {shortDate && <span className="minutes-card-date">{shortDate}</span>}
           {time && <span>{time}</span>}
           {m.duration_sec > 0 && <>
-            <span className="minutes-card-meta-sep">·</span>
+            {time && <span className="minutes-card-meta-sep">·</span>}
             <span>{fmtDur(m.duration_sec)}</span>
           </>}
         </span>
@@ -823,7 +825,7 @@ function MinutesRow({
         ) : preview ? (
           <span className="minutes-card-preview">{preview}</span>
         ) : (
-          <span className="minutes-card-preview is-empty">要約待ち</span>
+          null
         )}
       </span>
       </button>

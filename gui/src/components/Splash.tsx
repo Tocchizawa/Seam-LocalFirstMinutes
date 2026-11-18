@@ -131,19 +131,6 @@ export function Splash({ startupUpdate }: { startupUpdate?: SplashStartupUpdate 
     <div className="splash-shell">
       <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-9 z-50" />
       <div className="splash-card anim-fade-in">
-        <img
-          src="/icon.png"
-          width={88}
-          height={88}
-          alt="Seam"
-          className="splash-icon"
-          draggable={false}
-          onError={(e) => {
-            (e.target as HTMLImageElement).style.display = "none";
-          }}
-        />
-        <h1 className="splash-title">Seam</h1>
-
         <div className="splash-progress-wrap">
           <div className="splash-progress-track">
             <div
@@ -177,26 +164,18 @@ export function Splash({ startupUpdate }: { startupUpdate?: SplashStartupUpdate 
 
         {isError && (
           <div className="splash-note is-error">
-            Seam を終了してから再起動してください。port 競合の場合は表示されたプロセスを終了し、
-            依存関係の初期化に失敗した場合はネットワークと空き容量を確認してください。
+            アプリを再起動してください。起動ログでエラーの詳細を確認できます。
           </div>
         )}
 
-        <div ref={logScrollRef} className="splash-log">
-          {startupUpdate ? (
-            <div className="splash-log-line anim-log-in">
-              起動処理へ進む前にアップデート確認を完了します
+        {(isError || logs.length > 0) && (
+          <details className="startup-details" open={isError || undefined}>
+            <summary>起動ログ</summary>
+            <div ref={logScrollRef} className="splash-log">
+              {logs.map((line) => <div key={line.id} className="splash-log-line">{line.text}</div>)}
             </div>
-          ) : logs.length === 0 ? (
-            <div className="splash-log-empty">ログ待機中...</div>
-          ) : (
-            logs.map((line) => (
-              <div key={line.id} className="splash-log-line anim-log-in">
-                {line.text}
-              </div>
-            ))
-          )}
-        </div>
+          </details>
+        )}
       </div>
     </div>
   );

@@ -31,8 +31,7 @@ interface Props {
  */
 export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
   const {
-    liveSegments, streamStatus, recording, recordingStarting, recordingStopping,
-    waitingForModel, paused, elapsedSec, modelLoadLog, modelDownload,
+    liveSegments, streamStatus, recording, transcriptionDeferred, modelLoadLog, modelDownload,
   } = useRecording();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -75,47 +74,39 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
     const el = scrollRef.current;
     if (!el) return;
     if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [liveSegments.length]);
+  }, [liveSegments]);
 
   const jumpToBottom = () => {
     const el = scrollRef.current;
     if (!el) return;
-    jumpingToBottomRef.current = true;
+    const animate = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    jumpingToBottomRef.current = animate;
     stickToBottomRef.current = true;
     setShowJump(false);
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    el.scrollTo({ top: el.scrollHeight, behavior: animate ? "smooth" : "instant" });
   };
 
-  const elapsed = fmtTs(elapsedSec);
-
   return (
-    <div className="relative h-full flex flex-col overflow-hidden">
+    <section className="relative h-full flex flex-col overflow-hidden">
       <header className="live-view-head">
-        <div className="min-w-0">
-          <div className="live-view-title-line">
-            <span className={`status-dot ${(recordingStarting || (recording && !paused && !recordingStopping)) ? "status-dot--pulse" : ""}`} />
-            <h1>ライブ文字起こし</h1>
-          </div>
-          <p aria-live="polite">
-            {recordingStopping ? "録音を保存しています"
-              : recordingStarting ? waitingForModel ? "文字起こしの準備をしています" : "録音を準備しています"
-                : recording ? paused ? "録音を一時停止中" : "会話を記録しています"
-                  : "録音は停止しています"}
-          </p>
-        </div>
-        <div className="live-view-meta num" aria-live="polite">
-          <span>{elapsed}</span>
-          <span>{liveSegments.length} 件</span>
-        </div>
+        <h2>ライブ文字起こし</h2>
+        <span className="num text-(--t3)">{liveSegments.length} 件</span>
+        {onClose && (
+          <button type="button" onClick={onClose} className="icon-btn" aria-label="ライブ文字起こしを閉じる" title="閉じる">
+            <ArrowsIn size={16} />
+          </button>
+        )}
       </header>
       {showStreamStatusBar && streamStatus && (
         <StreamStatusBar status={streamStatus} />
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="live-transcript flex-1 overflow-y-auto">
         {liveSegments.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center gap-2 px-6 text-center">
-            {recording ? (
+            {transcriptionDeferred ? (
+              <p className="text-(--t2)">録音の停止後に文字起こしします</p>
+            ) : recording ? (
               <LiveWaitingState
                 streamStatus={streamStatus}
                 modelLoadLog={modelLoadLog}
@@ -126,16 +117,17 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
             )}
           </div>
         ) : (
-          <div className="anim-fade-in">
+          <div className="transcript-sheet">
             {liveSegments.map((seg) => (
               <div key={`${seg.session_id ?? "live"}-${seg.start}-${seg.end}-${seg.speaker_id ?? ""}-${seg.text}`} className="flat-row live-transcript-row" style={{ cursor: "default" }}>
                 <span
-                  className="num text-[10px] text-(--t3) shrink-0 min-w-[48px]"
+                  className="transcript-time num"
                   style={{ fontWeight: 400 }}
                 >
                   {fmtTs(seg.start)}
                 </span>
-                <span className="text-[13px] leading-relaxed text-(--t1) flex-1">
+                <span className="transcript-copy">
+                  {seg.speaker_label && <span className="transcript-speaker">{seg.speaker_label}</span>}
                   {seg.text}
                 </span>
               </div>
@@ -149,24 +141,14 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
           type="button"
           onClick={jumpToBottom}
           title="最新へ"
-          className="live-jump-btn absolute right-16 z-20 anim-fade-in flex items-center gap-1.5 h-9 px-3 rounded-lg text-xs font-medium cursor-pointer bottom-4"
+          className="live-jump-btn absolute right-4 z-20 anim-fade-in flex items-center gap-1.5 h-9 px-3 rounded-lg text-xs font-medium cursor-pointer bottom-4"
         >
           <ArrowDown size={11} weight="bold" />
           最新へ
         </button>
       )}
 
-      {onClose && (
-        <button
-          type="button"
-          onClick={onClose}
-          title="縮小して一覧へ戻る"
-          className="live-close-btn absolute right-4 bottom-4 z-20 flex items-center justify-center h-9 w-9 rounded-lg cursor-pointer"
-        >
-          <ArrowsIn size={14} weight="regular" />
-        </button>
-      )}
-    </div>
+    </section>
   );
 }
 

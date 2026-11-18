@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import "./design-system.css";
 import {
   checkHealth, type Project, type Minutes, getSettings, listProjects,
-  getPipelines, getActiveSummarizes, listDevices, reorderProjects as saveProjectOrder,
+  listDevices, reorderProjects as saveProjectOrder,
 } from "./lib/api";
 import { initTheme } from "./lib/theme";
 import { Sidebar } from "./components/Sidebar";
@@ -18,6 +18,9 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { Splash, type SplashStartupUpdate } from "./components/Splash";
 import { Toaster } from "./components/Toaster";
 import { RecordingProvider, useRecording } from "./lib/recording-context";
+import { useWorkspaceJobs } from "./lib/workspace-jobs";
+import { RecoveryNotice } from "./components/RecoveryNotice";
+import { StreamStatusBar } from "./components/StreamStatusBar";
 import { RecordToolbar } from "./components/RecordToolbar";
 import { DeviceSettingsModal } from "./components/DeviceSettingsModal";
 import { LatestSegmentPreview } from "./components/LatestSegmentPreview";
@@ -56,16 +59,12 @@ function AppInner() {
   const [healthy, setHealthy] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const projectsRef = useRef<Project[]>(projects);
-  projectsRef.current = projects;
-  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0] ?? null;
   const [mode, setMode] = useState<Mode>({ kind: "main" });
   const [showDevicesGlobal, setShowDevicesGlobal] = useState(false);
-  const [activeProjectIds, setActiveProjectIds] = useState<Set<string>>(new Set());
-  /** 進行中の要約ジョブ: minutes_id → state ("queued" / "running") */
-  const [activeSummarizes, setActiveSummarizes] = useState<Map<string, string>>(new Map());
-  const {
-    recording, micDevice, setMicDevice, captureSystem, setCaptureSystem,
-  } = useRecording();
+  const { recording, streamStatus, micDevice, setMicDevice, captureSystem, setCaptureSystem } = useRecording();
+  const [dismissedRecovery, setDismissedRecovery] = useState<string | null>(null);
   const [startupUpdatePending, setStartupUpdatePending] = useState(true);
   const [startupUpdate, setStartupUpdate] = useState<SplashStartupUpdate | null>({
     message: "アップデート設定を確認中...",
@@ -73,6 +72,23 @@ function AppInner() {
   });
   const [startupUpdateNotice, setStartupUpdateNotice] = useState<string | null>(null);
   const startupReady = healthy && !startupUpdatePending;
+
+  const { pipelines, summaries, recovery, refresh: refreshJobs } = useWorkspaceJobs(startupReady);
+  const activeProjectIds = useMemo(() => new Set([
+    ...pipelines.filter((p) => p.state === "recording" || p.state === "stopping" || p.state === "transcribing").map((p) => p.project_id),
+    ...summaries.map((s) => s.project_id),
+  ].filter((id): id is string => Boolean(id))), [pipelines, summaries]);
+  const activeSummarizes = useMemo(
+    () => new Map(summaries.map((s) => [s.minutes_id, s.state || "running"])),
+    [summaries],
+  );
+
+  useEffect(() => {
+    const finishedAt = recovery?.finished_at;
+    if (recovery?.state !== "done" || !finishedAt) return;
+    const timeout = window.setTimeout(() => setDismissedRecovery(finishedAt), 8000);
+    return () => window.clearTimeout(timeout);
+  }, [recovery?.state, recovery?.finished_at]);
 
   useEffect(() => initTheme(), []);
 
@@ -138,7 +154,7 @@ function AppInner() {
         }
 
         if (!autoInstall) {
-          setStartupUpdateNotice(`Seam ${update.version} を利用できます`);
+          setStartupUpdateNotice(`バージョン ${update.version} を利用できます`);
           await closeAppUpdate(update);
           update = null;
           finish();
@@ -146,7 +162,7 @@ function AppInner() {
         }
 
         setStartupUpdate({
-          message: `Seam ${update.version} にアップデートします`,
+          message: `バージョン ${update.version} に更新中`,
           progress: null,
         });
         await installAndRelaunchAppUpdate(update, (progress) => {
@@ -221,15 +237,11 @@ function AppInner() {
       getSettings().catch(() => null),
     ]);
     const preferredProjectId = (settings?.recording as any)?.last_project_id as string | undefined;
+    projectsRef.current = list;
     setProjects(list);
-    setSelectedProject((prev) => {
-      if (prev) return list.find((p) => p.id === prev.id) || list[0] || null;
-      if (preferredProjectId) {
-        const preferred = list.find((p) => p.id === preferredProjectId);
-        if (preferred) return preferred;
-      }
-      return list[0] || null;
-    });
+    setSelectedProjectId((previous) => (
+      [previous, preferredProjectId].find((id) => list.some((project) => project.id === id)) ?? list[0]?.id ?? null
+    ));
     // 編集モーダルが開いているプロジェクトを最新化
     setProjectSettingsTarget((prev) => {
       if (!prev) return prev;
@@ -242,7 +254,7 @@ function AppInner() {
     const byId = new Map(current.map((project) => [project.id, project]));
     if (projectIds.length !== current.length || projectIds.some((id) => !byId.has(id))) {
       await refreshProjects();
-      return;
+      throw new Error("プロジェクトの一覧が変更されました");
     }
 
     const optimistic = projectIds.map((id) => byId.get(id)!);
@@ -253,18 +265,25 @@ function AppInner() {
       projectsRef.current = saved;
       setProjects(saved);
     } catch (error) {
-      await refreshProjects().catch(() => {});
-      showToast({
-        kind: "err",
-        text: "並び替えを保存できませんでした。一覧を最新の状態に戻しました。",
-        ttl: 6000,
-      });
-      console.warn("[projects] reorder failed", error);
+      if (projectsRef.current === optimistic) {
+        projectsRef.current = current;
+        setProjects(current);
+      }
+      void refreshProjects().catch(() => {});
+      showToast({ kind: "err", text: "並び順を保存できませんでした" });
+      throw error;
     }
   }, [refreshProjects]);
 
   useEffect(() => {
-    if (startupReady) refreshProjects();
+    if (startupReady) {
+      void refreshProjects().catch(() => showToast({
+        kind: "err",
+        text: "プロジェクトを読み込めませんでした",
+        onClick: () => void refreshProjects().catch(() => showToast({ kind: "err", text: "プロジェクトを読み込めませんでした" })),
+        hoverHint: "再試行",
+      }));
+    }
   }, [startupReady, refreshProjects]);
 
   // 通知許可を起動時に確認しておく (録音中の音声未検出警告などで使うため、
@@ -281,8 +300,8 @@ function AppInner() {
       kind: text.startsWith("自動アップデート失敗") ? "err" : "info",
       text,
       ttl: 8000,
-      onClick: text.startsWith("Seam ") ? () => setShowSettings(true) : undefined,
-      hoverHint: text.startsWith("Seam ") ? "設定を開く" : undefined,
+      onClick: text.startsWith("バージョン ") ? () => setShowSettings(true) : undefined,
+      hoverHint: text.startsWith("バージョン ") ? "設定を開く" : undefined,
     });
   }, [startupReady, startupUpdateNotice]);
 
@@ -312,62 +331,6 @@ function AppInner() {
     return () => { cancelled = true; };
   }, [startupReady, setCaptureSystem, setMicDevice]);
 
-  // 「いずれかのタスクが進行中」な project_id の集合を維持。
-  // pipelines (録音/文字起こし) + active summarize (要約) をマージする。
-  const refreshActiveProjects = useCallback(async () => {
-    try {
-      const [pipes, sums] = await Promise.all([
-        getPipelines().catch(() => []),
-        getActiveSummarizes().catch(() => []),
-      ]);
-      const ids = new Set<string>();
-      const summaryMap = new Map<string, string>();
-      for (const p of pipes) {
-        if (
-          p.project_id &&
-          (p.state === "recording" || p.state === "stopping" || p.state === "transcribing")
-        ) {
-          ids.add(p.project_id);
-        }
-      }
-      for (const s of sums) {
-        if (s.project_id) ids.add(s.project_id);
-        if (s.minutes_id) summaryMap.set(s.minutes_id, s.state || "running");
-      }
-      setActiveProjectIds(ids);
-      setActiveSummarizes(summaryMap);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!startupReady) return;
-    refreshActiveProjects();
-    // WS イベントで即時更新 (recording-context が再配信)
-    const onEvt = () => refreshActiveProjects();
-    const evts = [
-      "recording-ws:pipeline_progress",
-      "recording-ws:pipeline_done",
-      "recording-ws:pipeline_error",
-      "recording-ws:recording_stopped",
-      "recording-ws:summary_stage",
-      "recording-ws:dictionary_update_started",
-      "recording-ws:dictionary_update_finished",
-      "recording-ws:summary_done",
-      "recording-ws:summary_failed",
-      "recording-ws:summary_skipped",
-      "recording-ws:summary_cancelled",
-    ];
-    for (const t of evts) window.addEventListener(t, onEvt);
-    // フォールバック: 5秒おきに確認
-    const id = window.setInterval(refreshActiveProjects, 5000);
-    return () => {
-      for (const t of evts) window.removeEventListener(t, onEvt);
-      window.clearInterval(id);
-    };
-  }, [startupReady, refreshActiveProjects]);
-
   // 録音が終わったら live モードからは抜ける
   useEffect(() => {
     if (!recording && mode.kind === "live") {
@@ -388,7 +351,7 @@ function AppInner() {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button, input, select, [role=menu]")) return;
     e.preventDefault();
-    getCurrentWindow().startDragging();
+    void getCurrentWindow().startDragging().catch(() => {});
   };
 
   if (!startupReady) {
@@ -405,14 +368,11 @@ function AppInner() {
     setMode((m) => (m.kind === "live" ? m.previous : m));
   };
 
-  // main ビューには MainView 内に既に RecordToolbar がある。それ以外では常に録音操作を表示する。
-  const showAppLevelToolbar = mode.kind !== "main" && Boolean(selectedProject);
-
   return (
     <div className="shell flex flex-col h-screen">
       <div data-tauri-drag-region onMouseDown={handleDrag} className="drag-bar" />
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden" inert={showSettings || Boolean(projectSettingsTarget) || showProjectDialog || showDevicesGlobal}>
         <Sidebar
           projects={projects}
           selected={selectedProject}
@@ -420,7 +380,7 @@ function AppInner() {
           settingsActive={showSettings}
           activeProjectIds={activeProjectIds}
           onSelect={(p) => {
-            setSelectedProject(p);
+            setSelectedProjectId(p.id);
             setMode({ kind: "main" });
           }}
           onNewProject={() => setShowProjectDialog(true)}
@@ -430,19 +390,23 @@ function AppInner() {
         />
 
         <main className="flex-1 overflow-hidden relative flex flex-col">
-          {showAppLevelToolbar && selectedProject && (
+          {selectedProject && (
+            <RecordToolbar
+              project={selectedProject}
+              onStopped={refreshJobs}
+              onOpenDeviceSettings={() => setShowDevicesGlobal(true)}
+            />
+          )}
+          {recovery && recovery.total > 0 && (
+            recovery.state === "running" ||
+            recovery.state === "done" && recovery.finished_at !== dismissedRecovery
+          ) && (
+            <RecoveryNotice status={recovery} onDismiss={() => setDismissedRecovery(recovery.finished_at)} />
+          )}
+          {recording && mode.kind !== "live" && (
             <>
-              <RecordToolbar
-                project={selectedProject}
-                onStopped={() => {
-                  // MainView 不在時の停止: 一覧へ戻った時に refresh されるよう通知
-                  window.dispatchEvent(new CustomEvent("minutes-updated"));
-                }}
-                onOpenDeviceSettings={() => setShowDevicesGlobal(true)}
-              />
-              {recording && mode.kind !== "live" && (
-                <LatestSegmentPreview onExpand={openLive} />
-              )}
+              <LatestSegmentPreview onExpand={openLive} />
+              {streamStatus && <StreamStatusBar status={streamStatus} />}
             </>
           )}
 
@@ -468,6 +432,7 @@ function AppInner() {
               />
             ) : (
               <MainView
+                key={selectedProject.id}
                 project={selectedProject}
                 allProjects={projects}
                 activeSummarizes={activeSummarizes}
@@ -475,7 +440,8 @@ function AppInner() {
                   setMode({ kind: "detail", minutes: m, query: opts?.query, tab: opts?.tab })
                 }
                 onOpenPipelineSession={(sid) => setMode({ kind: "pipeline-detail", sessionId: sid })}
-                onOpenLive={openLive}
+                pipelines={pipelines}
+                refreshPipelines={refreshJobs}
               />
             )}
           </div>
@@ -491,9 +457,7 @@ function AppInner() {
           onClose={() => setProjectSettingsTarget(null)}
           onSaved={refreshProjects}
           onDeleted={async () => {
-            const deletedId = projectSettingsTarget.id;
             setProjectSettingsTarget(null);
-            setSelectedProject((prev) => (prev?.id === deletedId ? null : prev));
             setMode({ kind: "main" });
             await refreshProjects();
           }}
@@ -527,8 +491,6 @@ function AppInner() {
 function EmptyProject({ onCreateNew }: { onCreateNew: () => void }) {
   return (
     <div className="anim-fade-in flex flex-col items-center justify-center h-full gap-3">
-      <p className="text-[14px] text-(--t1) font-medium">プロジェクトを作成しましょう</p>
-      <p className="text-[12px] text-(--t3)">プロジェクトごとに議事録が整理されます</p>
       <button onClick={onCreateNew} className="btn btn-primary mt-2 h-8 px-4 text-[12px]">
         新規プロジェクト
       </button>

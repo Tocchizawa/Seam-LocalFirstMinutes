@@ -4,16 +4,17 @@ export function StreamStatusBar({ status }: { status: StreamStatus }) {
   const isProcessing = (status.current_chunk_audio_sec ?? 0) > 0;
   const pending = status.pending_audio_sec ?? 0;
   const elapsed = status.current_processing_sec ?? 0;
+  if (!isProcessing && !status.queue_size && !pending && !status.dropped_chunks && !status.transcribe_errors) return null;
 
   return (
-    <div className="stream-status-bar num" role="status" aria-live="polite">
+    <div className="stream-status-bar num">
       {isProcessing ? (
         <span className="stream-status-active">
-          <span className="status-dot status-dot--pulse" />
+          <span className="status-dot" />
           文字起こし中 · {Math.round(elapsed)}秒
         </span>
       ) : (
-        <span className="stream-status-idle">会話の音声を待っています</span>
+        <span className="stream-status-idle">文字起こし</span>
       )}
       <span className="stream-status-metrics">
         {pending > 0 && (

@@ -11,7 +11,7 @@ import {
   audioPlayUrl, exportMinutes, getMinutesMarkdown, deleteMinutes,
   getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle,
   triggerSummarize, getSummarizeStatus, cancelSummarize, getPipelineBySession,
-  updateMinutesSummary, getSessionSegments, getSessionAudioInfo, recoverSessionMinutes,
+  updateMinutesSummary, getSessionSegments, recoverSessionMinutes,
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
 } from "../lib/api";
 import { Spinner } from "../components/Spinner";
@@ -52,14 +52,6 @@ function fmt(s: number) {
 function fmtDuration(s: number) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return h > 0 ? `${h}時間${m}分` : `${m}分`;
-}
-
-function fmtBytes(n: number): string {
-  if (!n || n < 0) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function fmtTokens(n: unknown): string {
@@ -125,7 +117,7 @@ export function DetailView(props: Props) {
         fetchPipeline();
       }
       // finalize で作成された minutes を取得して詳細画面を切り替える。
-      if (type === "pipeline_done" && data?.session_id === sessionId
+      if ((type === "pipeline_done" || type === "minutes_saved") && data?.session_id === sessionId
           && typeof data?.minutes_id === "string") {
         void getMinutes(data.minutes_id)
           .then((fresh) => { if (!stopped) setCurrentMinutes(fresh); })
@@ -135,7 +127,7 @@ export function DetailView(props: Props) {
 
     const eventTypes = [
       "__open", "transcript_chunk", "speaker_renamed", "pipeline_progress",
-      "pipeline_done", "pipeline_error", "recording_stopped",
+      "pipeline_done", "minutes_saved", "pipeline_error", "recording_stopped",
     ];
     for (const type of eventTypes) {
       window.addEventListener(`recording-ws:${type}`, handle);
@@ -517,27 +509,9 @@ export function DetailView(props: Props) {
   const [ct, setCt] = useState(0);
   const [rate, setRate] = useState(1.0);
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
-  const [audioInfo, setAudioInfo] = useState<{ name: string; size_bytes: number } | null>(null);
   const playbackDuration = (mediaDuration && Number.isFinite(mediaDuration) && mediaDuration > 0)
     ? mediaDuration
     : duration;
-
-  useEffect(() => {
-    if (!sessionId) {
-      setAudioInfo(null);
-      setMediaDuration(null);
-      return;
-    }
-    let cancelled = false;
-    getSessionAudioInfo(sessionId)
-      .then((info) => {
-        if (!cancelled) setAudioInfo(info);
-      })
-      .catch(() => {
-        if (!cancelled) setAudioInfo(null);
-      });
-    return () => { cancelled = true; };
-  }, [sessionId]);
 
   // sessionId 変更時 / unmount 時に再生中の Audio を必ず停止する
   useEffect(() => {
@@ -927,7 +901,7 @@ export function DetailView(props: Props) {
   ];
 
   return (
-    <div className="anim-fade-in flex flex-col h-full overflow-hidden">
+    <div className="detail-page flex flex-col h-full overflow-hidden">
       {/* Header (toolbar 風) */}
       <div className="toolbar detail-toolbar">
         <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -1113,7 +1087,7 @@ export function DetailView(props: Props) {
         <div className="retry-status">
           <div className="retry-status-row">
             {retryStatus.state === "error" ? (
-              <span className="text-(--danger)" aria-label="error">⚠</span>
+              <span className="text-(--danger)" aria-label="エラー"><WarningCircle size={16} /></span>
             ) : (
               <Spinner size={12} />
             )}
@@ -1182,10 +1156,6 @@ export function DetailView(props: Props) {
           </button>
           <div className="audio-player-main">
             <div className="audio-player-topline">
-              <span>録音音声</span>
-              <span className="audio-player-file" title={audioInfo?.name ?? undefined}>
-                {audioInfo ? `${audioInfo.name} · ${fmtBytes(audioInfo.size_bytes)}` : ""}
-              </span>
               <PlaybackRatePill rate={rate} onChange={setRate} />
             </div>
             <input
@@ -1221,24 +1191,21 @@ export function DetailView(props: Props) {
       )}
 
       {/* Tabs */}
-      <div className="flex items-center gap-5 px-5 border-b border-(--border)">
+      <nav className="detail-tabs" aria-label="議事録の表示切替">
         {tabs.map(([k, label, count]) => {
           const active = tab === k;
           return (
             <button key={k} type="button" onClick={() => setTab(k)}
               aria-pressed={active}
               className="detail-tab relative py-2.5 cursor-pointer flex items-center gap-1.5"
-              style={{ background: "transparent", border: "none" }}>
+              >
               <span className={`text-[12px] font-medium transition-colors ${active ? "text-(--t1)" : "text-(--t3) hover:text-(--t2)"}`}>
                 {label}
               </span>
               {count !== null && count !== undefined && (
                 <span className="text-[10px] text-(--t3) tabular-nums">{count}</span>
               )}
-              {active && (
-                <span className="absolute -bottom-px left-0 right-0 h-[2px] rounded-full"
-                  style={{ background: "var(--accent)" }} />
-              )}
+
             </button>
           );
         })}
@@ -1254,7 +1221,7 @@ export function DetailView(props: Props) {
             </button>
           )}
         </div>
-      </div>
+      </nav>
 
       {/* Find bar */}
       {findOpen && (
@@ -1301,7 +1268,7 @@ export function DetailView(props: Props) {
 
         {tab === "transcript" && (
           transcript.length > 0 ? (
-            <div className="anim-fade-in">
+            <div className="transcript-sheet">
               {transcript.map((seg, i) => {
                 const on = playing && ct >= seg.start && ct < seg.end;
                 const speakerLabel = seg.speaker_label || "話者?";
@@ -1315,13 +1282,14 @@ export function DetailView(props: Props) {
                     aria-label={`${fmt(seg.start)}、${speakerLabel}、${seg.text}。音声の位置へ移動`}
                     style={{ width: "100%", color: "inherit", font: "inherit", textAlign: "left", borderTop: 0, borderLeft: 0, borderRight: 0 }}
                   >
-                    <span className="min-w-[74px] shrink-0 flex flex-col">
-                      <span className="num text-[10px] text-(--t3)" style={{ fontWeight: 400 }}>
+                    <span className="transcript-time num">
+                      <span className="transcript-stamp">
                         {fmt(seg.start)}
                       </span>
-                      <span className="text-[10px] text-(--t3)">{speakerLabel}</span>
+
                     </span>
-                    <span className={`text-[13px] leading-relaxed flex-1 transition-colors ${on ? "text-(--t1)" : "text-(--t2)"}`}>
+                    <span className="transcript-copy">
+                      <span className="transcript-speaker">{speakerLabel}</span>
                       <SegmentText
                         text={seg.text}
                         matches={segMatches}
@@ -1343,7 +1311,7 @@ export function DetailView(props: Props) {
           )
         )}
         </div>
-        {tab === "transcript" && transcript.length > 0 && (
+        {tab === "transcript" && transcript.length > 1 && (
           <TranscriptMinimap
             segments={transcript}
             scrollRef={transcriptScrollRef}

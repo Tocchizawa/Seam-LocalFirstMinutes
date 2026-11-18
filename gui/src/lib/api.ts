@@ -375,7 +375,7 @@ export const startRecording = async (
   while (true) {
     if (options.signal?.aborted) throw abortError();
     try {
-      const started = await request<{ session_id: string; has_system_audio: boolean }>(
+      const started = await request<{ session_id: string; has_system_audio: boolean; transcription_deferred?: boolean }>(
         "/api/recording/start",
         {
           method: "POST",
@@ -415,7 +415,7 @@ export const stopRecording = () =>
   request<{ status: string; session_id?: string }>("/api/recording/stop", { method: "POST" });
 
 export const getRecordingStatus = () =>
-  request<{ recording: boolean; elapsed_sec: number; session_id?: string | null; mic_muted?: boolean; paused?: boolean; stopping?: boolean }>(
+  request<{ recording: boolean; elapsed_sec: number; session_id?: string | null; mic_muted?: boolean; paused?: boolean; stopping?: boolean; transcription_deferred?: boolean }>(
     "/api/recording/status",
   );
 
