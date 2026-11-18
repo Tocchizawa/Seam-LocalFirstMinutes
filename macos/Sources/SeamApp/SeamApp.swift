@@ -90,7 +90,6 @@ private struct Workspace: View {
         } transcript: { _ in
             CapturePane(session: session, expanded: $liveExpanded)
         }
-        .background(paper)
         .preferredColorScheme(appearance == "light" ? .light : (appearance == "dark" ? .dark : nil))
         .onExitCommand {
             withAnimation(motion) {
@@ -108,28 +107,14 @@ private struct Workspace: View {
             if session.connected { await loadProjects() }
         }
         .task(id: scope) { await loadMinutes(scope) }
-        .toolbar {
-            ToolbarSpacer(.flexible)
-            ToolbarItem(placement: .primaryAction) {
-                ActivityControl(downloads: downloads, activities: backgroundWork) {
-                    settingsPage = .transcription
-                    openSettings()
-                }
+        .workspaceTitleBar {
+            ActivityControl(downloads: downloads, activities: backgroundWork) {
+                settingsPage = .transcription
+                openSettings()
             }
-            ToolbarItem(placement: .primaryAction) {
-                if session.capture == nil {
-                    Button(action: start) {
-                        HStack(spacing: 7) {
-                            Image(systemName: "record.circle.fill").accessibilityHidden(true)
-                            Text("録音開始")
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .buttonStyle(.glassProminent)
-                    .tint(accent)
+            if session.capture == nil {
+                RecordingStartButton(action: start)
                     .disabled(!session.connected || projects.isEmpty)
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
                     .popover(isPresented: $chooseRecordingProject, arrowEdge: .bottom) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("録音先").font(.headline)
@@ -140,9 +125,9 @@ private struct Workspace: View {
                         .padding(15)
                         .frame(minWidth: 165, alignment: .leading)
                     }
-                }
             }
         }
+        .background(paper)
         .alert("操作を完了できませんでした", isPresented: Binding(
             get: { session.error != nil }, set: { if !$0 { session.error = nil } }
         )) {

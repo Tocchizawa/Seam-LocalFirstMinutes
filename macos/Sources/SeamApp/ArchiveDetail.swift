@@ -45,31 +45,15 @@ struct ArchiveDetail: View {
     private var summarizing: Bool { summaryJob?.active == true }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if transcribing, let pipeline {
-                activity(pipeline.stageLabel ?? pipeline.message, progress: pipeline.progress)
-            } else if let summaryJob, summaryJob.active {
-                activity(summaryJob.stageLabel ?? "要約を処理中")
-            } else if let error = problem ?? pipeline?.error ?? summaryJob?.errorMessage {
-                Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, compact ? 14 : 33)
-                    .padding(.vertical, 8)
-            }
-
-            MinutesReader(title: note.title, date: formattedDate(note), summary: note.summary ?? "",
-                          sections: note.transcript ?? [], query: query,
-                          playback: hasAudio ? playback : nil, compact: compact, expanded: expanded,
-                          showTranscript: $showTranscript,
-                          toggleExpanded: compact ? nil : {
-                              withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { expanded.toggle() }
-                          })
-        }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) { commands }
-        }
+        MinutesReader(title: note.title, date: formattedDate(note), summary: note.summary ?? "",
+                      sections: note.transcript ?? [], query: query,
+                      playback: hasAudio ? playback : nil, compact: compact, expanded: expanded,
+                      showTranscript: $showTranscript,
+                      toggleExpanded: compact ? nil : {
+                          withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { expanded.toggle() }
+                      },
+                      menu: AnyView(commands))
+        .scrollEdgeBar { statusBar }
         .task(id: session.archiveRevision) {
             await refresh()
         }
@@ -98,6 +82,22 @@ struct ArchiveDetail: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var statusBar: some View {
+        if transcribing, let pipeline {
+            activity(pipeline.stageLabel ?? pipeline.message, progress: pipeline.progress)
+        } else if let summaryJob, summaryJob.active {
+            activity(summaryJob.stageLabel ?? "要約を処理中")
+        } else if let error = problem ?? pipeline?.error ?? summaryJob?.errorMessage {
+            Text(error)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, compact ? 14 : 33)
+                .padding(.vertical, 8)
         }
     }
 

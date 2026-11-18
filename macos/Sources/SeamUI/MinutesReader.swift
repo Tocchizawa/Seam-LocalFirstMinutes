@@ -26,12 +26,13 @@ public struct MinutesReader: View {
     private let animated: Bool
     private let expanded: Bool
     private let toggleExpanded: (() -> Void)?
+    private let menu: AnyView?
     @Binding private var showTranscript: Bool
 
     public init(
         title: String, date: String, summary: String, sections: [TranscriptSegment], untimedTranscript: String = "",
         query: String = "", playback: MinutesPlayback? = nil, compact: Bool = false, animated: Bool = true,
-        expanded: Bool = false, showTranscript: Binding<Bool>, toggleExpanded: (() -> Void)? = nil
+        expanded: Bool = false, showTranscript: Binding<Bool>, toggleExpanded: (() -> Void)? = nil, menu: AnyView? = nil
     ) {
         self.title = title
         self.date = date
@@ -45,6 +46,7 @@ public struct MinutesReader: View {
         self.expanded = expanded
         self._showTranscript = showTranscript
         self.toggleExpanded = toggleExpanded
+        self.menu = menu
     }
 
     private var tint: Color {
@@ -54,21 +56,19 @@ public struct MinutesReader: View {
     private var padding: CGFloat { compact ? 14 : 33 }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            header
-            ZStack(alignment: .topLeading) {
-                if showTranscript {
-                    transcript.transition(paneTransition(x: 5))
-                } else {
-                    MinutesSummary(markdown: summary, query: query, compact: compact, tint: tint, motion: motion,
-                                   position: $summaryPosition)
-                        .transition(paneTransition(x: -5))
-                }
+        ZStack(alignment: .topLeading) {
+            if showTranscript {
+                transcript.transition(paneTransition(x: 5))
+            } else {
+                MinutesSummary(markdown: summary, query: query, compact: compact, tint: tint, motion: motion,
+                               position: $summaryPosition)
+                    .transition(paneTransition(x: -5))
             }
-            .frame(maxHeight: .infinity)
-            .clipped()
-            .padding(.horizontal, padding)
-
+        }
+        .padding(.horizontal, padding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollEdgeBar { header }
+        .scrollEdgeBar(.bottom) {
             if let playback {
                 MinutesAudioBar(playback: playback, compact: compact, tint: tint, motion: motion)
                     .padding(.horizontal, padding)
@@ -76,7 +76,7 @@ public struct MinutesReader: View {
                     .padding(.bottom, 13)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
         .animation(motion, value: showTranscript)
     }
 
@@ -118,6 +118,7 @@ public struct MinutesReader: View {
                 }
                 control("document.on.document", label: showTranscript ? "文字起こしをコピー" : "要約をコピー", action: copy)
                     .disabled(showTranscript ? sections.isEmpty && untimedTranscript.isEmpty : summary.isEmpty)
+                if let menu { menu.frame(width: 33, height: 33) }
             }
             .padding(.top, compact ? 10 : 14)
             .background(alignment: .bottom) {
