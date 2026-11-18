@@ -189,14 +189,27 @@ class Database:
             out.append(d)
         return out
 
-    def update_transcript(self, minutes_id: str, transcript: list[dict]) -> bool:
+    def update_transcript(
+        self,
+        minutes_id: str,
+        transcript: list[dict],
+        *,
+        clear_summary: bool = False,
+    ) -> bool:
         conn = self._get_conn()
         transcript_text = build_transcript_text(transcript)
         transcript_json = json.dumps(transcript, ensure_ascii=False)
-        result = conn.execute(
-            "UPDATE minutes SET transcript = ?, transcript_text = ?, updated_at = datetime('now') WHERE id = ?",
-            (transcript_json, transcript_text, minutes_id),
-        )
+        if clear_summary:
+            result = conn.execute(
+                "UPDATE minutes SET transcript = ?, transcript_text = ?, summary = '', "
+                "llm_model = '', updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, minutes_id),
+            )
+        else:
+            result = conn.execute(
+                "UPDATE minutes SET transcript = ?, transcript_text = ?, updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, minutes_id),
+            )
         conn.commit()
         return result.rowcount > 0
 

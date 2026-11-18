@@ -17,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.api.errors import bad_request, not_found
+from src.api.errors import bad_request, conflict, not_found
 from src.config import config
 from src.storage.db import db
 from src.summarize.base import SummaryError
@@ -45,8 +45,16 @@ async def trigger_summarize(
     Query:
         provider: 省略時は config の minutes_ai.provider を使う
     """
-    if db.get_minutes(minutes_id) is None:
+    minute = db.get_minutes(minutes_id)
+    if minute is None:
         raise not_found("MINUTES_NOT_FOUND", f"minutes '{minutes_id}' が見つかりません")
+    session_id = str(minute.get("session_id") or "")
+    if session_id:
+        from src.api import recording as rec_mod
+
+        pipeline = rec_mod._pipelines.get(session_id)
+        if pipeline and pipeline.get("state") in ("recording", "stopping", "transcribing"):
+            raise conflict("MINUTES_BUSY", "この議事録の文字起こし中は要約できません")
     if provider and not is_known_provider(provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {provider}")
     # cloud provider なら consent チェック

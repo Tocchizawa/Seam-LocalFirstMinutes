@@ -35,9 +35,9 @@ class ModelResourceGate:
         self._llm_active = False
 
     def try_acquire_whisper(self) -> bool:
-        """Whisper の使用権を即時取得する。LLM 実行中は False。"""
+        """Whisper の使用権を即時取得する。LLM 実行中/待機中は False。"""
         with self._condition:
-            if self._llm_active:
+            if self._llm_active or self._llm_waiters:
                 return False
             self._whisper_users += 1
             return True
@@ -59,12 +59,16 @@ class ModelResourceGate:
             self._llm_active = True
             return True
 
-    async def acquire_llm_async(self) -> None:
-        """キャンセル可能な async 版の LLM 使用権取得。"""
+    async def acquire_llm_async(self, cancelled: Callable[[], bool] | None = None) -> bool:
+        """LLM 使用権を待つ。cancelled が True なら待機を解除して False を返す。"""
         with self._condition:
             self._llm_waiters += 1
         try:
-            while not self.try_acquire_llm():
+            while True:
+                if cancelled is not None and cancelled():
+                    return False
+                if self.try_acquire_llm():
+                    return True
                 await asyncio.sleep(0.25)
         finally:
             with self._condition:

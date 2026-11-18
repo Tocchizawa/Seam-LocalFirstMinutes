@@ -361,6 +361,21 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
 @router.patch("/{minutes_id}/summary")
 async def update_summary(minutes_id: str, body: SummaryUpdateRequest) -> dict:
     """ユーザーによる要約手動編集。LLM モデル列は更新しない(provenance を保持)。"""
+    current = db.get_minutes(minutes_id)
+    if current is None:
+        raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
+    session_id = str(current.get("session_id") or "")
+    if session_id:
+        from src.api import recording as rec_mod
+
+        pipeline = rec_mod._pipelines.get(session_id)
+        if pipeline and pipeline.get("state") in ("recording", "stopping", "transcribing"):
+            raise conflict("MINUTES_BUSY", "文字起こし中は要約を編集できません")
+    from src.summarize.runner import get_runner
+    status = get_runner().get_status(minutes_id)
+    if status is not None and status.state in ("queued", "running"):
+        raise conflict("MINUTES_BUSY", "要約生成中は要約を編集できません")
+
     ok = db.update_summary(minutes_id, body.summary)
     if not ok:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
@@ -393,6 +408,10 @@ async def delete_minutes(minutes_id: str) -> dict:
         existing = rec_mod._pipelines.get(session_id)
         if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
             raise conflict("SESSION_ACTIVE", "この議事録のセッションは現在処理中のため削除できません")
+
+    from src.summarize.runner import get_runner
+    if get_runner().is_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "この議事録は要約または後処理中のため削除できません")
 
     ok = db.delete_minutes(minutes_id)
     if not ok:
@@ -431,6 +450,15 @@ async def _start_retranscribe_minutes(
     session_id = m.get("session_id", "")
     if not session_id:
         raise not_found("SESSION_NOT_FOUND", "セッションIDが見つかりません")
+
+    clear_summary = bool(str(m.get("summary") or "").strip())
+    enqueue_summary_on_complete = enqueue_summary_on_complete or bool(
+        config.get("minutes_ai", "auto_generate", default=True)
+    )
+
+    from src.summarize.runner import get_runner
+    if get_runner().is_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "この議事録は要約または後処理中のため再文字起こしできません")
 
     # 音声ファイルを探す
     session_dir = APP_DIR / "sessions" / session_id
@@ -962,7 +990,9 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             if config.get(
                 "whisper", "speaker_memory", "diarization_provider", default="legacy"
             ) == "pyannote":
-                await model_resource_gate.acquire_llm_async()
+                acquired = await model_resource_gate.acquire_llm_async(cancel_event.is_set)
+                if not acquired:
+                    _assert_not_cancelled()
                 diarization_lease = True
             try:
                 segments = await loop.run_in_executor(
@@ -986,10 +1016,11 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
 
             _set_retry_stage(Stage.SAVING)
             await rec_mod._broadcast_pipeline(session_id)
-            try:
-                db.update_transcript(minutes_id, segments)
-            except Exception as e:
-                logger.error("update_transcript failed: %s", e)
+            if not db.update_transcript(
+                minutes_id, segments, clear_summary=clear_summary,
+            ):
+                raise RuntimeError("議事録が削除されたため、再文字起こし結果を保存できませんでした")
+            rec_mod._delete_session_meta(session_id)
 
             transcript_payload = rec_mod.build_pipeline_transcript_payload(segments)
             _set_retry_stage(Stage.DONE, "再文字起こし完了")
