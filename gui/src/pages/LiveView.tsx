@@ -4,6 +4,7 @@ import { useRecording } from "../lib/recording-context";
 import { Spinner } from "../components/Spinner";
 import { ModelDownloadProgress } from "../components/ModelDownloadProgress";
 import { StreamStatusBar } from "../components/StreamStatusBar";
+import type { StreamStatus } from "../lib/recording-context";
 
 function fmtTs(s: number) {
   const h = Math.floor(s / 3600);
