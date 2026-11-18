@@ -9,7 +9,7 @@ import type {
 } from "../lib/api";
 import {
   audioPlayUrl, exportMinutes, getMinutesMarkdown, deleteMinutes,
-  getPipelineStatus, getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle, WS_URL,
+  getMinutes, retranscribeMinutes, cancelRetranscribeMinutes, updateMinutesTitle,
   triggerSummarize, getSummarizeStatus, cancelSummarize, getPipelineBySession,
   updateMinutesSummary, getSessionSegments, getSessionAudioInfo, recoverSessionMinutes,
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
@@ -77,81 +77,76 @@ export function DetailView(props: Props) {
   useEffect(() => { setCurrentMinutes(props.minutes); }, [props.minutes]);
 
   useEffect(() => {
-    if (!isLive) return;
-    const fetchPipeline = () => getPipelineStatus().then(setPipeline).catch(() => {});
-    fetchPipeline();
-
-    let ws: WebSocket | null = null;
-    let timer: number | null = null;
-    let attempt = 0;
+    if (!isLive || !props.sessionId) return;
     let stopped = false;
-
-    const handle = (e: MessageEvent) => {
-      try {
-        const m = JSON.parse(e.data);
-        if (m.type === "transcript_chunk" && m.data) {
-          const seg = m.data as LiveSegment;
-          if (props.sessionId && seg.session_id !== props.sessionId) return;
-          setLiveSegments((prev) => {
-            // start 時刻が一致する既存セグメントは置換、無ければ追加してソート
-            const filtered = prev.filter((p) => p.start !== seg.start);
-            const next = [...filtered, seg].sort((a, b) => a.start - b.start);
-            if (next.length <= MAX_LIVE_SEGMENTS) return next;
-            return next.slice(next.length - MAX_LIVE_SEGMENTS);
-          });
-        }
-        if (m.type === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
-          const speakerId = String(m.data.speaker_id);
-          const speakerLabel = String(m.data.speaker_label);
-          setLiveSegments((prev) =>
-            prev.map((seg) =>
-              seg.speaker_id === speakerId
-                ? { ...seg, speaker_label: speakerLabel }
-                : seg
-            )
-          );
-        }
-        if (["pipeline_progress", "pipeline_done", "pipeline_error", "recording_stopped"].includes(m.type)) {
-          fetchPipeline();
-        }
-        // pipeline-detail モードでこの session が finalize されたら、
-        // バックエンドが作成した minutes を fetch して state を切替える。
-        // これがないと currentMinutes が undefined のままになり、
-        // canRecoverSession (= !minutesId && stateLive==="done") が誤って真になり
-        // 「救済ボタン」が表示される。
-        if (
-          m.type === "pipeline_done"
-          && m.data?.session_id === props.sessionId
-          && typeof m.data?.minutes_id === "string"
-        ) {
-          const newId = m.data.minutes_id as string;
-          getMinutes(newId)
-            .then((fresh) => setCurrentMinutes(fresh))
-            .catch(() => {});
-        }
-      } catch {}
+    let pipelineRequest = 0;
+    const sessionId = props.sessionId;
+    const fetchPipeline = () => {
+      const requestId = ++pipelineRequest;
+      void getPipelineBySession(sessionId)
+        .then((current) => {
+          if (!stopped && requestId === pipelineRequest) setPipeline(current);
+        })
+        .catch(() => {});
     };
 
-    const connect = () => {
-      if (stopped) return;
-      try { ws = new WebSocket(WS_URL); } catch { scheduleReconnect(); return; }
-      ws.onopen = () => { attempt = 0; fetchPipeline(); };
-      ws.onmessage = handle;
-      ws.onclose = scheduleReconnect;
-      ws.onerror = () => { try { ws?.close(); } catch {} };
-    };
-    const scheduleReconnect = () => {
-      if (stopped || timer) return;
-      attempt++;
-      const delay = Math.min(8000, 500 * Math.pow(1.6, Math.min(attempt, 6)));
-      timer = window.setTimeout(() => { timer = null; connect(); }, delay);
+    setPipeline(null);
+    setLiveSegments([]);
+    const handle = (e: Event) => {
+      const type = e.type.replace("recording-ws:", "");
+      const data = (e as CustomEvent<any>).detail;
+      if (type === "__open") {
+        fetchPipeline();
+        return;
+      }
+      if (type === "transcript_chunk" && data) {
+        const seg = data as LiveSegment;
+        if (seg.session_id !== sessionId) return;
+        setLiveSegments((prev) => {
+          // start 時刻が一致する既存セグメントは置換、無ければ追加してソート
+          const filtered = prev.filter((p) => p.start !== seg.start);
+          const next = [...filtered, seg].sort((a, b) => a.start - b.start);
+          if (next.length <= MAX_LIVE_SEGMENTS) return next;
+          return next.slice(next.length - MAX_LIVE_SEGMENTS);
+        });
+      }
+      if (type === "speaker_renamed" && data?.speaker_id && data?.speaker_label) {
+        const speakerId = String(data.speaker_id);
+        const speakerLabel = String(data.speaker_label);
+        setLiveSegments((prev) =>
+          prev.map((seg) =>
+            seg.speaker_id === speakerId
+              ? { ...seg, speaker_label: speakerLabel }
+              : seg
+          )
+        );
+      }
+      if (["pipeline_progress", "pipeline_done", "pipeline_error", "recording_stopped"].includes(type)
+          && data?.session_id === sessionId) {
+        fetchPipeline();
+      }
+      // finalize で作成された minutes を取得して詳細画面を切り替える。
+      if (type === "pipeline_done" && data?.session_id === sessionId
+          && typeof data?.minutes_id === "string") {
+        void getMinutes(data.minutes_id)
+          .then((fresh) => { if (!stopped) setCurrentMinutes(fresh); })
+          .catch(() => {});
+      }
     };
 
-    connect();
+    const eventTypes = [
+      "__open", "transcript_chunk", "speaker_renamed", "pipeline_progress",
+      "pipeline_done", "pipeline_error", "recording_stopped",
+    ];
+    for (const type of eventTypes) {
+      window.addEventListener(`recording-ws:${type}`, handle);
+    }
+    fetchPipeline();
     return () => {
       stopped = true;
-      if (timer) window.clearTimeout(timer);
-      try { ws?.close(); } catch {}
+      for (const type of eventTypes) {
+        window.removeEventListener(`recording-ws:${type}`, handle);
+      }
     };
   }, [isLive, props.sessionId]);
 
@@ -306,19 +301,16 @@ export function DetailView(props: Props) {
     try { await cancelSummarize(minutesId); } catch {/* ignore */}
   }, [minutesId]);
 
-  /* minutesId が手に入った時点で WS を貼り、pipeline_done での reload と
-     要約イベントを購読する。pipeline-detail (live) モードでも文字起こし完了で
-     minutesId が確定し次第購読を開始するので、自動要約のイベントを取りこぼさない。 */
+  /* minutesId が手に入った時点で、共通 WebSocket が配信するイベントを購読する。
+     pipeline-detail (live) モードでも文字起こし完了後に自動要約を追跡する。 */
   useEffect(() => {
     if (!minutesId || !sessionId) return;
-    let ws: WebSocket | null = null;
-    let timer: number | null = null;
-    let attempt = 0;
     let stopped = false;
 
     const reload = async () => {
       try {
         const fresh = await getMinutes(minutesId);
+        if (stopped) return;
         setCurrentMinutes(fresh);
         // 一覧画面など他コンポーネントも同期できるよう通知
         window.dispatchEvent(
@@ -326,146 +318,165 @@ export function DetailView(props: Props) {
         );
       } catch {}
     };
-    const handle = (e: MessageEvent) => {
-      try {
-        const m = JSON.parse(e.data);
-        // retry banner は「既存議事録の再文字起こし」を可視化するためのもの。
-        // pipeline-detail (live) モードでは初回文字起こしの pipeline_progress と
-        // 区別できないので、live モードでは setRetryStatus を呼ばない。
-        if (!isLive && m.type === "pipeline_progress" && m.data?.session_id === sessionId) {
-          const st = String(m.data?.state || "");
-          if (["transcribing", "stopping"].includes(st)) {
-            setRetryStatus({
-              state: st as "transcribing" | "stopping",
-              message: String(m.data?.message || "処理中..."),
-              progress: typeof m.data?.progress === "number" ? m.data.progress : 0,
-              stage: m.data?.stage ?? null,
-              stage_label: m.data?.stage_label ?? null,
-              stage_step: typeof m.data?.stage_step === "number" ? m.data.stage_step : null,
-              stage_total: typeof m.data?.stage_total === "number" ? m.data.stage_total : null,
-            });
+    const handle = (e: Event) => {
+      const type = e.type.replace("recording-ws:", "");
+      const data = (e as CustomEvent<any>).detail;
+      const m = { type, data };
+      if (type === "__open") {
+        void getSummarizeStatus(minutesId).then((status) => {
+          if (!stopped && status.state && status.state !== "none") {
+            setSummaryJob(status);
           }
+        }).catch(() => {});
+        if (!isLive) {
+          void getPipelineBySession(sessionId).then((p) => {
+            if (stopped || !p) return;
+            if (p.state === "transcribing" || p.state === "stopping") {
+              setRetryStatus({
+                state: p.state,
+                message: p.message || "処理中...",
+                progress: typeof p.progress === "number" ? p.progress : 0,
+                stage: p.stage ?? null,
+                stage_label: p.stage_label ?? null,
+                stage_step: typeof p.stage_step === "number" ? p.stage_step : null,
+                stage_total: typeof p.stage_total === "number" ? p.stage_total : null,
+              });
+            }
+          }).catch(() => {});
         }
-        if (m.type === "pipeline_done" && m.data?.session_id === sessionId) {
-          if (!isLive) setRetryStatus(null);
-          reload();
-        }
-        if (!isLive && m.type === "pipeline_error" && m.data?.session_id === sessionId) {
+        return;
+      }
+      // retry banner は「既存議事録の再文字起こし」を可視化するためのもの。
+      // pipeline-detail (live) モードでは初回文字起こしの pipeline_progress と
+      // 区別できないので、live モードでは setRetryStatus を呼ばない。
+      if (!isLive && m.type === "pipeline_progress" && m.data?.session_id === sessionId) {
+        const st = String(m.data?.state || "");
+        if (["transcribing", "stopping"].includes(st)) {
           setRetryStatus({
-            state: "error",
-            message: String(m.data?.message || "エラー"),
-            progress: 0,
+            state: st as "transcribing" | "stopping",
+            message: String(m.data?.message || "処理中..."),
+            progress: typeof m.data?.progress === "number" ? m.data.progress : 0,
+            stage: m.data?.stage ?? null,
+            stage_label: m.data?.stage_label ?? null,
+            stage_step: typeof m.data?.stage_step === "number" ? m.data.stage_step : null,
+            stage_total: typeof m.data?.stage_total === "number" ? m.data.stage_total : null,
           });
         }
-        if (m.type === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
-          const speakerId = String(m.data.speaker_id);
-          const speakerLabel = String(m.data.speaker_label);
-          setCurrentMinutes((prev) => {
-            if (!prev) return prev;
-            const transcript = (prev.transcript || []).map((seg) =>
-              seg.speaker_id === speakerId
-                ? { ...seg, speaker_label: speakerLabel }
-                : seg
-            );
-            return { ...prev, transcript };
-          });
-        }
+      }
+      if (m.type === "pipeline_done" && m.data?.session_id === sessionId) {
+        if (!isLive) setRetryStatus(null);
+        reload();
+      }
+      if (!isLive && m.type === "pipeline_error" && m.data?.session_id === sessionId) {
+        setRetryStatus({
+          state: "error",
+          message: String(m.data?.message || "エラー"),
+          progress: 0,
+        });
+      }
+      if (m.type === "speaker_renamed" && m.data?.speaker_id && m.data?.speaker_label) {
+        const speakerId = String(m.data.speaker_id);
+        const speakerLabel = String(m.data.speaker_label);
+        setCurrentMinutes((prev) => {
+          if (!prev) return prev;
+          const transcript = (prev.transcript || []).map((seg) =>
+            seg.speaker_id === speakerId
+              ? { ...seg, speaker_label: speakerLabel }
+              : seg
+          );
+          return { ...prev, transcript };
+        });
+      }
 
-        // ─── 要約ジョブイベント ───
-        if (m.data?.minutes_id !== minutesId) {
-          // 自分の議事録に対するイベントだけ拾う
-        } else if (m.type === "summary_stage") {
+      // ─── 要約ジョブイベント ───
+      if (m.data?.minutes_id !== minutesId) {
+        // 自分の議事録に対するイベントだけ拾う
+      } else if (m.type === "summary_stage") {
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId, state: "running" as const }),
+          state: prev?.state === "done" ? "done" : "running",
+          stage: m.data?.stage ?? null,
+          stage_label: m.data?.stage_label ?? null,
+        }));
+      } else if (m.type === "summary_activity") {
+        const activity = String(m.data?.activity || "").trim();
+        if (activity) {
           setSummaryJob((prev) => ({
             ...(prev || { minutes_id: minutesId, state: "running" as const }),
             state: prev?.state === "done" ? "done" : "running",
-            stage: m.data?.stage ?? null,
-            stage_label: m.data?.stage_label ?? null,
+            activity,
           }));
-        } else if (m.type === "summary_activity") {
-          const activity = String(m.data?.activity || "").trim();
-          if (activity) {
-            setSummaryJob((prev) => ({
-              ...(prev || { minutes_id: minutesId, state: "running" as const }),
-              state: prev?.state === "done" ? "done" : "running",
-              activity,
-            }));
-          }
-        } else if (m.type === "summary_usage") {
-          setSummaryJob((prev) => ({
-            ...(prev || { minutes_id: minutesId, state: "running" as const }),
-            usage: m.data?.usage ?? null,
-          }));
-        } else if (m.type === "summary_chunk") {
-          const chunk = String(m.data.text || "");
-          setSummaryJob((prev) => ({
-            ...(prev || { minutes_id: minutesId, state: "running" }),
-            state: "running",
-            partial_text: (prev?.partial_text || "") + chunk,
-            error_code: null,
-            error_message: null,
-          }));
-        } else if (m.type === "summary_done") {
-          setSummaryJob({
-            state: "done",
-            minutes_id: minutesId,
-            provider: m.data?.provider ?? null,
-            model: m.data?.model ?? null,
-            usage: m.data?.usage ?? null,
-            finished_at: Date.now() / 1000,
-          });
-          // タイトル即時反映 (DB は既に更新済み、UI 楽観反映)
-          if (m.data?.new_title) {
-            setCurrentMinutes((prev) =>
-              prev ? { ...prev, title: String(m.data.new_title) } : prev,
-            );
-          }
-          reload();
-        } else if (m.type === "minutes_title_updated") {
-          // 別箇所からの更新 (一覧画面等) を反映
-          setCurrentMinutes((prev) =>
-            prev ? { ...prev, title: String(m.data?.title || prev.title) } : prev,
-          );
-        } else if (m.type === "summary_failed") {
-          setSummaryJob({
-            state: "failed",
-            minutes_id: minutesId,
-            error_code: m.data?.error_code ?? "UNKNOWN",
-            error_message: m.data?.message ?? "要約生成に失敗しました",
-          });
-        } else if (m.type === "summary_cancelled") {
-          setSummaryJob((prev) => ({
-            ...(prev || { minutes_id: minutesId }),
-            state: "cancelled",
-          }));
-        } else if (m.type === "summary_skipped") {
-          setSummaryJob({
-            state: "skipped",
-            minutes_id: minutesId,
-            error_code: m.data?.reason ?? "SKIPPED",
-            error_message: "発話が短すぎて要約をスキップしました",
-          });
         }
-      } catch {}
+      } else if (m.type === "summary_usage") {
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId, state: "running" as const }),
+          usage: m.data?.usage ?? null,
+        }));
+      } else if (m.type === "summary_chunk") {
+        const chunk = String(m.data.text || "");
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId, state: "running" }),
+          state: "running",
+          partial_text: (prev?.partial_text || "") + chunk,
+          error_code: null,
+          error_message: null,
+        }));
+      } else if (m.type === "summary_done") {
+        setSummaryJob({
+          state: "done",
+          minutes_id: minutesId,
+          provider: m.data?.provider ?? null,
+          model: m.data?.model ?? null,
+          usage: m.data?.usage ?? null,
+          finished_at: Date.now() / 1000,
+        });
+        // タイトル即時反映 (DB は既に更新済み、UI 楽観反映)
+        if (m.data?.new_title) {
+          setCurrentMinutes((prev) =>
+            prev ? { ...prev, title: String(m.data.new_title) } : prev,
+          );
+        }
+        reload();
+      } else if (m.type === "minutes_title_updated") {
+        // 別箇所からの更新 (一覧画面等) を反映
+        setCurrentMinutes((prev) =>
+          prev ? { ...prev, title: String(m.data?.title || prev.title) } : prev,
+        );
+      } else if (m.type === "summary_failed") {
+        setSummaryJob({
+          state: "failed",
+          minutes_id: minutesId,
+          error_code: m.data?.error_code ?? "UNKNOWN",
+          error_message: m.data?.message ?? "要約生成に失敗しました",
+        });
+      } else if (m.type === "summary_cancelled") {
+        setSummaryJob((prev) => ({
+          ...(prev || { minutes_id: minutesId }),
+          state: "cancelled",
+        }));
+      } else if (m.type === "summary_skipped") {
+        setSummaryJob({
+          state: "skipped",
+          minutes_id: minutesId,
+          error_code: m.data?.reason ?? "SKIPPED",
+          error_message: "発話が短すぎて要約をスキップしました",
+        });
+      }
     };
-    const connect = () => {
-      if (stopped) return;
-      try { ws = new WebSocket(WS_URL); } catch { scheduleReconnect(); return; }
-      ws.onopen = () => { attempt = 0; };
-      ws.onmessage = handle;
-      ws.onclose = scheduleReconnect;
-      ws.onerror = () => { try { ws?.close(); } catch {} };
-    };
-    const scheduleReconnect = () => {
-      if (stopped || timer) return;
-      attempt++;
-      const delay = Math.min(8000, 500 * Math.pow(1.6, Math.min(attempt, 6)));
-      timer = window.setTimeout(() => { timer = null; connect(); }, delay);
-    };
-    connect();
+    const eventTypes = [
+      "__open", "pipeline_progress", "pipeline_done", "pipeline_error",
+      "speaker_renamed", "summary_stage", "summary_activity", "summary_usage",
+      "summary_chunk", "summary_done", "summary_failed", "summary_cancelled",
+      "summary_skipped", "minutes_title_updated",
+    ];
+    for (const type of eventTypes) {
+      window.addEventListener(`recording-ws:${type}`, handle);
+    }
     return () => {
       stopped = true;
-      if (timer) window.clearTimeout(timer);
-      try { ws?.close(); } catch {}
+      for (const type of eventTypes) {
+        window.removeEventListener(`recording-ws:${type}`, handle);
+      }
     };
   }, [isLive, minutesId, sessionId]);
 

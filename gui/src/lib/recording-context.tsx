@@ -173,6 +173,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       }
       if (t === "transcript_chunk" && m.data) {
         const seg: LiveSegment = m.data;
+        // 詳細画面も同じ接続からライブ文字起こしを購読する。
+        dispatch(t, seg);
+        const activeSessionId = activeSessionIdRef.current;
+        if (activeSessionId && seg.session_id && seg.session_id !== activeSessionId) {
+          return;
+        }
         setLiveSegments((prev) => {
           const next = [...prev, seg];
           if (next.length <= MAX_LIVE_SEGMENTS) return next;
