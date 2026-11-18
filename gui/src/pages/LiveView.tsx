@@ -5,7 +5,12 @@ import { Spinner } from "../components/Spinner";
 import { ModelDownloadProgress } from "../components/ModelDownloadProgress";
 
 function fmtTs(s: number) {
-  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
 interface Props {
@@ -24,7 +29,8 @@ interface Props {
  */
 export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
   const {
-    liveSegments, streamStatus, recording, modelLoadLog, modelDownload,
+    liveSegments, streamStatus, recording, recordingStarting, recordingStopping,
+    waitingForModel, paused, elapsedSec, modelLoadLog, modelDownload,
   } = useRecording();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -78,8 +84,28 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
+  const elapsed = fmtTs(elapsedSec);
+
   return (
     <div className="relative h-full flex flex-col overflow-hidden">
+      <header className="live-view-head">
+        <div className="min-w-0">
+          <div className="live-view-title-line">
+            <span className={`status-dot ${(recordingStarting || (recording && !paused && !recordingStopping)) ? "status-dot--pulse" : ""}`} />
+            <h1>ライブ文字起こし</h1>
+          </div>
+          <p aria-live="polite">
+            {recordingStopping ? "録音を保存しています"
+              : recordingStarting ? waitingForModel ? "ローカル処理の完了を待っています" : "録音を準備しています"
+                : recording ? paused ? "録音を一時停止中" : "会話を記録しています"
+                  : "録音は停止しています"}
+          </p>
+        </div>
+        <div className="live-view-meta num" aria-live="polite">
+          <span>{elapsed}</span>
+          <span>{liveSegments.length} 件</span>
+        </div>
+      </header>
       {showStreamStatusBar && streamStatus && (
         <StreamStatusBar status={streamStatus} />
       )}
@@ -99,8 +125,8 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
           </div>
         ) : (
           <div className="anim-fade-in">
-            {liveSegments.map((seg, i) => (
-              <div key={i} className="flat-row" style={{ cursor: "default" }}>
+            {liveSegments.map((seg) => (
+              <div key={`${seg.session_id ?? "live"}-${seg.start}-${seg.end}-${seg.speaker_id ?? ""}-${seg.text}`} className="flat-row live-transcript-row" style={{ cursor: "default" }}>
                 <span
                   className="num text-[10px] text-(--t3) shrink-0 min-w-[48px]"
                   style={{ fontWeight: 400 }}
@@ -121,12 +147,7 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
           type="button"
           onClick={jumpToBottom}
           title="最新へ"
-          className="absolute right-16 z-20 anim-fade-in flex items-center gap-1.5 h-8 px-3 rounded-full text-[11px] font-medium shadow-md cursor-pointer transition-transform hover:scale-105 bottom-4"
-          style={{
-            background: "var(--accent)",
-            color: "white",
-            border: "none",
-          }}
+          className="live-jump-btn absolute right-16 z-20 anim-fade-in flex items-center gap-1.5 h-9 px-3 rounded-lg text-xs font-medium cursor-pointer bottom-4"
         >
           <ArrowDown size={11} weight="bold" />
           最新へ
@@ -138,12 +159,7 @@ export function LiveView({ showStreamStatusBar = false, onClose }: Props) {
           type="button"
           onClick={onClose}
           title="縮小して一覧へ戻る"
-          className="absolute right-4 bottom-4 z-20 flex items-center justify-center h-9 w-9 rounded-full shadow-md cursor-pointer transition-transform hover:scale-105"
-          style={{
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            color: "var(--t1)",
-          }}
+          className="live-close-btn absolute right-4 bottom-4 z-20 flex items-center justify-center h-9 w-9 rounded-lg cursor-pointer"
         >
           <ArrowsIn size={14} weight="regular" />
         </button>
@@ -221,42 +237,34 @@ function StreamStatusBar({
   status: StreamStatus;
 }) {
   const isProcessing = (status.current_chunk_audio_sec ?? 0) > 0;
-  const speed = status.avg_speed_ratio ?? 0;
   const pending = status.pending_audio_sec ?? 0;
-  const cur = status.current_chunk_audio_sec ?? 0;
   const proc = status.current_processing_sec ?? 0;
   const queueSize = status.queue_size ?? 0;
   const totalSegments = status.total_segments ?? 0;
 
   return (
-    <div className="flex items-center gap-4 px-5 py-1.5 border-b border-(--border) text-[10px] text-(--t3) num">
+    <div className="stream-status-bar num" role="status" aria-live="polite">
       {isProcessing ? (
-        <span className="flex items-center gap-1.5 text-(--accent)">
+        <span className="stream-status-active">
           <span className="status-dot status-dot--pulse" />
-          {cur.toFixed(1)}秒の音声を処理中 · {proc.toFixed(1)}秒経過
+          音声を処理中 · {proc.toFixed(1)}秒経過
         </span>
       ) : (
-        <span className="text-(--t4)">待機中</span>
+        <span className="stream-status-idle">発話を待機中</span>
       )}
-      <span className="ml-auto flex items-center gap-3">
-        {speed > 0 && <span title="直近の処理速度">速度 ×{speed.toFixed(1)}</span>}
-        {pending > 0 && <span title="未処理の音声合計">未処理 {pending.toFixed(1)}秒</span>}
-        <span title="キューサイズ">
-          待機中 {queueSize}{status.queue_maxsize ? `/${status.queue_maxsize}` : ""}
+      <span className="stream-status-metrics">
+        {pending > 0 && <span title="未処理の音声合計">未処理 {pending.toFixed(0)}秒</span>}
+        <span title="文字起こし待ちの音声チャンク数">
+          キュー {queueSize}{status.queue_maxsize ? `/${status.queue_maxsize}` : ""}件
         </span>
         {status.dropped_chunks ? (
-          <span className="text-(--warning)" title="過負荷で破棄した音声">
-            drop {status.dropped_chunks}件 ({(status.dropped_audio_sec ?? 0).toFixed(1)}秒)
+          <span className="stream-status-warning" title="過負荷で破棄した音声">
+            音声欠落 {status.dropped_chunks}件 ({(status.dropped_audio_sec ?? 0).toFixed(1)}秒)
           </span>
         ) : null}
         {status.transcribe_errors ? (
-          <span className="text-(--danger)" title="文字起こし失敗回数">
-            err {status.transcribe_errors}
-          </span>
-        ) : null}
-        {status.filtered_segments ? (
-          <span className="text-(--t3)" title="ハルシネーションとして除外した件数">
-            filter {status.filtered_segments}
+          <span className="stream-status-error" title="文字起こし失敗回数">
+            失敗 {status.transcribe_errors}
           </span>
         ) : null}
         <span>確定 {totalSegments}件</span>

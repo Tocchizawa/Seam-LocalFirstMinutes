@@ -953,7 +953,7 @@ export function SettingsModal({ onClose }: Props) {
         style={{ background: "rgba(0,0,0,0.4)" }}
       />
 
-      <div className={`dialog-shell relative w-[820px] max-w-[95vw] h-[640px] max-h-[86vh] flex flex-col overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
+      <div className={`dialog-shell settings-dialog relative w-[960px] max-w-[95vw] h-[720px] max-h-[88vh] flex flex-col overflow-hidden ${closing ? "anim-modal-out" : "anim-modal-in"}`}>
         <header className="flex items-center justify-between p-4 px-5 border-b border-(--border) shrink-0">
           <h2 className="text-[14px] font-semibold text-(--t1)">設定</h2>
           <button onClick={handleClose} className="icon-btn" title="閉じる">
@@ -962,7 +962,7 @@ export function SettingsModal({ onClose }: Props) {
         </header>
 
         <div className="flex flex-1 min-h-0 overflow-hidden">
-          <aside className="w-[160px] border-r border-(--border) p-3 bg-(--surface) overflow-y-auto shrink-0">
+          <aside className="settings-sidebar w-[184px] border-r border-(--border) p-3 bg-(--surface) overflow-y-auto shrink-0">
             <div className="flex flex-col gap-3">
               {Array.from(new Set(categories.map((c) => c.group))).map((group) => (
                 <div key={group}>
@@ -2741,7 +2741,7 @@ function ThemePicker({ value, onChange }: { value: ThemeMode; onChange: (m: Them
           <button
             key={o.v}
             onClick={() => onChange(o.v)}
-            className={`px-2.5 py-1 text-[11px] font-medium border-none rounded cursor-pointer transition-all flex items-center gap-1.5 ${
+            className={`px-2.5 py-1 text-[11px] font-medium border-none rounded cursor-pointer transition-colors flex items-center gap-1.5 ${
               active ? "text-(--t1) bg-(--surface-3)" : "text-(--t3) bg-transparent hover:text-(--t2)"
             }`}
           >

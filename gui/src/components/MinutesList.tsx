@@ -141,6 +141,7 @@ export function MinutesList({
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importMenuRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const searchGenerationRef = useRef(0);
 
   useEffect(() => { setQ(""); setSearched(null); }, [projectId]);
 
@@ -156,15 +157,30 @@ export function MinutesList({
   }, [importMenuOpen]);
 
   useEffect(() => {
+    const generation = ++searchGenerationRef.current;
     const trimmed = q.trim();
-    if (!trimmed) { setSearched(null); return; }
+    if (!trimmed) {
+      setSearched(null);
+      setSearching(false);
+      return () => {
+        if (searchGenerationRef.current === generation) searchGenerationRef.current += 1;
+      };
+    }
     setSearching(true);
     const id = setTimeout(async () => {
-      try { setSearched(await searchMinutes(trimmed, projectId)); }
-      catch { setSearched([]); }
-      finally { setSearching(false); }
+      try {
+        const results = await searchMinutes(trimmed, projectId);
+        if (generation === searchGenerationRef.current) setSearched(results);
+      } catch {
+        if (generation === searchGenerationRef.current) setSearched([]);
+      } finally {
+        if (generation === searchGenerationRef.current) setSearching(false);
+      }
     }, 280);
-    return () => clearTimeout(id);
+    return () => {
+      clearTimeout(id);
+      if (searchGenerationRef.current === generation) searchGenerationRef.current += 1;
+    };
   }, [q, projectId]);
 
   // 検索結果以外: パイプラインを minute 一致 / orphan に分類
@@ -341,7 +357,8 @@ export function MinutesList({
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="タイトル・要約・本文を検索..."
+                aria-label="議事録を検索"
+                placeholder="タイトルや本文を検索"
                 className="search-bar-input"
               />
               {searching && <Spinner size={12} />}
@@ -361,7 +378,7 @@ export function MinutesList({
           <div className="minutes-import-menu-wrap" ref={importMenuRef}>
             <button
               type="button"
-              className="icon-btn minutes-import-btn"
+              className="minutes-import-btn"
               title="音声を取り込み"
               aria-label="音声を取り込み"
               aria-haspopup="menu"
@@ -374,6 +391,7 @@ export function MinutesList({
               ) : (
                 <UploadSimple size={14} weight="regular" />
               )}
+              <span>{importing ? "追加中" : "音声を追加"}</span>
             </button>
             {importMenuOpen && (
               <div className="minutes-import-menu" role="menu">
@@ -420,9 +438,11 @@ export function MinutesList({
       )}
 
       {empty && (
-        <p className="text-[12px] text-(--t3) text-center py-12">
-          録音または音声取り込みでここに議事録が表示されます
-        </p>
+        <div className="minutes-empty-state">
+          <div className="minutes-empty-mark" aria-hidden="true"><span /></div>
+          <h2>ここに会議の記録が並びます</h2>
+          <p>上の録音ボタンで会議を記録するか、「音声を追加」から既存の音声を取り込めます。</p>
+        </div>
       )}
 
       {showSearchResults && (
@@ -587,49 +607,50 @@ function SearchResultCard({
     : null;
 
   return (
-    <div onClick={onOpen} className="search-result-card group">
-      <div className="flex items-start gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h4 className="text-[13px] font-medium text-(--t1) min-w-0">
+    <div className="search-result-card group">
+      <button type="button" onClick={onOpen} className="search-result-open">
+        <span className="search-result-copy flex-1 min-w-0">
+          <span className="flex items-center gap-2 flex-wrap">
+            <span className="text-[13px] font-medium text-(--t1) min-w-0">
               <HighlightedText text={hl.title} fallback={r.title} />
-            </h4>
+            </span>
             {matchedFields.map((f) => (
               <span key={f.key} className="match-badge">{f.label}</span>
             ))}
-          </div>
-          <p className="text-[10px] text-(--t3) mt-1 num">
+          </span>
+          <span className="text-[10px] text-(--t3) mt-1 num">
             {fmtDate(r.date)} · {fmtTime(r.started_at)} · {fmtDur(r.duration_sec)}
-          </p>
+          </span>
           {snippet && (
-            <div className="mt-2 text-[12px] text-(--t2) leading-relaxed">
+            <span className="mt-2 text-[12px] text-(--t2) leading-relaxed">
               {snippetLabel && (
                 <span className="text-[10px] text-(--t3) mr-1.5">{snippetLabel}:</span>
               )}
               <HighlightedText text={snippet} />
-            </div>
+            </span>
           )}
-        </div>
-        <div className="flat-row-actions flex items-center gap-0.5 shrink-0">
+        </span>
+      </button>
+      <div className="flat-row-actions flex items-center gap-0.5 shrink-0">
           {canMove && (
             <button
               onClick={(e) => { e.stopPropagation(); onStartMove(); }}
               disabled={busy}
               className="icon-btn !w-7 !h-7"
+              aria-label="他のプロジェクトへ移動"
               title="他のプロジェクトへ移動"
             >
               <FolderOpen size={12} weight="regular" />
             </button>
           )}
           <button onClick={onExport} disabled={busy}
-            className="icon-btn !w-7 !h-7" title="Markdown を書き出し">
+            className="icon-btn !w-7 !h-7" aria-label="Markdown を書き出し" title="Markdown を書き出し">
             {busy ? <PhSpinner size={11} className="anim-spin" /> : <DownloadSimple size={12} weight="regular" />}
           </button>
           <button onClick={onDelete} disabled={busy}
-            className="icon-btn !w-7 !h-7 hover:!text-(--danger)" title="削除">
+            className="icon-btn !w-7 !h-7 hover:!text-(--danger)" aria-label="削除" title="削除">
             <Trash size={12} weight="regular" />
           </button>
-        </div>
       </div>
     </div>
   );
@@ -669,43 +690,45 @@ function ProcessingRow({
       : "文字起こし中";
 
   return (
-    <div className="minutes-card proc-card group"
-      data-anim={phase}
-      onClick={onOpen}>
-      <div className="minutes-card-body">
-        <div className="minutes-card-meta num">
+    <article className="minutes-card proc-card group" data-anim={phase}>
+      <button type="button" onClick={onOpen} className="minutes-card-open">
+      <span className="minutes-card-body">
+        <span className="minutes-card-meta num">
           {shortDate && <span>{shortDate}</span>}
           {shortDate && time && <span className="minutes-card-meta-sep">·</span>}
           {time && <span>{time}</span>}
-        </div>
-        <h4 className="minutes-card-title">{title}</h4>
-        <p className={`minutes-card-status ${isError ? "is-error" : ""}`}>
+        </span>
+        <span className="minutes-card-title">{title}</span>
+        <span className={`minutes-card-status ${isError ? "is-error" : ""}`}>
           {isError ? (
             <WarningCircle size={11} weight="fill" />
           ) : (
             <Spinner size={10} color="var(--accent)" />
           )}
           <span className="truncate">{p.message || activeLabel}</span>
-        </p>
-      </div>
+        </span>
+      </span>
+      </button>
 
       {isError && (
         <div className="minutes-card-actions">
           <button
-            onClick={(e) => { e.stopPropagation(); onOpen(); }}
+            onClick={onOpen}
             className="icon-btn !w-7 !h-7"
+            aria-label="詳細を開く"
             title="詳細を開く"
           >
             <ArrowSquareOut size={11} weight="regular" />
           </button>
           <button onClick={(e) => { e.stopPropagation(); onDismiss(); }}
             className="icon-btn !w-7 !h-7"
+            aria-label="リストから消す"
             title="リストから消す">
             <X size={11} weight="bold" />
           </button>
         </div>
       )}
-    </div>
+    </article>
   );
 }
 
@@ -746,9 +769,10 @@ function MinutesRow({
   })();
 
   return (
-    <div onClick={onOpen} className="minutes-card group">
-      <div className="minutes-card-body">
-        <div className="minutes-card-meta num">
+    <article className="minutes-card group">
+      <button type="button" onClick={onOpen} className="minutes-card-open">
+      <span className="minutes-card-body">
+        <span className="minutes-card-meta num">
           {shortDate && <span>{shortDate}</span>}
           {shortDate && time && <span className="minutes-card-meta-sep">·</span>}
           {time && <span>{time}</span>}
@@ -756,20 +780,21 @@ function MinutesRow({
             <span className="minutes-card-meta-sep">·</span>
             <span>{fmtDur(m.duration_sec)}</span>
           </>}
-        </div>
-        <h4 className="minutes-card-title">{m.title}</h4>
+        </span>
+        <span className="minutes-card-title">{m.title}</span>
         {statusText ? (
-          <p className={`minutes-card-status ${isError ? "is-error" : ""}`}>
+          <span className={`minutes-card-status ${isError ? "is-error" : ""}`}>
             {(isProcessing || isSummarizing) && <Spinner size={10} color="var(--accent)" />}
             {isError && <WarningCircle size={11} weight="fill" />}
             <span className="truncate">{statusText}</span>
-          </p>
+          </span>
         ) : preview ? (
-          <p className="minutes-card-preview">{preview}</p>
+          <span className="minutes-card-preview">{preview}</span>
         ) : (
-          <p className="minutes-card-preview is-empty">要約待ち</p>
+          <span className="minutes-card-preview is-empty">要約待ち</span>
         )}
-      </div>
+      </span>
+      </button>
       <div className="minutes-card-actions">
         {canMove && (
           <RowAction
@@ -787,7 +812,7 @@ function MinutesRow({
           <Trash size={12} weight="regular" />
         </RowAction>
       </div>
-    </div>
+    </article>
   );
 }
 
@@ -802,6 +827,7 @@ function RowAction({
 }) {
   return (
     <button onClick={onClick} title={title} disabled={busy}
+      aria-label={title}
       className={`icon-btn !w-7 !h-7 ${danger ? "hover:!text-(--danger)" : ""}`}>
       {busy ? <PhSpinner size={11} className="anim-spin" /> : children}
     </button>

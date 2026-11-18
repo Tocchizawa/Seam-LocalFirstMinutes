@@ -44,6 +44,10 @@ export function MainView({
   const [minutesError, setMinutesError] = useState("");
   const [minutesMoreError, setMinutesMoreError] = useState("");
   const loadingMoreRef = useRef(false);
+  const projectIdRef = useRef(project.id);
+  const minutesRequestRef = useRef(0);
+  const pipelineRequestRef = useRef(0);
+  projectIdRef.current = project.id;
   const [pipelines, setPipelines] = useState<PipelineStatus[]>([]);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [recoveryDismissed, setRecoveryDismissed] = useState(false);
@@ -101,33 +105,47 @@ export function MainView({
   }, [debugMode, recording]);
 
   const loadInitialMinutes = useCallback(async () => {
+    const requestId = ++minutesRequestRef.current;
+    const requestedProjectId = project.id;
+    loadingMoreRef.current = false;
+    setMinutesLoadingMore(false);
     setMinutesLoading(true);
     setMinutesError("");
     setMinutesMoreError("");
     setMinutesHasMore(false);
     setMinutes([]);
     try {
-      const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, 0);
+      const page = await listMinutes(requestedProjectId, MINUTES_PAGE_SIZE, 0);
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
       setMinutes(page);
       setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
     } catch (e) {
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
       setMinutes([]);
       setMinutesHasMore(false);
       setMinutesError(e instanceof Error ? e.message : "議事録一覧の取得に失敗しました");
     } finally {
-      setMinutesLoading(false);
+      if (requestId === minutesRequestRef.current && projectIdRef.current === requestedProjectId) {
+        setMinutesLoading(false);
+      }
     }
   }, [project.id]);
 
   const refreshMinutes = useCallback(async () => {
+    const requestId = ++minutesRequestRef.current;
+    const requestedProjectId = project.id;
+    loadingMoreRef.current = false;
+    setMinutesLoadingMore(false);
     const limit = Math.max(MINUTES_PAGE_SIZE, minutes.length || MINUTES_PAGE_SIZE);
     setMinutesMoreError("");
     try {
-      const page = await listMinutes(project.id, limit, 0);
+      const page = await listMinutes(requestedProjectId, limit, 0);
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
       setMinutes(page);
       setMinutesHasMore(page.length === limit);
       setMinutesError("");
     } catch (e) {
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
       if (minutes.length === 0) {
         setMinutes([]);
         setMinutesHasMore(false);
@@ -140,11 +158,14 @@ export function MainView({
 
   const loadMoreMinutes = useCallback(async () => {
     if (loadingMoreRef.current || minutesLoading || minutesLoadingMore || !minutesHasMore) return;
+    const requestId = ++minutesRequestRef.current;
+    const requestedProjectId = project.id;
     loadingMoreRef.current = true;
     setMinutesLoadingMore(true);
     setMinutesMoreError("");
     try {
-      const page = await listMinutes(project.id, MINUTES_PAGE_SIZE, minutes.length);
+      const page = await listMinutes(requestedProjectId, MINUTES_PAGE_SIZE, minutes.length);
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
       setMinutes((prev) => {
         const seen = new Set(prev.map((m) => m.id));
         const unique = page.filter((m) => !seen.has(m.id));
@@ -152,10 +173,13 @@ export function MainView({
       });
       setMinutesHasMore(page.length === MINUTES_PAGE_SIZE);
     } catch (e) {
+      if (requestId !== minutesRequestRef.current || projectIdRef.current !== requestedProjectId) return;
       setMinutesMoreError(e instanceof Error ? e.message : "過去の議事録を読み込めませんでした");
     } finally {
-      loadingMoreRef.current = false;
-      setMinutesLoadingMore(false);
+      if (requestId === minutesRequestRef.current && projectIdRef.current === requestedProjectId) {
+        loadingMoreRef.current = false;
+        setMinutesLoadingMore(false);
+      }
     }
   }, [project.id, minutes.length, minutesHasMore, minutesLoading, minutesLoadingMore]);
 
@@ -166,8 +190,12 @@ export function MainView({
   }, [loadInitialMinutes]);
 
   const refreshPipelines = useCallback(async () => {
-    try { setPipelines(await getPipelines()); }
-    catch { setPipelines([]); }
+    const requestId = ++pipelineRequestRef.current;
+    try {
+      const result = await getPipelines();
+      if (requestId === pipelineRequestRef.current) setPipelines(result);
+    }
+    catch { /* Keep the last known pipeline state during a temporary API outage. */ }
   }, []);
 
   const refreshMinutesAndPipelines = useCallback(() => {
@@ -274,8 +302,13 @@ export function MainView({
   }, [recovery?.state, recovery?.finished_at]);
 
   const handleOpenMin = async (m: Minutes, opts?: OpenMinutesOpts) => {
-    try { onOpenMinutes(await getMinutes(m.id), opts); }
-    catch { onOpenMinutes(m, opts); }
+    const requestedProjectId = project.id;
+    try {
+      const full = await getMinutes(m.id);
+      if (projectIdRef.current === requestedProjectId) onOpenMinutes(full, opts);
+    } catch {
+      if (projectIdRef.current === requestedProjectId) onOpenMinutes(m, opts);
+    }
   };
 
   // 現在録音中の session_id を pipelines から特定して context へ
@@ -289,6 +322,9 @@ export function MainView({
     (p.state === "stopping" || p.state === "transcribing"
       || p.state === "done" || p.state === "error")
   );
+  const activePipelineCount = activePipelines.filter((p) =>
+    p.state === "stopping" || p.state === "transcribing"
+  ).length;
 
   const handleDismiss = async (sid: string) => {
     try { await dismissPipeline(sid); } catch {}
@@ -329,6 +365,22 @@ export function MainView({
       {/* 録音中でも MinutesList を常に表示(過去議事録を閲覧可能) */}
       <div className="flex-1 overflow-hidden">
         <div className="h-full overflow-y-auto" key={project.id}>
+          <header className="minutes-page-header">
+            <div className="min-w-0">
+              <p className="minutes-page-kicker">{project.name}</p>
+              <div className="flex items-baseline gap-3 flex-wrap">
+                <h1>議事録</h1>
+                <span className="minutes-page-count num">{minutes.length} 件を表示</span>
+              </div>
+              <p className="minutes-page-description">会議の録音、文字起こし、要約をまとめて管理</p>
+            </div>
+            {activePipelineCount > 0 && (
+              <div className="minutes-page-activity" aria-live="polite">
+                <span className="status-dot status-dot--pulse" />
+                文字起こし中 {activePipelineCount} 件
+              </div>
+            )}
+          </header>
           <MinutesList
             minutes={minutes}
             projectId={project.id}
@@ -384,48 +436,36 @@ function StreamStatusBar({ status }: {
   };
 }) {
   const isProcessing = (status.current_chunk_audio_sec ?? 0) > 0;
-  const speed = status.avg_speed_ratio ?? 0;
   const pending = status.pending_audio_sec ?? 0;
-  const cur = status.current_chunk_audio_sec ?? 0;
   const proc = status.current_processing_sec ?? 0;
 
   return (
-    <div className="flex items-center gap-4 px-4 py-1.5 border-b border-(--border) text-[10px] text-(--t3) num">
+    <div className="stream-status-bar num">
       {isProcessing ? (
-        <span className="flex items-center gap-1.5 text-(--accent)">
+        <span className="stream-status-active">
           <span className="status-dot status-dot--pulse" />
-          {cur.toFixed(1)}秒の音声を処理中 · {proc.toFixed(1)}秒経過
+          文字起こし中 · 経過 {proc.toFixed(1)}秒
         </span>
       ) : (
-        <span className="text-(--t4)">待機中</span>
+        <span className="stream-status-idle">発話を待機中</span>
       )}
-      <span className="ml-auto flex items-center gap-3">
-        {speed > 0 && (
-          <span title="直近の処理速度(>1 で実時間より速い)">
-            速度 ×{speed.toFixed(1)}
-          </span>
-        )}
+      <span className="stream-status-metrics">
         {pending > 0 && (
           <span title="未処理の音声合計">
-            未処理 {pending.toFixed(1)}秒
+            未処理 {pending.toFixed(0)}秒
           </span>
         )}
-        <span title="キューサイズ">
-          待機中 {status.queue_size}{status.queue_maxsize ? `/${status.queue_maxsize}` : ""}
+        <span title="文字起こし待ちの音声チャンク数">
+          キュー {status.queue_size}{status.queue_maxsize ? `/${status.queue_maxsize}` : ""}件
         </span>
         {status.dropped_chunks ? (
-          <span className="text-(--warning)" title="過負荷で破棄した音声">
-            drop {status.dropped_chunks}件 ({(status.dropped_audio_sec ?? 0).toFixed(1)}秒)
+          <span className="stream-status-warning" title="過負荷で破棄した音声">
+            音声欠落 {status.dropped_chunks}件 ({(status.dropped_audio_sec ?? 0).toFixed(1)}秒)
           </span>
         ) : null}
         {status.transcribe_errors ? (
-          <span className="text-(--danger)" title="文字起こし失敗回数">
-            err {status.transcribe_errors}
-          </span>
-        ) : null}
-        {status.filtered_segments ? (
-          <span className="text-(--t3)" title="ハルシネーションとして除外した件数">
-            filter {status.filtered_segments}
+          <span className="stream-status-error" title="文字起こし失敗回数">
+            失敗 {status.transcribe_errors}
           </span>
         ) : null}
         <span>確定 {status.total_segments}件</span>

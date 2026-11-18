@@ -15,7 +15,6 @@ import {
   PROVIDER_LABELS, SUMMARIZE_PROVIDERS, CLOUD_PROVIDERS,
 } from "../lib/api";
 import { Spinner } from "../components/Spinner";
-import { Waveform } from "../components/Waveform";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { MarkdownView } from "../components/MarkdownView";
 import { Select } from "../components/Select";
@@ -252,6 +251,7 @@ export function DetailView(props: Props) {
 
   /* 要約ジョブ状態 (in-flight / done / failed / cancelled) */
   const [summaryJob, setSummaryJob] = useState<SummarizeStatus | null>(null);
+  const summaryStatusVersionRef = useRef(0);
   const [summaryBusy, setSummaryBusy] = useState(false);   // 連打debounce
   // mount 時 / minutes 確定時に in-flight ジョブが無いか確認。
   // pipeline-detail (live) モードでも minutesId が手に入った瞬間に呼ぶことで、
@@ -259,13 +259,14 @@ export function DetailView(props: Props) {
   useEffect(() => {
     if (!minutesId) return;
     let cancelled = false;
+    const version = ++summaryStatusVersionRef.current;
     (async () => {
       try {
         const st = await getSummarizeStatus(minutesId);
-        if (cancelled) return;
+        if (cancelled || version !== summaryStatusVersionRef.current) return;
         if (st.state && st.state !== "none") {
           setSummaryJob(st);
-        }
+        } else setSummaryJob(null);
       } catch {/* ignore */}
     })();
     return () => { cancelled = true; };
@@ -273,6 +274,7 @@ export function DetailView(props: Props) {
 
   const startSummarize = useCallback(async (provider?: SummarizeProvider) => {
     if (!minutesId || summaryBusy) return;
+    summaryStatusVersionRef.current += 1;
     setSummaryBusy(true);
     try {
       // 楽観的に running 状態へ。WS で確定値が来たら上書きされる。
@@ -323,9 +325,11 @@ export function DetailView(props: Props) {
       const data = (e as CustomEvent<any>).detail;
       const m = { type, data };
       if (type === "__open") {
+        const version = ++summaryStatusVersionRef.current;
         void getSummarizeStatus(minutesId).then((status) => {
-          if (!stopped && status.state && status.state !== "none") {
-            setSummaryJob(status);
+          if (!stopped && version === summaryStatusVersionRef.current
+          ) {
+            setSummaryJob(status.state && status.state !== "none" ? status : null);
           }
         }).catch(() => {});
         if (!isLive) {
@@ -392,6 +396,7 @@ export function DetailView(props: Props) {
       if (m.data?.minutes_id !== minutesId) {
         // 自分の議事録に対するイベントだけ拾う
       } else if (m.type === "summary_stage") {
+        summaryStatusVersionRef.current += 1;
         setSummaryJob((prev) => ({
           ...(prev || { minutes_id: minutesId, state: "running" as const }),
           state: prev?.state === "done" ? "done" : "running",
@@ -399,6 +404,7 @@ export function DetailView(props: Props) {
           stage_label: m.data?.stage_label ?? null,
         }));
       } else if (m.type === "summary_activity") {
+        summaryStatusVersionRef.current += 1;
         const activity = String(m.data?.activity || "").trim();
         if (activity) {
           setSummaryJob((prev) => ({
@@ -408,11 +414,13 @@ export function DetailView(props: Props) {
           }));
         }
       } else if (m.type === "summary_usage") {
+        summaryStatusVersionRef.current += 1;
         setSummaryJob((prev) => ({
           ...(prev || { minutes_id: minutesId, state: "running" as const }),
           usage: m.data?.usage ?? null,
         }));
       } else if (m.type === "summary_chunk") {
+        summaryStatusVersionRef.current += 1;
         const chunk = String(m.data.text || "");
         setSummaryJob((prev) => ({
           ...(prev || { minutes_id: minutesId, state: "running" }),
@@ -422,6 +430,7 @@ export function DetailView(props: Props) {
           error_message: null,
         }));
       } else if (m.type === "summary_done") {
+        summaryStatusVersionRef.current += 1;
         setSummaryJob({
           state: "done",
           minutes_id: minutesId,
@@ -443,6 +452,7 @@ export function DetailView(props: Props) {
           prev ? { ...prev, title: String(m.data?.title || prev.title) } : prev,
         );
       } else if (m.type === "summary_failed") {
+        summaryStatusVersionRef.current += 1;
         setSummaryJob({
           state: "failed",
           minutes_id: minutesId,
@@ -450,11 +460,13 @@ export function DetailView(props: Props) {
           error_message: m.data?.message ?? "要約生成に失敗しました",
         });
       } else if (m.type === "summary_cancelled") {
+        summaryStatusVersionRef.current += 1;
         setSummaryJob((prev) => ({
           ...(prev || { minutes_id: minutesId }),
           state: "cancelled",
         }));
       } else if (m.type === "summary_skipped") {
+        summaryStatusVersionRef.current += 1;
         setSummaryJob({
           state: "skipped",
           minutes_id: minutesId,
@@ -871,6 +883,7 @@ export function DetailView(props: Props) {
   };
 
   const canAct = !!minutesId;
+  const summaryInProgress = summaryJob?.state === "queued" || summaryJob?.state === "running";
   const canRecoverSession = isLive && !minutesId && !!sessionId
     && (stateLive === "error" || stateLive === "done");
   const isRetranscribing = !!retryStatus && retryStatus.state !== "error";
@@ -879,22 +892,20 @@ export function DetailView(props: Props) {
   const tabs: Array<["summary" | "transcript", string, number | null]> = [
     [
       "summary",
-      "Summary",
+      "要約",
       isSearching ? summaryMatchCount : (summary ? null : 0),
     ],
     [
       "transcript",
-      "Transcribe",
+      "文字起こし",
       isSearching ? matches.length : transcript.length,
     ],
   ];
 
-  const progress = playbackDuration > 0 ? (ct / playbackDuration) * 100 : 0;
-
   return (
     <div className="anim-fade-in flex flex-col h-full overflow-hidden">
       {/* Header (toolbar 風) */}
-      <div className="toolbar">
+      <div className="toolbar detail-toolbar">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <button onClick={props.onBack} className="icon-btn" title="戻る">
             <ArrowLeft size={14} weight="regular" />
@@ -973,7 +984,8 @@ export function DetailView(props: Props) {
               <ActionBtn
                 onClick={handleRetry}
                 loading={busy === "retry"}
-                title="文字起こしを再実行"
+                disabled={summaryInProgress}
+                title={summaryInProgress ? "要約が終わってから再実行できます" : "文字起こしを再実行"}
                 label="再実行"
               >
                 <ArrowsClockwise size={13} weight="regular" />
@@ -985,7 +997,13 @@ export function DetailView(props: Props) {
             <ActionBtn onClick={handleExport} loading={busy === "export"} title="ファイルに書き出し" label="書き出し">
               <DownloadSimple size={13} weight="regular" />
             </ActionBtn>
-            <ActionBtn onClick={handleDelete} loading={busy === "delete"} title="削除" danger>
+            <ActionBtn
+              onClick={handleDelete}
+              loading={busy === "delete"}
+              disabled={summaryInProgress}
+              title={summaryInProgress ? "要約が終わってから削除できます" : "削除"}
+              danger
+            >
               <Trash size={13} weight="regular" />
             </ActionBtn>
           </div>
@@ -1128,48 +1146,52 @@ export function DetailView(props: Props) {
 
       {/* Player */}
       {sessionId && playbackDuration > 0 && (
-        <div className="relative border-b border-(--border) bg-(--surface)">
-          <div className="px-4 pt-3 pb-1">
-            <Waveform level={playing ? 0.5 : 0.1} alive={playing} height={64} />
-          </div>
-          {/* progress overlay */}
-          <div className="absolute top-0 bottom-0 pointer-events-none"
-            style={{
-              left: 0,
-              width: `${progress}%`,
-              background: "color-mix(in srgb, var(--accent) 12%, transparent)",
-              borderRight: progress > 0 ? "1px solid var(--accent)" : "none",
-              transition: "width 100ms linear",
-            }} />
-          {/* seek hit area */}
-          <div className="absolute inset-0 cursor-pointer"
-            onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              seek(((e.clientX - r.left) / r.width) * playbackDuration);
-            }} />
-
-          <div className="relative flex items-center justify-between px-4 pb-2 gap-3">
-            <div className="num text-[11px] text-(--t3) shrink-0">{fmt(ct)}</div>
-            {/* Play button: bottom row の幾何学的中心に重ねる */}
-            <button
-              onClick={(e) => { e.stopPropagation(); toggle(); }}
-              className="absolute left-1/2 -bottom-2 -translate-x-1/2 -translate-y-1/2 z-10 circle-btn !w-8 !h-8 hover:opacity-80 duration-100 transition-opacity"
-              title={playing ? "一時停止" : "再生"}
-            >
-              {playing ? <Pause size={12} weight="fill" /> : <Play size={12} weight="fill" />}
-            </button>
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="num text-[11px] text-(--t3)">{fmt(playbackDuration)}</div>
-              {audioInfo && (
-                <span
-                  className="num text-[11px] text-(--t3) tabular-nums"
-                  title={audioInfo.name}
-                >
-                  {fmtBytes(audioInfo.size_bytes)}
-                </span>
-              )}
+        <div className="audio-player">
+          <button
+            type="button"
+            onClick={toggle}
+            className="audio-play-button"
+            title={playing ? "一時停止" : "再生"}
+            aria-label={playing ? "音声を一時停止" : "音声を再生"}
+          >
+            {playing ? <Pause size={16} weight="fill" /> : <Play size={16} weight="fill" />}
+          </button>
+          <div className="audio-player-main">
+            <div className="audio-player-topline">
+              <span>録音音声</span>
+              <span className="audio-player-file" title={audioInfo?.name ?? undefined}>
+                {audioInfo ? `${audioInfo.name} · ${fmtBytes(audioInfo.size_bytes)}` : ""}
+              </span>
               <PlaybackRatePill rate={rate} onChange={setRate} />
             </div>
+            <input
+              type="range"
+              className="audio-seek"
+              min={0}
+              max={playbackDuration}
+              step={0.1}
+              value={Math.min(playbackDuration, Math.max(0, ct))}
+              onChange={(e) => seek(Number(e.target.value))}
+              aria-label="音声の再生位置"
+            />
+            <div className="audio-player-time num">
+              <span>{fmt(ct)}</span>
+              <span>{fmt(playbackDuration)}</span>
+            </div>
+          </div>
+          <div className="audio-player-transport">
+            <button
+              type="button"
+              onClick={() => seek(Math.max(0, ct - 10))}
+              aria-label="10秒戻る"
+              title="10秒戻る"
+            >−10</button>
+            <button
+              type="button"
+              onClick={() => seek(Math.min(playbackDuration, ct + 10))}
+              aria-label="10秒進む"
+              title="10秒進む"
+            >+10</button>
           </div>
         </div>
       )}
@@ -1179,8 +1201,9 @@ export function DetailView(props: Props) {
         {tabs.map(([k, label, count]) => {
           const active = tab === k;
           return (
-            <button key={k} onClick={() => setTab(k)}
-              className="relative py-2.5 cursor-pointer flex items-center gap-1.5"
+            <button key={k} type="button" onClick={() => setTab(k)}
+              aria-pressed={active}
+              className="detail-tab relative py-2.5 cursor-pointer flex items-center gap-1.5"
               style={{ background: "transparent", border: "none" }}>
               <span className={`text-[12px] font-medium transition-colors ${active ? "text-(--t1)" : "text-(--t3) hover:text-(--t2)"}`}>
                 {label}
@@ -1236,7 +1259,7 @@ export function DetailView(props: Props) {
             savedSummary={summary || ""}
             savedModel={minutes?.llm_model || ""}
             job={summaryJob}
-            canAct={canAct}
+            canAct={canAct && !isRetranscribing}
             busy={summaryBusy}
             searchQuery={findOpen ? findQuery : ""}
             activeMatchIndex={tab === "summary" ? findIndex : -1}
@@ -1260,17 +1283,20 @@ export function DetailView(props: Props) {
                 const speakerLabel = seg.speaker_label || "話者?";
                 const segMatches = matches.filter((m) => m.segIndex === i);
                 return (
-                  <div
+                  <button
                     key={i}
+                    type="button"
                     onClick={() => seek(seg.start)}
-                    className="flat-row"
+                    className={`flat-row ${on ? "is-playing" : ""}`}
+                    aria-label={`${fmt(seg.start)}、${speakerLabel}、${seg.text}。音声の位置へ移動`}
+                    style={{ width: "100%", color: "inherit", font: "inherit", textAlign: "left", borderTop: 0, borderLeft: 0, borderRight: 0 }}
                   >
-                    <div className="min-w-[74px] shrink-0 flex flex-col">
+                    <span className="min-w-[74px] shrink-0 flex flex-col">
                       <span className="num text-[10px] text-(--t3)" style={{ fontWeight: 400 }}>
                         {fmt(seg.start)}
                       </span>
                       <span className="text-[10px] text-(--t3)">{speakerLabel}</span>
-                    </div>
+                    </span>
                     <span className={`text-[13px] leading-relaxed flex-1 transition-colors ${on ? "text-(--t1)" : "text-(--t2)"}`}>
                       <SegmentText
                         text={seg.text}
@@ -1280,7 +1306,7 @@ export function DetailView(props: Props) {
                         activeId={FIND_ACTIVE_ID}
                       />
                     </span>
-                  </div>
+                  </button>
                 );
               })}
             </div>

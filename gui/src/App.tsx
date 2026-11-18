@@ -408,7 +408,7 @@ function AppInner() {
                 }}
                 onOpenDeviceSettings={() => setShowDevicesGlobal(true)}
               />
-              {mode.kind !== "live" && (
+              {recording && mode.kind !== "live" && (
                 <LatestSegmentPreview onExpand={openLive} />
               )}
             </>

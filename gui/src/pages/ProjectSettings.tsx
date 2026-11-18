@@ -290,7 +290,7 @@ export function ProjectSettingsModal({ project, onClose, onSaved, onDeleted }: P
                 <button
                   type="button"
                   onClick={addDocDir}
-                  className="w-full py-1.5 text-[11px] text-(--t3) bg-transparent border border-dashed border-(--border) rounded-md cursor-pointer hover:text-(--t2) hover:border-(--border-hover) flex items-center justify-center gap-1.5 transition-all"
+                  className="w-full py-1.5 text-[11px] text-(--t3) bg-transparent border border-dashed border-(--border) rounded-md cursor-pointer hover:text-(--t2) hover:border-(--border-hover) flex items-center justify-center gap-1.5 transition-colors"
                 >
                   <Plus size={11} weight="bold" />
                   フォルダを追加
