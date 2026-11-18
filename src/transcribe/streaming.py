@@ -1157,10 +1157,12 @@ class StreamingTranscriber:
                  hallucination_cfg: dict | None = None,
                  glossary: list[str] | None = None,
                  corrections: list[tuple[str, str]] | None = None,
-                 vad_provider: str = "silero") -> None:
+                 vad_provider: str = "silero",
+                 on_preview: Callable[[dict], Awaitable[None]] | None = None) -> None:
         self.model_name = model_name
         self.language = language
         self._on_segment = on_segment
+        self._on_preview = on_preview
         self._session_id = session_id
         self._vad_provider = (vad_provider or "silero").lower()
         self._chunker = self._build_chunker(chunker_kwargs or {})
@@ -1730,6 +1732,7 @@ class StreamingTranscriber:
             return
         chunk_dur = len(audio) / SAMPLE_RATE
         speaker_meta: dict | None = None
+        preview_start: float | None = None
         is_active_generation = generation == self._active_generation
         if is_active_generation:
             self._current_chunk_audio_sec = chunk_dur
@@ -1774,25 +1777,6 @@ class StreamingTranscriber:
                     chunk_dur,
                 )
                 return
-            try:
-                speaker_meta = speaker_memory.identify(
-                    audio,
-                    SAMPLE_RATE,
-                    session_id=self._session_id,
-                    start_sec=start_offset,
-                    end_sec=start_offset + chunk_dur,
-                )
-            except Exception as e:
-                logger.warning("speaker identify failed: %s", e)
-            if generation != self._active_generation:
-                logger.info(
-                    "Discarding stale transcribe result after speaker identify "
-                    "(gen=%d, active=%d, audio=%.1fs)",
-                    generation,
-                    self._active_generation,
-                    chunk_dur,
-                )
-                return
             new_segments: list[dict] = []
             filtered_segments = 0
             for seg in result.get("segments", []):
@@ -1831,6 +1815,37 @@ class StreamingTranscriber:
                     "end": round(start_offset + float(seg.get("end", 0.0)), 2),
                     "text": text,
                     "words": words,
+                })
+            if new_segments and self._on_preview is not None:
+                with self._worker_lock:
+                    if generation == self._active_generation:
+                        preview_start = new_segments[0]["start"]
+                        self._emit_preview({
+                            "start": preview_start,
+                            "text": " ".join(segment["text"] for segment in new_segments),
+                        })
+            try:
+                if new_segments:
+                    speaker_meta = speaker_memory.identify(
+                        audio,
+                        SAMPLE_RATE,
+                        session_id=self._session_id,
+                        start_sec=start_offset,
+                        end_sec=start_offset + chunk_dur,
+                    )
+            except Exception as e:
+                logger.warning("speaker identify failed: %s", e)
+            if generation != self._active_generation:
+                logger.info(
+                    "Discarding stale transcribe result after speaker identify "
+                    "(gen=%d, active=%d, audio=%.1fs)",
+                    generation,
+                    self._active_generation,
+                    chunk_dur,
+                )
+                return
+            for segment in new_segments:
+                segment.update({
                     "speaker_id": (speaker_meta or {}).get("speaker_id"),
                     "speaker_label": (speaker_meta or {}).get("speaker_label"),
                     "speaker_confidence": (speaker_meta or {}).get("speaker_confidence"),
@@ -1869,12 +1884,24 @@ class StreamingTranscriber:
             self._transcribe_errors += 1
             logger.error("Streaming transcribe failed: %s", e)
         finally:
+            if preview_start is not None:
+                self._emit_preview({"start": preview_start, "text": ""})
             # 進捗トラッキングをリセット + pending を減算
             if is_active_generation and generation == self._active_generation:
                 self._current_chunk_started_at = None
                 self._current_chunk_audio_sec = 0.0
             with self._pending_lock:
                 self._pending_audio_sec = max(0.0, self._pending_audio_sec - chunk_dur)
+
+    def _emit_preview(self, preview: dict) -> None:
+        if self._on_preview is None or self._loop is None or self._loop.is_closed():
+            return
+        notification = self._on_preview(preview)
+        try:
+            asyncio.run_coroutine_threadsafe(notification, self._loop)
+        except RuntimeError:
+            if asyncio.iscoroutine(notification):
+                notification.close()
 
     def _emit(self, segment: dict) -> None:
         if self._on_segment is None or self._loop is None:

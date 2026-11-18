@@ -520,7 +520,6 @@ async def _stream_levels() -> None:
     last_status = 0.0
     last_stream = 0.0
     last_watchdog = 0.0
-    last_level_value = -1.0  # 初回は必ず送信
     reminder_enabled, reminder_silence_sec, reminder_level_threshold = _stop_forget_reminder_settings()
     silent_since: float | None = None
     reminded_in_current_silence = False
@@ -541,15 +540,16 @@ async def _stream_levels() -> None:
 
         now = _time.monotonic()
 
-        # audio_level: 値変化が小さい時はスキップ
-        if (now - last_level) >= 0.2 * scale:
-            level_rounded = round(_latest_level, 3)
-            if abs(level_rounded - last_level_value) >= 0.01 or last_level_value < 0:
-                await ws_manager.broadcast({
-                    "type": "audio_level",
-                    "data": {"mic": 0.0 if _recording_paused else level_rounded, "session_id": sid},
-                })
-                last_level_value = level_rounded
+        # Fixed cadence so the meter also shows elapsed time and silence.
+        if (now - last_level) >= 0.1 * scale:
+            await ws_manager.broadcast({
+                "type": "audio_level",
+                "data": {
+                    "session_id": sid,
+                    "mic": 0.0 if _recording_paused else round(_latest_level, 3),
+                    "level": 0.0 if _recording_paused else round(_combined_level(), 3),
+                },
+            })
             last_level = now
 
             # 一度でも有効音声を検出したらフラグ立て (mic / system のどちらかでも OK)
@@ -682,6 +682,16 @@ def _make_emit_segment(session_id: str):
             })
         except Exception as e:
             logger.error("emit_segment failed [%s]: %s", session_id, e)
+    return emit
+
+
+def _make_emit_preview(session_id: str):
+    async def emit(preview: dict) -> None:
+        if session_id == _active_session_id:
+            await ws_manager.broadcast({
+                "type": "transcript_preview",
+                "data": {**preview, "session_id": session_id},
+            })
     return emit
 
 
@@ -1079,10 +1089,15 @@ def _start_live_transcriber(
     model_name = config.get("whisper", "model", default="medium")
     streaming_cfg = config.get("whisper", "streaming", default={}) or {}
     vad_provider = str(streaming_cfg.get("vad_provider", "silero")).lower()
+    # Keep long batch windows for retranscription. Live capture cuts smaller
+    # chunks so continuous speech doesn't leave the screen empty for 12 seconds.
+    mode = config.get("whisper", "performance", "mode", default="auto")
+    live_max_ms = 8000 if mode == "eco" else 4500
     chunker_kwargs: dict = {
-        "silence_duration_ms": streaming_cfg.get("silence_duration_ms", 500),
-        "min_chunk_ms": streaming_cfg.get("min_chunk_ms", 1000),
-        "max_chunk_ms": streaming_cfg.get("max_chunk_ms", 12000),
+        "silence_duration_ms": min(400, int(streaming_cfg.get("silence_duration_ms", 500))),
+        "min_chunk_ms": min(500, int(streaming_cfg.get("min_chunk_ms", 1000))),
+        "max_chunk_ms": min(live_max_ms, int(streaming_cfg.get("max_chunk_ms", 12000))),
+        "smart_cut_lookback_ms": 750,
     }
     if vad_provider == "silero":
         chunker_kwargs["threshold"] = float(streaming_cfg.get("silero_threshold", 0.5))
@@ -1096,6 +1111,7 @@ def _start_live_transcriber(
         model_name=model_name,
         language=config.get("whisper", "language", default="ja"),
         on_segment=_make_emit_segment(session_id),
+        on_preview=_make_emit_preview(session_id),
         session_id=session_id,
         chunker_kwargs=chunker_kwargs,
         # 録音中のバックプレッシャで欠落しないよう queue は無制限で運用する。
