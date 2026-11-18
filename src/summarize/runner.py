@@ -199,6 +199,8 @@ class SummaryRunner:
         self._worker_task = asyncio.create_task(
             self._worker(), name="summary-runner"
         )
+        for minutes_id, provider_name in list(self._durable_phase_b.items()):
+            self._schedule_phase_b(minutes_id, provider_name, persist=False)
         logger.info("SummaryRunner started")
 
     async def shutdown(self) -> None:
@@ -420,6 +422,35 @@ class SummaryRunner:
             self._durable_jobs[minutes_id] = provider_name
             return self._persist_pending_jobs()
         return self.enqueue(minutes_id)
+
+    def pending_provider(self, minutes_id: str) -> str | None:
+        """復元前でも、永続キューに記録された provider を取得する。"""
+        for jobs in (self._durable_phase_b, self._durable_jobs):
+            if minutes_id in jobs and jobs[minutes_id]:
+                return jobs[minutes_id]
+        try:
+            payload = json.loads(SUMMARY_QUEUE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        for key in ("phase_b", "jobs"):
+            entries = payload.get(key, [])
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                if isinstance(item, dict) and str(item.get("minutes_id") or "") == minutes_id:
+                    provider = item.get("provider")
+                    if provider:
+                        return str(provider)
+        return None
+
+    def persist_phase_b_intent(
+        self, minutes_id: str, provider_name: str | None
+    ) -> bool:
+        """要約保存と辞書整理の間で落ちても後段処理を復元できるよう先に記録する。"""
+        self._durable_phase_b[minutes_id] = provider_name
+        return self._persist_pending_jobs()
 
     def get_status(self, minutes_id: str) -> JobStatus | None:
         return self._statuses.get(minutes_id)
@@ -812,10 +843,25 @@ class SummaryRunner:
 
         # 要約本体 (タイトルセクション無し、概要〜議論ハイライトのみ)
         summary_body = result.text
+        temporary_draft_path = draft_path.with_suffix(".md.tmp")
         try:
-            draft_path.write_text(summary_body, encoding="utf-8")
+            with temporary_draft_path.open("w", encoding="utf-8") as draft_file:
+                draft_file.write(summary_body)
+                draft_file.flush()
+                os.fsync(draft_file.fileno())
+            os.replace(temporary_draft_path, draft_path)
         except Exception as e:
             logger.warning("[summary] failed to write draft (%s): %s", minutes_id, e)
+            try:
+                temporary_draft_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # DB保存より先に後段ジョブを記録する。起動時には要約が空ならこの
+        # intent を捨てて要約ジョブを再開し、要約があれば辞書整理を再開する。
+        phase_b_persisted = self.persist_phase_b_intent(
+            minutes_id, result.provider
+        )
 
         new_title: str | None = None
         try:
@@ -826,6 +872,8 @@ class SummaryRunner:
             )
         except Exception as e:
             logger.exception("[summary] DB update failed: %s", e)
+            self._durable_phase_b.pop(minutes_id, None)
+            self._persist_pending_jobs()
             self._mark_failed(
                 status, SummaryErrorCode.UNKNOWN.value, f"DB更新に失敗: {e}"
             )
@@ -833,6 +881,8 @@ class SummaryRunner:
             return
 
         if not saved:
+            self._durable_phase_b.pop(minutes_id, None)
+            self._persist_pending_jobs()
             # The minute may have been deleted while generation was running.
             # Do not report success for a result that was never persisted.
             try:
@@ -846,17 +896,15 @@ class SummaryRunner:
             await self._broadcast_failed(status, job)
             return
 
-        # DB更新成功 → draft削除
-        try:
-            if draft_path.exists():
-                draft_path.unlink()
-        except Exception:
-            pass
-
-        # DB に要約が入った時点で後段処理も永続化する。タイトル生成中に終了しても、
-        # 再起動後に辞書整理を取りこぼさない。
-        self._durable_phase_b[minutes_id] = result.provider
-        self._persist_pending_jobs()
+        # 要約DB更新後に永続化を再確認する。保存に失敗した場合は下書きを残し、
+        # 起動時に要約が既に存在すれば辞書整理の復元マーカーとして利用する。
+        if not phase_b_persisted:
+            phase_b_persisted = self._persist_pending_jobs()
+        if phase_b_persisted:
+            try:
+                draft_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         # ─── タイトル生成 (別リクエスト、失敗しても要約結果は保持) ───
         from src.config import config as _cfg
@@ -996,8 +1044,10 @@ class SummaryRunner:
                 "stage_label": "用語辞書を整理中",
             },
         })
+        completed = False
         try:
             await self._run_phase_b(minutes_id, provider_name)
+            completed = True
         except asyncio.CancelledError:
             # Shutdown cancellation keeps the durable entry for the next launch.
             raise
@@ -1005,6 +1055,11 @@ class SummaryRunner:
             logger.exception("[phase-b] unexpected failure (%s)", minutes_id)
         self._durable_phase_b.pop(minutes_id, None)
         self._persist_pending_jobs()
+        if completed:
+            try:
+                (DRAFTS_DIR / f"{minutes_id}.md").unlink(missing_ok=True)
+            except Exception:
+                pass
         await self._broadcast({
             "type": "dictionary_update_finished",
             "data": {"minutes_id": minutes_id},
@@ -1235,7 +1290,7 @@ class SummaryRunner:
 def recover_drafts() -> int:
     """``~/.seam/summary_drafts/{id}.md`` を全件チェックして DB に書き戻す。
 
-    DB の summary が空なら draft で埋める、既に値あれば draft 破棄。
+    DB の summary が空なら draft で埋め、既に値があれば辞書整理を復元する。
 
     Returns:
         リカバリ件数
@@ -1263,12 +1318,20 @@ def recover_drafts() -> int:
             continue
 
         existing_summary = str(record.get("summary") or "").strip()
+        runner = get_runner()
+        llm_model = str(record.get("llm_model") or "")
+        provider_name = (
+            llm_model.split(":", 1)[0]
+            if ":" in llm_model
+            else runner.pending_provider(minutes_id)
+        )
         if existing_summary:
-            # 既に summary 入っている → draft破棄
-            try:
-                draft_path.unlink()
-            except Exception:
-                pass
+            # 要約保存後に落ちた場合、このdraftを辞書整理の復元マーカーに使う。
+            if runner.persist_phase_b_intent(minutes_id, provider_name):
+                try:
+                    draft_path.unlink()
+                except Exception:
+                    pass
             continue
 
         # summary 空 → draft で埋める
@@ -1277,7 +1340,8 @@ def recover_drafts() -> int:
             if not db.update_summary(minutes_id, text, llm_model="recovered_draft"):
                 logger.warning("[recovery] draft target disappeared: %s", minutes_id)
                 continue
-            draft_path.unlink()
+            if runner.persist_phase_b_intent(minutes_id, provider_name):
+                draft_path.unlink()
             recovered += 1
             logger.info("[recovery] recovered summary draft: %s", minutes_id)
         except Exception as e:
