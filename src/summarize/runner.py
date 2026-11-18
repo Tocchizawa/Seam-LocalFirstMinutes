@@ -180,6 +180,7 @@ class SummaryRunner:
         self._statuses: dict[str, JobStatus] = {}
         self._jobs: dict[str, _Job] = {}      # in-flight or queued
         self._durable_jobs: dict[str, str | None] = {}
+        self._durable_phase_b: dict[str, str | None] = {}
         self._current: _Job | None = None
         self._current_provider: SummarizerProvider | None = None
         self._phase_b_tasks: dict[str, asyncio.Task] = {}
@@ -223,9 +224,9 @@ class SummaryRunner:
         self._phase_b_tasks.clear()
 
     def _persist_pending_jobs(self) -> None:
-        """要約待ちジョブを小さなJSONファイルに保存し、再起動時に戻す。"""
+        """要約と辞書整理の待機ジョブを保存し、再起動時に戻す。"""
         try:
-            if not self._durable_jobs:
+            if not self._durable_jobs and not self._durable_phase_b:
                 SUMMARY_QUEUE_PATH.unlink(missing_ok=True)
                 return
             SUMMARY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -233,9 +234,13 @@ class SummaryRunner:
                 {"minutes_id": minutes_id, "provider": provider}
                 for minutes_id, provider in sorted(self._durable_jobs.items())
             ]
+            phase_b = [
+                {"minutes_id": minutes_id, "provider": provider}
+                for minutes_id, provider in sorted(self._durable_phase_b.items())
+            ]
             temporary_path = SUMMARY_QUEUE_PATH.with_suffix(".json.tmp")
             temporary_path.write_text(
-                json.dumps({"jobs": jobs}, ensure_ascii=False),
+                json.dumps({"jobs": jobs, "phase_b": phase_b}, ensure_ascii=False),
                 encoding="utf-8",
             )
             temporary_path.replace(SUMMARY_QUEUE_PATH)
@@ -291,9 +296,39 @@ class SummaryRunner:
             self._statuses[minutes_id] = status
             self._queue.put_nowait(job)
 
+        raw_phase_b = payload.get("phase_b", []) if isinstance(payload, dict) else []
+        if isinstance(raw_phase_b, list):
+            for item in raw_phase_b:
+                if not isinstance(item, dict):
+                    continue
+                minutes_id = str(item.get("minutes_id") or "").strip()
+                if not minutes_id or minutes_id in self._phase_b_tasks:
+                    continue
+                provider = item.get("provider")
+                provider_name = str(provider) if provider else None
+                self._durable_phase_b[minutes_id] = provider_name
+                try:
+                    record = db.get_minutes(minutes_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[summary] phase B minute lookup failed (%s): %s",
+                        minutes_id,
+                        exc,
+                    )
+                    continue
+                if record is None or not str(record.get("summary") or "").strip():
+                    self._durable_phase_b.pop(minutes_id, None)
+                    continue
+                self._schedule_phase_b(minutes_id, provider_name, persist=False)
+
         self._persist_pending_jobs()
         if self._durable_jobs:
             logger.info("[summary] restored %d pending job(s)", len(self._durable_jobs))
+        if self._durable_phase_b:
+            logger.info(
+                "[summary] restored %d pending dictionary update(s)",
+                len(self._durable_phase_b),
+            )
 
     # ─── public API ────────────────────────────────────
 
@@ -773,6 +808,11 @@ class SummaryRunner:
         except Exception:
             pass
 
+        # DB に要約が入った時点で後段処理も永続化する。タイトル生成中に終了しても、
+        # 再起動後に辞書整理を取りこぼさない。
+        self._durable_phase_b[minutes_id] = result.provider
+        self._persist_pending_jobs()
+
         # ─── タイトル生成 (別リクエスト、失敗しても要約結果は保持) ───
         from src.config import config as _cfg
 
@@ -872,14 +912,47 @@ class SummaryRunner:
         previous_phase_b = self._phase_b_tasks.get(minutes_id)
         if previous_phase_b is not None and not previous_phase_b.done():
             return
-        phase_b_task = asyncio.create_task(self._run_phase_b(minutes_id, result.provider))
-        self._phase_b_tasks[minutes_id] = phase_b_task
-        phase_b_task.add_done_callback(
+        self._schedule_phase_b(minutes_id, result.provider, persist=False)
+
+    def _schedule_phase_b(
+        self,
+        minutes_id: str,
+        provider_name: str | None,
+        *,
+        persist: bool = True,
+    ) -> None:
+        previous = self._phase_b_tasks.get(minutes_id)
+        if previous is not None and not previous.done():
+            return
+        self._durable_phase_b[minutes_id] = provider_name
+        if persist:
+            self._persist_pending_jobs()
+        task = asyncio.create_task(
+            self._run_durable_phase_b(minutes_id, provider_name),
+            name=f"summary-phase-b-{minutes_id}",
+        )
+        self._phase_b_tasks[minutes_id] = task
+        task.add_done_callback(
             lambda done, mid=minutes_id: (
                 self._phase_b_tasks.pop(mid, None)
                 if self._phase_b_tasks.get(mid) is done else None
             )
         )
+
+    async def _run_durable_phase_b(
+        self,
+        minutes_id: str,
+        provider_name: str | None,
+    ) -> None:
+        try:
+            await self._run_phase_b(minutes_id, provider_name)
+        except asyncio.CancelledError:
+            # Shutdown cancellation keeps the durable entry for the next launch.
+            raise
+        except Exception:
+            logger.exception("[phase-b] unexpected failure (%s)", minutes_id)
+        self._durable_phase_b.pop(minutes_id, None)
+        self._persist_pending_jobs()
 
     async def _run_phase_b(self, minutes_id: str, provider_name: str | None = None) -> None:
         """辞書整理 (Phase B) を fire-and-forget で実行する薄いラッパー。"""
