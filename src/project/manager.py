@@ -103,6 +103,8 @@ class ProjectManager:
         project = Project(
             id=uuid.uuid4().hex[:12],
             name=data.name,
+            emoji=data.emoji,
+            color=data.color,
             repo_path=data.repo_path,
             doc_dirs=data.doc_dirs,
             output_dir=data.output_dir,
@@ -129,8 +131,8 @@ class ProjectManager:
         for i, p in enumerate(projects):
             if p["id"] == project_id:
                 update_dict = data.model_dump(exclude_none=True)
-                if "repo_path" in data.model_fields_set:
-                    update_dict["repo_path"] = data.repo_path
+                for field in {"repo_path", "emoji", "color"} & data.model_fields_set:
+                    update_dict[field] = getattr(data, field)
                 p.update(update_dict)
                 p["updated_at"] = datetime.now(timezone.utc).isoformat()
                 # output_dir が変更されたら自動作成

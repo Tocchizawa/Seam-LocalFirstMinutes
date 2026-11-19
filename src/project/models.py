@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,7 +21,19 @@ class CorrectionPair(BaseModel):
     correct: str     # 正式表記
 
 
-class ProjectCreate(BaseModel):
+class ProjectAppearance(BaseModel):
+    emoji: str | None = Field(default=None, max_length=32)
+    color: Literal["blue", "teal", "green", "amber", "red", "pink", "purple", "slate"] | None = None
+
+    @field_validator("emoji")
+    @classmethod
+    def _validate_emoji(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ProjectCreate(ProjectAppearance):
     name: str
     repo_path: str | None = None
     doc_dirs: list[str] = Field(default_factory=list)
@@ -65,7 +78,7 @@ class ProjectCreate(BaseModel):
         return out
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(ProjectAppearance):
     name: str | None = None
     repo_path: str | None = None
     doc_dirs: list[str] | None = None
@@ -130,7 +143,7 @@ class ProjectOrder(BaseModel):
         return ids
 
 
-class Project(BaseModel):
+class Project(ProjectAppearance):
     id: str
     name: str
     repo_path: str | None = None
