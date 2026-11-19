@@ -102,6 +102,9 @@ public struct NativeSettings<Appearance: View>: View {
     @Stored private var devices: [AudioDevice] = []
     @Stored private var cliOptions: [CLIModel] = []
     @Stored private var hasProviderKey = false
+    @Stored private var checkingProvider = false
+    @Stored private var connectionResult: ServiceConnectionCheck?
+    @Stored private var connectionError: String?
     @Stored private var hasDiarizationToken = false
     @Stored private var key = ""
     @Stored private var diarizationToken = ""
@@ -124,6 +127,12 @@ public struct NativeSettings<Appearance: View>: View {
         let label: String
     }
 
+    private struct ConnectionTarget: Equatable {
+        let provider: SummaryProvider
+        let model: String?
+        let effort: String?
+    }
+
     public init(api: SeamAPI?, downloads: WhisperDownloads, page: Binding<NativeSettingsPage>, compact: Bool = false,
                 @ViewBuilder appearance: @escaping () -> Appearance) {
         _editor = StateObject(wrappedValue: SettingsEditor(api: api))
@@ -140,6 +149,13 @@ public struct NativeSettings<Appearance: View>: View {
 
     private var provider: SummaryProvider {
         SummaryProvider(rawValue: editor.document["minutes_ai.provider"]?.text ?? "") ?? .ollama
+    }
+
+    private var connectionTarget: ConnectionTarget {
+        let path = "minutes_ai." + provider.rawValue
+        return ConnectionTarget(provider: provider,
+                                model: editor.document[path + ".model"]?.text,
+                                effort: provider == .codex ? editor.document[path + ".reasoning_effort"]?.text : nil)
     }
 
     private var gutter: CGFloat { compact ? 16 : 32 }
@@ -178,6 +194,10 @@ public struct NativeSettings<Appearance: View>: View {
         .task { await editor.load() }
         .task(id: page) { await refreshPage() }
         .task(id: provider) { await refreshProvider() }
+        .onChange(of: connectionTarget) { _, _ in
+            connectionResult = nil
+            connectionError = nil
+        }
         .onDisappear { speakerAudio.clear() }
         .alert(item: $confirmation) { item in
             Alert(title: Text("\(item.label)を削除しますか"),
@@ -417,11 +437,25 @@ public struct NativeSettings<Appearance: View>: View {
             }
             if editor.api != nil {
                 SettingsRow {
-                    Button("接続をテスト") {
-                        let selectedProvider = provider
-                        act { api in editor.feedback = try await api.checkSummaryProvider(selectedProvider.rawValue).message }
+                    Button(checkingProvider ? "テスト中" : "接続をテスト", action: testConnection)
+                        .buttonStyle(SettingsActionStyle())
+                        .disabled(checkingProvider || editor.loading)
+                    if checkingProvider {
+                        ProgressView().controlSize(.small)
                     }
-                    .buttonStyle(SettingsActionStyle())
+                    if editor.changes[prefix + ".launcher_command"] != nil {
+                        Text("起動コマンドの変更は保存後に反映されます")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let message = connectionResult?.message ?? connectionError {
+                    SettingsRow {
+                        Label(message, systemImage: connectionResult?.ok == true ? "checkmark.circle" : "exclamationmark.circle")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
                 }
             }
         }
@@ -565,10 +599,6 @@ public struct NativeSettings<Appearance: View>: View {
 
     @ViewBuilder
     private var advancedSettings: some View {
-        Section("アプリ") {
-            flag("起動時に更新を確認", "app_update.check_on_startup", fallback: true)
-            flag("起動時に自動アップデート", "app_update.auto_install_on_startup", fallback: false)
-        }
         Section("デバッグ") {
             flag("デバッグモード", "debug.enabled", fallback: false)
             choose("ログレベル", "logging.level", fallback: "INFO",
@@ -671,6 +701,8 @@ public struct NativeSettings<Appearance: View>: View {
         key = ""
         cliOptions = []
         hasProviderKey = false
+        connectionResult = nil
+        connectionError = nil
         let current = provider
         do {
             if current.isCLI {
@@ -682,6 +714,24 @@ public struct NativeSettings<Appearance: View>: View {
             }
         } catch is CancellationError {} catch {
             editor.feedback = error.localizedDescription
+        }
+    }
+
+    private func testConnection() {
+        guard let api = editor.api, !checkingProvider else { return }
+        let target = connectionTarget
+        checkingProvider = true
+        connectionResult = nil
+        connectionError = nil
+        Task {
+            defer { checkingProvider = false }
+            do {
+                let result = try await api.checkSummaryProvider(target.provider.rawValue, model: target.model,
+                                                                reasoningEffort: target.effort)
+                if connectionTarget == target { connectionResult = result }
+            } catch {
+                if connectionTarget == target { connectionError = error.localizedDescription }
+            }
         }
     }
 

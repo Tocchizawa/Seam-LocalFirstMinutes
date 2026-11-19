@@ -444,7 +444,7 @@ section("[12] CodexProvider — unsupported model fallback to CLI default")
 # ─────────────────────────────────────────────────────────
 
 
-async def _codex_health_model_fallback():
+async def _codex_health_model_fallback(*, strict_model: bool = False):
     version_proc = _make_fake_proc([b"codex 0.50.0\n"], returncode=0)
     bad_model_proc = _make_fake_proc(
         [],
@@ -462,14 +462,17 @@ async def _codex_health_model_fallback():
                 "binary_path": "codex",
                 "model": "gpt-5",
             })
-            health = await p.health_check()
-    return health
+            health = await p.health_check(strict_model=strict_model)
+    return health, mock_exec.await_count
 
 
-h = asyncio.run(_codex_health_model_fallback())
+h, _ = asyncio.run(_codex_health_model_fallback())
 ok("fallback health ok", h.ok)
 ok("fallback model label", h.model == "codex-default")
 ok("fallback message note", "fallback" in (h.message or ""))
+h, attempts = asyncio.run(_codex_health_model_fallback(strict_model=True))
+ok("connection test rejects an unsupported model", not h.ok and h.code == "MODEL_UNAVAILABLE")
+ok("connection test makes no default-model request", attempts == 2)
 
 
 # ─────────────────────────────────────────────────────────

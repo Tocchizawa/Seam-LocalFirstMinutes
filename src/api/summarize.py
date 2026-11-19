@@ -236,6 +236,8 @@ async def consent_provider(provider: str) -> dict:
 
 class TestProviderRequest(BaseModel):
     provider: str = Field(min_length=1)
+    model: str | None = Field(default=None, max_length=160)
+    reasoning_effort: str | None = Field(default=None, max_length=16)
 
 
 @router.post("/api/summarize/test")
@@ -243,11 +245,19 @@ async def test_provider(body: TestProviderRequest) -> dict:
     if not is_known_provider(body.provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {body.provider}")
     ai_cfg = config.get("minutes_ai") or {}
+    overrides = body.model_dump(include={"model", "reasoning_effort"}, exclude_none=True)
+    if overrides:
+        ai_cfg = {**ai_cfg, body.provider: {**(ai_cfg.get(body.provider) or {}), **overrides}}
     try:
         provider = get_provider(body.provider, ai_cfg)
+        from src.summarize.codex import CodexProvider
+
+        if isinstance(provider, CodexProvider):
+            health = await provider.health_check(strict_model=True)
+        else:
+            health = await provider.health_check()
     except SummaryError as e:
         return {"ok": False, "code": e.code.value, "message": e.message}
-    health = await provider.health_check()
     return {
         "ok": health.ok,
         "code": health.code,

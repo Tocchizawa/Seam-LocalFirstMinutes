@@ -134,6 +134,7 @@ public struct CLIModel: Decodable, Identifiable, Sendable {
 public struct ServiceConnectionCheck: Decodable, Sendable {
     public let ok: Bool
     public let message: String
+    public let model: String?
 }
 
 public struct SpeakerProfile: Decodable, Identifiable, Sendable {
@@ -201,9 +202,15 @@ extension SeamAPI {
         let _: SettingsDocument = try await request(["api", "summarize", "consent", provider], method: "POST")
     }
 
-    public func checkSummaryProvider(_ provider: String) async throws -> ServiceConnectionCheck {
-        struct Target: Encodable { let provider: String }
-        return try await write(["api", "summarize", "test"], method: "POST", body: Target(provider: provider))
+    public func checkSummaryProvider(_ provider: String, model: String?, reasoningEffort: String?) async throws -> ServiceConnectionCheck {
+        struct Target: Encodable {
+            let provider: String
+            let model: String?
+            let reasoningEffort: String?
+        }
+        return try await write(["api", "summarize", "test"], method: "POST",
+                               body: Target(provider: provider, model: model, reasoningEffort: reasoningEffort),
+                               timeout: 150)
     }
 
     public func diarizationStatus() async throws -> DiarizationStatus {
