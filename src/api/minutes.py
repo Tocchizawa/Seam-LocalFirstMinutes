@@ -527,6 +527,7 @@ async def _start_retranscribe_minutes(
             m.get("project_id", ""),
             cancel_event,
             clear_summary=clear_summary,
+            minutes_title=m.get("title"),
             enqueue_summary_on_complete=enqueue_summary_on_complete,
         )
     )
@@ -647,6 +648,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                             cancel_event: threading.Event,
                             *,
                             clear_summary: bool,
+                            minutes_title: str | None = None,
                             enqueue_summary_on_complete: bool = False) -> None:
     """再文字起こし処理。
     - 同時実行は 1 件のみ(_retranscribe_sem)。複数キューイング時は FIFO 待ち
@@ -662,6 +664,8 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
     previous = rec_mod._pipelines.get(session_id) or {}
     rec_mod._pipelines[session_id] = {
         "session_id": session_id,
+        "minutes_id": minutes_id,
+        "minutes_title": minutes_title,
         "project_id": project_id,
         "state": "transcribing",
         "stage": Stage.QUEUED.value,

@@ -127,6 +127,7 @@ async def summarize_active() -> list[dict]:
         out.append({
             "minutes_id": mid,
             "project_id": m.get("project_id"),
+            "title": m.get("title"),
             "state": "dictionary_update" if mid in phase_b else (
                 status.state if status is not None else None
             ),
