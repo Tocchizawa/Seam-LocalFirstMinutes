@@ -70,6 +70,12 @@ private struct Workspace: View {
     @Stored private var search = ""
     @Stored private var chooseRecordingProject = false
     @Stored private var creatingProject = false
+    @Stored private var editingProject: Project?
+    @Stored private var deletingProject: Project?
+    @Stored private var importProject: Project?
+    @Stored private var choosingAudio = false
+    @Stored private var importingAudio = false
+    @Stored private var recoveringSession: String?
 
     init(api: SeamAPI) {
         _session = StateObject(wrappedValue: WorkspaceSession(api: api))
@@ -157,6 +163,28 @@ private struct Workspace: View {
                 projects.append(project)
                 select(project.id)
             }
+        }
+        .sheet(item: $editingProject) { project in
+            NewProjectForm(project: project, suggest: {
+                try await session.api.suggestGlossary(projectId: project.id)
+            }) { draft in
+                let saved = try await session.api.updateProject(project, draft: draft)
+                if let index = projects.firstIndex(where: { $0.id == saved.id }) { projects[index] = saved }
+                editingProject = nil
+            }
+        }
+        .confirmationDialog("プロジェクトを削除しますか？", isPresented: Binding(
+            get: { deletingProject != nil }, set: { if !$0 { deletingProject = nil } }
+        ), presenting: deletingProject) { project in
+            Button("削除", role: .destructive) { delete(project) }
+        } message: { project in
+            Text("「\(project.name)」を一覧から削除します。議事録は「すべての議事録」から開けます。")
+        }
+        .fileImporter(isPresented: $choosingAudio, allowedContentTypes: [.audio, .movie, .folder]) { result in
+            guard let project = importProject else { return }
+            importProject = nil
+            do { importAudio(try result.get(), into: project) }
+            catch { session.error = error.localizedDescription }
         }
     }
 
@@ -280,6 +308,9 @@ private struct Workspace: View {
                     .accessibilityAddTraits(.isHeader)
             }
             Spacer(minLength: 0)
+            if selected == nil, let project = projects.first(where: { $0.id == projectID }) {
+                projectActions(project)
+            }
             MinutesSearchField(expanded: $searchOpen, query: $search, width: compact ? 174 : 230,
                                animated: !reduceMotion, onOpen: closeDetail, onEdit: closeDetail)
                 .layoutPriority(1)
@@ -306,6 +337,10 @@ private struct Workspace: View {
                     HStack(spacing: 8) {
                         if job.state == "transcribing" { ProgressView().controlSize(.mini) }
                         Text(job.error ?? job.stageLabel ?? job.message)
+                        if job.state == "error", let id = job.sessionId {
+                            Button(recoveringSession == id ? "復旧中" : "議事録として復旧") { recover(id) }
+                                .disabled(recoveringSession != nil)
+                        }
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -381,6 +416,9 @@ private struct Workspace: View {
 
     private var backgroundWork: [BackgroundActivity] {
         var active: [BackgroundActivity] = []
+        if importingAudio {
+            active.append(.init(id: "import", name: "音声を取り込み中", symbol: "waveform"))
+        }
         if session.recovery?.state == "running" {
             active.append(.init(id: "restore", name: "録音を復元中", detail: session.recovery?.item?.date, symbol: "arrow.trianglehead.clockwise"))
         }
@@ -487,6 +525,66 @@ private struct Workspace: View {
     private func begin(in project: String) {
         chooseRecordingProject = false
         Task { await session.start(in: project) }
+    }
+
+    private func projectActions(_ project: Project) -> some View {
+        Menu("プロジェクトの操作", systemImage: "ellipsis.circle") {
+            Button("音声・録音フォルダを取り込む…") {
+                importProject = project
+                choosingAudio = true
+            }
+            .disabled(importingAudio)
+            Button("プロジェクトを編集…") { editingProject = project }
+            Button("書き出し先を開く") { NSWorkspace.shared.open(URL(fileURLWithPath: project.outputDir)) }
+            Divider()
+            Button("プロジェクトを削除…", role: .destructive) { deletingProject = project }
+                .disabled(session.capture != nil)
+        }
+        .labelStyle(.iconOnly)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("プロジェクトの操作")
+        .help("プロジェクトの操作")
+    }
+
+    private func delete(_ project: Project) {
+        Task {
+            do {
+                try await session.api.deleteProject(id: project.id)
+                projects.removeAll { $0.id == project.id }
+                if projectID == project.id { select(nil) }
+            } catch { session.error = error.localizedDescription }
+        }
+    }
+
+    private func importAudio(_ url: URL, into project: Project) {
+        guard !importingAudio else { return }
+        importingAudio = true
+        Task {
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { url.stopAccessingSecurityScopedResource() }
+                importingAudio = false
+            }
+            do {
+                let note = try await session.api.importAudio(at: url, projectId: project.id)
+                session.archiveChanged()
+                if projectID == project.id, !settingsOpen { open(note) }
+            } catch { session.error = error.localizedDescription }
+        }
+    }
+
+    private func recover(_ id: String) {
+        guard recoveringSession == nil else { return }
+        recoveringSession = id
+        Task {
+            defer { recoveringSession = nil }
+            do {
+                try await session.api.recoverMinutes(sessionId: id)
+                session.archiveChanged()
+            } catch { session.error = error.localizedDescription }
+        }
     }
 
     private func reorder(_ order: [String]) {

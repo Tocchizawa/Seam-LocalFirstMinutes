@@ -6,13 +6,16 @@ public struct ProjectDraft: Encodable, Sendable {
     public let repoPath: String?
     public let docDirs: [String]
     public let glossary: [String]
+    public let corrections: [ProjectCorrection]?
 
-    public init(name: String, outputDir: String, repoPath: String? = nil, docDirs: [String] = [], glossary: [String] = []) {
+    public init(name: String, outputDir: String, repoPath: String? = nil, docDirs: [String] = [], glossary: [String] = [],
+                corrections: [ProjectCorrection]? = nil) {
         self.name = name
         self.outputDir = outputDir
         self.repoPath = repoPath
         self.docDirs = docDirs
         self.glossary = glossary
+        self.corrections = corrections
     }
 }
 
@@ -37,6 +40,59 @@ extension SeamAPI {
 
     public func createProject(_ draft: ProjectDraft) async throws -> Project {
         try await write(["api", "projects"], method: "POST", body: draft)
+    }
+
+    public func updateProject(_ previous: Project, draft: ProjectDraft) async throws -> Project {
+        var fields = SettingsDocument()
+        if draft.name != previous.name { fields["name"] = .text(draft.name) }
+        if draft.outputDir != previous.outputDir { fields["output_dir"] = .text(draft.outputDir) }
+        if draft.repoPath != previous.repoPath { fields["repo_path"] = draft.repoPath.map(SettingValue.text) ?? .null }
+        if draft.docDirs != previous.docDirs ?? [] { fields["doc_dirs"] = .values(draft.docDirs.map(SettingValue.text)) }
+        if draft.glossary != previous.glossary ?? [] { fields["glossary"] = .values(draft.glossary.map(SettingValue.text)) }
+        if let corrections = draft.corrections, corrections != previous.corrections ?? [] {
+            fields["corrections"] = .values(corrections.map { .fields(["wrong": .text($0.wrong), "correct": .text($0.correct)]) })
+        }
+        guard !fields.isEmpty else { return previous }
+        return try await write(["api", "projects", previous.id], method: "PUT", body: fields)
+    }
+
+    public func deleteProject(id: String) async throws {
+        let _: Receipt = try await request(["api", "projects", id], method: "DELETE")
+    }
+
+    public func importAudio(at url: URL, projectId: String) async throws -> Minutes {
+        struct Import: Encodable { let projectId: String; let sourcePath: String }
+        struct Imported: Decodable { let minutes: Minutes }
+        let result: Imported = try await write(["api", "minutes", "import-audio"], method: "POST",
+                                             body: Import(projectId: projectId, sourcePath: url.path), timeout: 240)
+        return result.minutes
+    }
+
+    public func recoverMinutes(sessionId: String) async throws {
+        let _: Receipt = try await request(["api", "recording", "sessions", sessionId, "recover"],
+                                          method: "POST", timeout: 240)
+    }
+
+    public func suggestGlossary(projectId: String) async throws -> [String] {
+        struct Job: Decodable {
+            struct Suggestion: Decodable { let term: String }
+            struct Problem: Decodable { let message: String }
+            let jobId: String
+            let state: String
+            let suggestions: [Suggestion]?
+            let error: Problem?
+        }
+        let path = ["api", "projects", projectId, "glossary", "auto-generate"]
+        let started: Job = try await request(path, method: "POST")
+        while true {
+            try await Task.sleep(for: .seconds(1))
+            let job: Job = try await request(path + [started.jobId])
+            switch job.state {
+            case "done": return job.suggestions?.map(\.term) ?? []
+            case "error": throw BackendError(status: 0, code: nil, message: job.error?.message ?? "用語集の抽出に失敗しました。")
+            default: continue
+            }
+        }
     }
 
     public func audioAvailable(in sessionId: String) async throws -> Bool {

@@ -17,6 +17,26 @@ struct CapturePane: View {
     var body: some View {
         if let capture = session.capture {
             VStack(spacing: 16) {
+                if let reminder = session.idleReminder, capture.phase == .running {
+                    HStack(spacing: 8) {
+                        Label("\(reminder.silentForSec)秒間、音声入力がありません", systemImage: "bell")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            session.idleReminder = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("録音の通知を閉じる")
+                    }
+                    .font(.callout)
+                    .padding(.leading, 12)
+                    .padding(.trailing, 3)
+                    .padding(.vertical, 3)
+                    .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 9))
+                }
                 CaptureTranscript(rows: session.transcript.segments + session.transcript.draftSegments,
                                   expanded: expanded, deferred: capture.deferred, tint: red)
                     .scrollEdgeBar { header(capture) }

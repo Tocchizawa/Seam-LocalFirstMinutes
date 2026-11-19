@@ -41,12 +41,32 @@ public struct NewProjectForm: View {
     @Stored private var folder: Folder = .output
     @Stored private var saving = false
     @Stored private var problem: String?
+    @Stored private var corrections: [Correction] = []
+    @Stored private var suggestions: [String] = []
+    @Stored private var suggesting = false
 
     private enum Folder { case output, repo, documents }
+    private struct Correction: Identifiable {
+        let id = UUID()
+        var wrong: String
+        var correct: String
+    }
+
+    private let project: Project?
+    private let suggest: (@MainActor () async throws -> [String])?
     private let create: @MainActor (ProjectDraft) async throws -> Void
 
-    public init(create: @escaping @MainActor (ProjectDraft) async throws -> Void) {
+    public init(project: Project? = nil, suggest: (@MainActor () async throws -> [String])? = nil,
+                create: @escaping @MainActor (ProjectDraft) async throws -> Void) {
+        self.project = project
+        self.suggest = suggest
         self.create = create
+        _name = Stored(initialValue: project?.name ?? "")
+        _output = Stored(initialValue: project?.outputDir ?? "")
+        _repo = Stored(initialValue: project?.repoPath ?? "")
+        _terms = Stored(initialValue: project?.glossary?.joined(separator: "\n") ?? "")
+        _documents = Stored(initialValue: project?.docDirs ?? [])
+        _corrections = Stored(initialValue: (project?.corrections ?? []).map { Correction(wrong: $0.wrong, correct: $0.correct) })
     }
 
     public var body: some View {
@@ -87,6 +107,43 @@ public struct NewProjectForm: View {
                                     .padding(3)
                                     .overlay { RoundedRectangle(cornerRadius: 5).strokeBorder(.quaternary) }
                                     .accessibilityLabel("用語集、1行に1語")
+                                if let suggest {
+                                    Button(suggesting ? "抽出中" : "保存済みの資料から候補を抽出") {
+                                        suggesting = true
+                                        problem = nil
+                                        Task {
+                                            defer { suggesting = false }
+                                            do {
+                                                let existing = Set(terms.split(whereSeparator: \.isNewline).map { cleaned(String($0)) })
+                                                suggestions = try await suggest().filter { !existing.contains($0) }
+                                                if suggestions.isEmpty { problem = "新しい用語候補はありませんでした。" }
+                                            } catch { problem = error.localizedDescription }
+                                        }
+                                    }
+                                    .disabled(suggesting)
+                                    if !suggestions.isEmpty {
+                                        Text(suggestions.joined(separator: "、")).font(.callout)
+                                        Button("候補を追加") {
+                                            terms = ([terms].filter { !$0.isEmpty } + suggestions).joined(separator: "\n")
+                                            suggestions = []
+                                        }
+                                    }
+                                }
+                            }
+                            if project != nil {
+                                field("誤転写の補正") {
+                                    ForEach($corrections) { $rule in
+                                        HStack {
+                                            TextField("誤表記", text: $rule.wrong)
+                                            TextField("正しい表記", text: $rule.correct)
+                                            Button { corrections.removeAll { $0.id == rule.id } } label: {
+                                                Image(systemName: "minus.circle")
+                                            }
+                                            .accessibilityLabel("補正を削除")
+                                        }
+                                    }
+                                    Button("補正を追加") { corrections.append(Correction(wrong: "", correct: "")) }
+                                }
                             }
                         }
                         .padding(.top, 12)
@@ -102,7 +159,7 @@ public struct NewProjectForm: View {
             .defaultScrollAnchor(.top)
             .scrollBounceBehavior(.basedOnSize)
             .scrollEdgeBar {
-                Text("新規プロジェクト")
+                Text(project == nil ? "新規プロジェクト" : "プロジェクトを編集")
                     .font(.system(size: 21, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -118,7 +175,7 @@ public struct NewProjectForm: View {
                 Button("キャンセル") { dismiss() }
                     .disabled(saving)
                     .keyboardShortcut(.cancelAction)
-                Button(saving ? "作成中" : "作成", action: submit)
+                Button(saving ? "保存中" : (project == nil ? "作成" : "保存"), action: submit)
                     .buttonStyle(.borderedProminent)
                     .disabled(saving || cleaned(name).isEmpty || cleaned(output).isEmpty)
                     .keyboardShortcut(.defaultAction)
@@ -177,10 +234,17 @@ public struct NewProjectForm: View {
         saving = true
         problem = nil
         let repository = cleaned(repo)
+        let rules = corrections.map { ProjectCorrection(wrong: cleaned($0.wrong), correct: cleaned($0.correct)) }
+        guard rules.allSatisfy({ !$0.wrong.isEmpty && !$0.correct.isEmpty }) else {
+            problem = "補正の誤表記と正しい表記を入力してください。"
+            saving = false
+            return
+        }
         let draft = ProjectDraft(name: cleaned(name), outputDir: cleaned(output),
                                  repoPath: repository.isEmpty ? nil : repository,
                                  docDirs: documents,
-                                 glossary: terms.split(whereSeparator: \.isNewline).map { cleaned(String($0)) }.filter { !$0.isEmpty })
+                                 glossary: terms.split(whereSeparator: \.isNewline).map { cleaned(String($0)) }.filter { !$0.isEmpty },
+                                 corrections: project == nil ? nil : rules)
         Task {
             defer { saving = false }
             do { try await create(draft) }

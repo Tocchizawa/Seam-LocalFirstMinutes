@@ -4,6 +4,20 @@ public struct Project: Decodable, Identifiable, Sendable {
     public let id: String
     public let name: String
     public let outputDir: String
+    public let repoPath: String?
+    public let docDirs: [String]?
+    public let glossary: [String]?
+    public let corrections: [ProjectCorrection]?
+}
+
+public struct ProjectCorrection: Codable, Equatable, Sendable {
+    public let wrong: String
+    public let correct: String
+
+    public init(wrong: String, correct: String) {
+        self.wrong = wrong
+        self.correct = correct
+    }
 }
 
 public struct Minutes: Decodable, Identifiable, Sendable {
@@ -134,9 +148,15 @@ public struct RecoveryStatus: Decodable, Sendable {
     public let recovered: Int
 }
 
+public struct RecordingIdleReminder: Decodable, Sendable {
+    public let sessionId: String
+    public let silentForSec: Int
+}
+
 public enum BackendEvent: Decodable, Sendable {
     case recording(RecordingUpdate)
     case stopped(RecordingResult)
+    case recordingIdle(RecordingIdleReminder)
     case level(AudioLevel)
     case draft(TranscriptDraft)
     case segment(TranscriptSegment)
@@ -153,6 +173,8 @@ public enum BackendEvent: Decodable, Sendable {
             self = .recording(try container.decode(RecordingUpdate.self, forKey: .data))
         case "recording_stopped":
             self = .stopped(try container.decode(RecordingResult.self, forKey: .data))
+        case "recording_idle_reminder":
+            self = .recordingIdle(try container.decode(RecordingIdleReminder.self, forKey: .data))
         case "audio_level":
             self = .level(try container.decode(AudioLevel.self, forKey: .data))
         case "transcript_preview":

@@ -1,6 +1,7 @@
-import Foundation
+import AppKit
 import SeamCore
 import SwiftUI
+import UserNotifications
 
 @MainActor
 final class WorkspaceSession: ObservableObject {
@@ -23,10 +24,12 @@ final class WorkspaceSession: ObservableObject {
     @Published private(set) var summaries: [ActiveSummary] = []
     @Published private(set) var recovery: RecoveryStatus?
     @Published private(set) var archiveRevision = 0
+    @Published var idleReminder: RecordingIdleReminder?
     @Published var error: String?
 
     private var changing = false
     private var captureRevision = 0
+    private var requestedNotifications = false
 
     init(api: SeamAPI) { self.api = api }
 
@@ -49,6 +52,9 @@ final class WorkspaceSession: ObservableObject {
             let systemAudio = settings["recording.last_capture_system"]?.flag ?? true
             let result = try await api.start(projectId: projectId, micDevice: microphone, captureSystem: systemAudio)
             install(Capture(id: result.sessionId, phase: .running, deferred: result.transcriptionDeferred ?? false))
+            if settings["recording.stop_forget_reminder.enabled"]?.flag ?? true {
+                enableBackgroundReminders()
+            }
         } catch {
             // The request may have reached the service before the response was lost.
             if let status = try? await api.recordingStatus(), let current = restoredCapture(status) {
@@ -137,6 +143,10 @@ final class WorkspaceSession: ObservableObject {
         let oldID = transcript.sessionId
         capture = next
         guard oldID != next?.id else { return }
+        idleReminder = nil
+        if let oldID, Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [oldID])
+        }
         captureRevision += 1
         transcript.activate(next?.id)
         levels = []
@@ -148,6 +158,32 @@ final class WorkspaceSession: ObservableObject {
     private func restoreTranscript(for id: String) async {
         guard let saved = try? await api.segments(in: id) else { return }
         transcript.recover(saved, for: id)
+    }
+
+    private func enableBackgroundReminders() {
+        guard !requestedNotifications, Bundle.main.bundleIdentifier != nil else { return }
+        requestedNotifications = true
+        Task {
+            let center = UNUserNotificationCenter.current()
+            if await center.notificationSettings().authorizationStatus == .notDetermined {
+                _ = try? await center.requestAuthorization(options: [.alert, .sound])
+            }
+        }
+    }
+
+    private func remindWhileRecording(_ reminder: RecordingIdleReminder) {
+        guard capture?.id == reminder.sessionId, capture?.phase == .running else { return }
+        idleReminder = reminder
+        guard !NSApp.isActive, Bundle.main.bundleIdentifier != nil else { return }
+        let message = UNMutableNotificationContent()
+        message.title = "録音が続いています"
+        message.body = "\(reminder.silentForSec)秒間、音声入力がありません。"
+        message.sound = .default
+        Task {
+            guard capture?.id == reminder.sessionId, capture?.phase == .running else { return }
+            let request = UNNotificationRequest(identifier: reminder.sessionId, content: message, trigger: nil)
+            try? await UNUserNotificationCenter.current().add(request)
+        }
     }
 
     private func refreshWork() async {
@@ -198,6 +234,8 @@ final class WorkspaceSession: ObservableObject {
             guard let id = result.sessionId, id == capture?.id else { return }
             install(nil)
             if let problem = result.error { error = problem }
+        case .recordingIdle(let reminder):
+            remindWhileRecording(reminder)
         case .level(let reading):
             guard capture?.id == reading.sessionId else { return }
             levels = Array(levels.suffix(63)) + [reading.combinedLevel]
