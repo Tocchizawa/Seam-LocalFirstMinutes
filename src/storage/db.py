@@ -196,6 +196,7 @@ class Database:
         transcript: list[dict],
         *,
         clear_summary: bool = False,
+        whisper_model: str | None = None,
     ) -> bool:
         conn = self._get_conn()
         transcript_text = build_transcript_text(transcript)
@@ -203,13 +204,15 @@ class Database:
         if clear_summary:
             result = conn.execute(
                 "UPDATE minutes SET transcript = ?, transcript_text = ?, summary = '', "
-                "llm_model = '', updated_at = datetime('now') WHERE id = ?",
-                (transcript_json, transcript_text, minutes_id),
+                "llm_model = '', whisper_model = COALESCE(?, whisper_model), "
+                "updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, whisper_model, minutes_id),
             )
         else:
             result = conn.execute(
-                "UPDATE minutes SET transcript = ?, transcript_text = ?, updated_at = datetime('now') WHERE id = ?",
-                (transcript_json, transcript_text, minutes_id),
+                "UPDATE minutes SET transcript = ?, transcript_text = ?, "
+                "whisper_model = COALESCE(?, whisper_model), updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, whisper_model, minutes_id),
             )
         conn.commit()
         return result.rowcount > 0

@@ -526,6 +526,7 @@ async def _start_retranscribe_minutes(
             str(wav_path),
             m.get("project_id", ""),
             cancel_event,
+            clear_summary=clear_summary,
             enqueue_summary_on_complete=enqueue_summary_on_complete,
         )
     )
@@ -645,6 +646,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                             wav_path: str, project_id: str,
                             cancel_event: threading.Event,
                             *,
+                            clear_summary: bool,
                             enqueue_summary_on_complete: bool = False) -> None:
     """再文字起こし処理。
     - 同時実行は 1 件のみ(_retranscribe_sem)。複数キューイング時は FIFO 待ち
@@ -693,29 +695,10 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
 
     # 同時1件 FIFO
     async with _retranscribe_sem:
-        _assert_not_cancelled()
-        # 録音中なら録音終了まで待機
-        while rec_mod._active_session_id is not None:
-            _assert_not_cancelled()
-            _set_retry_stage(Stage.QUEUED, "録音中のため待機中...")
-            await rec_mod._broadcast_pipeline(session_id)
-            await asyncio.sleep(2)
-
-        _assert_not_cancelled()
-        _set_retry_stage(Stage.WHISPER_LOAD, "Whisperモデル準備中... (初回はダウンロードに数分)")
-        rec_mod._pipelines[session_id]["progress"] = 0.0
-        await rec_mod._broadcast_pipeline(session_id)
-
         from src.audio.resource_monitor import model_resource_gate
 
-        while not model_resource_gate.try_acquire_whisper():
-            _assert_not_cancelled()
-            _set_retry_stage(Stage.QUEUED, "別のローカルAI処理が終わるまで待機中...")
-            await rec_mod._broadcast_pipeline(session_id)
-            await asyncio.sleep(1)
-        whisper_lease = True
-
         loop = asyncio.get_event_loop()
+        model_name = str(config.get("whisper", "model", default="medium"))
 
         def do_transcribe() -> list[dict]:
             from src.audio.resource_monitor import ResourceMonitor
@@ -740,7 +723,6 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
                 compute_chunk_start_offset,
             )
 
-            model_name = config.get("whisper", "model", default="medium")
             repo = _resolve_repo(model_name)
             # モデル読込中の進捗表示 (worker thread → loop に投げる)
             def _emit_stage(stage: Stage, message: str | None = None) -> None:
@@ -976,20 +958,37 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             })
             await rec_mod._broadcast_pipeline(session_id)
 
+        whisper_lease = False
         try:
+            while rec_mod._active_session_id is not None:
+                _assert_not_cancelled()
+                _set_retry_stage(Stage.QUEUED, "録音中のため待機中...")
+                await rec_mod._broadcast_pipeline(session_id)
+                await asyncio.sleep(2)
+
+            _assert_not_cancelled()
+            _set_retry_stage(Stage.WHISPER_LOAD, "Whisperモデル準備中... (初回はダウンロードに数分)")
+            rec_mod._pipelines[session_id]["progress"] = 0.0
+            await rec_mod._broadcast_pipeline(session_id)
+
+            while not model_resource_gate.try_acquire_whisper():
+                _assert_not_cancelled()
+                _set_retry_stage(Stage.QUEUED, "別のローカルAI処理が終わるまで待機中...")
+                await rec_mod._broadcast_pipeline(session_id)
+                await asyncio.sleep(1)
+            whisper_lease = True
             _assert_not_cancelled()
             t0 = _time.perf_counter()
             try:
                 segments = await loop.run_in_executor(None, do_transcribe)
             finally:
-                if whisper_lease:
-                    try:
-                        from src.transcribe.streaming import unload_model
+                whisper_lease = False
+                try:
+                    from src.transcribe.streaming import unload_model
 
-                        unload_model()
-                    finally:
-                        model_resource_gate.release_whisper()
-                    whisper_lease = False
+                    unload_model()
+                finally:
+                    model_resource_gate.release_whisper()
             t1 = _time.perf_counter()
             _assert_not_cancelled()
             logger.info(
@@ -1056,7 +1055,7 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             _set_retry_stage(Stage.SAVING)
             await rec_mod._broadcast_pipeline(session_id)
             if not db.update_transcript(
-                minutes_id, segments, clear_summary=clear_summary,
+                minutes_id, segments, clear_summary=clear_summary, whisper_model=model_name,
             ):
                 raise RuntimeError("議事録が削除されたため、再文字起こし結果を保存できませんでした")
             if not rec_mod._write_session_meta(
