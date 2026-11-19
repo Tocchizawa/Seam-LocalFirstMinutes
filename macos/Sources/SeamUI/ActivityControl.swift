@@ -20,6 +20,7 @@ public struct BackgroundActivity: Identifiable {
 public struct ActivityControl: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var downloads: WhisperDownloads
     @Stored private var open = false
     private let activities: [BackgroundActivity]
@@ -33,35 +34,70 @@ public struct ActivityControl: View {
 
     public var body: some View {
         if let lead = modelActivity ?? activities.first {
+            let extra = activities.count - (modelActivity == nil ? 1 : 0)
             Button {
                 open.toggle()
             } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: lead.symbol)
-                        .font(.system(size: 13, weight: .semibold))
-                        .contentTransition(.symbolEffect(.replace))
+                HStack(spacing: 8) {
+                    activityIcon(lead)
                     Text(verbatim: lead.id == "model-download" ? "\(lead.name) を取得中" : lead.name)
                         .lineLimit(1)
-                        .frame(maxWidth: 195)
+                        .frame(maxWidth: 177, alignment: .leading)
                     if let progress = lead.progress {
                         Text(progress, format: .percent.precision(.fractionLength(0)))
+                            .fontWeight(.semibold)
                             .monospacedDigit()
-                            .foregroundStyle(Color.primary.opacity(0.82))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(width: 40, alignment: .trailing)
                             .contentTransition(.numericText())
                     }
-                    let extra = activities.count - (modelActivity == nil ? 1 : 0)
-                    if extra > 0 { Text("+\(extra)").monospacedDigit().foregroundStyle(.secondary) }
+                    if extra > 0 {
+                        Text("+\(extra)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.system(size: 12, weight: .medium))
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.19), value: lead.progress)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 12)
+                .frame(height: 36)
+                .contentShape(Capsule())
+                .glassEffect(.regular.interactive(), in: .capsule)
+                .animation(reduceMotion ? nil : SeamMotion.update, value: lead.progress)
             }
-            .buttonStyle(.glass)
+            .buttonStyle(.plain)
             .accessibilityLabel(accessibleName(lead))
             .help("バックグラウンド処理の詳細")
             .popover(isPresented: $open, arrowEdge: .bottom) {
                 popover
             }
         }
+    }
+
+    private func activityIcon(_ activity: BackgroundActivity) -> some View {
+        ZStack {
+            if activity.id == "model-download", let progress = activity.progress {
+                let tint = colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75)
+                    : Color(red: 0.14, green: 0.38, blue: 0.34)
+                Circle().strokeBorder(.primary.opacity(0.16), lineWidth: 1.5)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(tint, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .padding(0.75)
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(tint)
+            } else {
+                Image(systemName: activity.symbol)
+                    .font(.system(size: 14, weight: .medium))
+                    .contentTransition(.symbolEffect(.replace))
+            }
+        }
+        .frame(width: 17, height: 17)
+        .accessibilityHidden(true)
     }
 
     private var modelActivity: BackgroundActivity? {
