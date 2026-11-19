@@ -22,9 +22,9 @@ public struct SeamAPI: Sendable {
         self.session = session ?? URLSession(configuration: configuration)
     }
 
-    public func health() async throws -> Bool {
+    public func health(timeout: TimeInterval? = nil) async throws -> Bool {
         struct Health: Decodable { let status: String }
-        let result: Health = try await request(["health"])
+        let result: Health = try await request(["health"], timeout: timeout)
         return result.status == "ok"
     }
 
@@ -113,11 +113,13 @@ public struct SeamAPI: Sendable {
     }
 
     func request<Value: Decodable>(
-        _ path: [String], query: [URLQueryItem] = [], method: String = "GET", body: Data? = nil
+        _ path: [String], query: [URLQueryItem] = [], method: String = "GET", body: Data? = nil,
+        timeout: TimeInterval? = nil
     ) async throws -> Value {
         var request = URLRequest(url: try endpoint(path, query: query))
         request.httpMethod = method
         request.httpBody = body
+        if let timeout { request.timeoutInterval = timeout }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
 
@@ -133,11 +135,11 @@ public struct SeamAPI: Sendable {
     }
 
     func write<Value: Decodable, Body: Encodable>(
-        _ path: [String], method: String, body: Body
+        _ path: [String], method: String, body: Body, timeout: TimeInterval? = nil
     ) async throws -> Value {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
-        return try await request(path, method: method, body: encoder.encode(body))
+        return try await request(path, method: method, body: encoder.encode(body), timeout: timeout)
     }
 
     func endpoint(

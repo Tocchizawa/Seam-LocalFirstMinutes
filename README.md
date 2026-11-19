@@ -5,7 +5,7 @@
 # Seam - Local-First Minutes
 
 Seam は、**会議の録音・文字起こし・要約をローカル環境中心で完結**させる macOS 向けアプリです。  
-デスクトップUI（Tauri + React）とバックエンドAPI（FastAPI）を分離し、実運用しやすい構成で実装しています。
+デスクトップUI（SwiftUI または Tauri + React）とバックエンドAPI（FastAPI）を分離している。
 
 <p align="center">
   <img src="./docs/images/seam-main.png" alt="Seam main screen" width="100%">
@@ -18,6 +18,20 @@ DMG を開いて `Seam.app` を `Applications` にドラッグするだけでイ
 インストール後は設定画面から更新確認できます。起動時自動アップデートを有効にすると、次回起動時に更新を見つけた場合だけ自動で適用します。
 
 ビルドはご自身でも可能です。手順は [ローカル実行（開発）](#ローカル実行開発) と [ビルド](#ビルド) を参照してください。
+
+### SwiftUI 版をローカルでビルドする
+
+Apple Silicon の Mac、macOS 26 以降、Xcode Command Line Tools、`uv` が必要。
+
+```bash
+pnpm build:native
+```
+
+`macos/.build/distribution/` の `Seam Native.app` を開くか、同じフォルダの DMG からインストールする。初回起動時は同梱の `uv` が Python と依存パッケージを準備する。既存版と同じ `~/.seam` を使うため、既存版を終了してから SwiftUI 版を開く。初めて収録する前に「設定 → 録音」で入力を選び、「設定 → 文字起こし」で Whisper モデルを取得できる。
+
+Codex を使う場合は、Codex CLI にログインしたうえで「設定 → 要約」で `Codex` を選ぶ。「接続をテスト」では選択中のモデルで短いテスト応答を確認できる。起動コマンドを変更した場合は先に設定を保存する。
+
+ローカルビルドの既定はアドホック署名。配布向けビルドでは `APPLE_SIGNING_IDENTITY` を指定できる。ネイティブ版の自動更新には、署名済みの更新を配信する仕組みが別途必要。
 
 ## プロジェクトの狙い
 

@@ -2,21 +2,36 @@ import AppKit
 import SeamCore
 import SeamUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct SeamApp: App {
-    private let port: Int = {
+    @StateObject private var service = LocalBackend()
+    private let port: Int? = {
         let arguments = ProcessInfo.processInfo.arguments
         guard let index = arguments.firstIndex(of: "--port"), arguments.indices.contains(index + 1),
-              let value = Int(arguments[index + 1]), (1...65535).contains(value) else { return 18900 }
+              let value = Int(arguments[index + 1]), (1...65535).contains(value) else { return nil }
         return value
     }()
 
     var body: some Scene {
         Window("Seam", id: "workspace") {
             if #available(macOS 26.0, *) {
-                Workspace(api: SeamAPI(port: port))
-                    .frame(minWidth: 770, minHeight: 550)
+                Group {
+                    if let port {
+                        Workspace(api: SeamAPI(port: port))
+                    } else if case .ready(let api) = service.state {
+                        Workspace(api: api)
+                    } else {
+                        ServiceStartupView(service: service)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .onAppear { if port == nil { service.startOnLaunch() } }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    service.stop()
+                }
+                .frame(minWidth: 770, minHeight: 550)
             } else {
                 Text("macOS 26以降が必要です").padding(40)
             }

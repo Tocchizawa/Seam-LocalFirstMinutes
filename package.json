@@ -2,6 +2,7 @@
   "private": true,
   "scripts": {
     "dev": "cd gui && pnpm tauri dev",
+    "build:native": "bash scripts/build-native.sh",
     "build": "bash scripts/bundle-backend.sh && cd gui && pnpm tauri build && cd .. && bash scripts/create-dmg.sh",
     "backend": "uv run python -m src.main"
   }

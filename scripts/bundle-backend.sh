@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RES_DIR="${REPO_ROOT}/gui/src-tauri/resources"
+RES_DIR="${SEAM_BUNDLE_RESOURCES:-${REPO_ROOT}/gui/src-tauri/resources}"
 UV_TARGET="${RES_DIR}/uv"
 TAR_TARGET="${RES_DIR}/seam-backend.tar.gz"
 SIDECAR_TARGET="${RES_DIR}/audio-capture"
@@ -16,7 +16,7 @@ mkdir -p "${RES_DIR}"
 
 # ─── uv バイナリ ──────────────────────────────────────────────
 # ローカル開発機の uv を採用 (バージョン揃え)。CI 化したら GitHub releases から取得する想定。
-LOCAL_UV="$(command -v uv || true)"
+LOCAL_UV="${SEAM_UV_PATH:-$(command -v uv || true)}"
 if [[ -z "${LOCAL_UV}" ]]; then
   echo "[bundle] error: 'uv' がローカルに見つかりません。インストールしてください: brew install uv" >&2
   exit 1
@@ -26,7 +26,7 @@ fi
 if [[ ! -f "${UV_TARGET}" ]] || ! cmp -s "${LOCAL_UV}" "${UV_TARGET}"; then
   cp "${LOCAL_UV}" "${UV_TARGET}"
   chmod +x "${UV_TARGET}"
-  echo "[bundle] uv copied: $(${LOCAL_UV} --version)"
+  echo "[bundle] uv copied: $("${LOCAL_UV}" --version)"
 else
   echo "[bundle] uv unchanged"
 fi

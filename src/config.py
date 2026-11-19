@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-APP_DIR = Path("~/.seam").expanduser()
+APP_DIR = Path(os.environ.get("SEAM_APP_DIR") or "~/.seam").expanduser()
 
 DEFAULTS: dict[str, Any] = {
     "schema_version": 1,
@@ -219,7 +220,7 @@ DEFAULTS: dict[str, Any] = {
         "allow_remote_clients": False,
     },
     "logging": {
-        "dir": "~/.seam/logs/",
+        "dir": str(APP_DIR / "logs"),
         "level": "INFO",
         "max_size_mb": 50,
         "backup_count": 3,
