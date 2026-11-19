@@ -6,6 +6,7 @@ import SeamCore
 #endif
 
 public struct NewProjectButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let action: () -> Void
 
     public init(action: @escaping () -> Void) { self.action = action }
@@ -21,13 +22,13 @@ public struct NewProjectButton: View {
                 .contentShape(Rectangle())
                 .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
         }
-        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: .easeOut(duration: 0.13)))
+        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
         .keyboardShortcut("n", modifiers: [.command, .shift])
         .help("新規プロジェクト ⇧⌘N")
     }
 }
 
-@available(macOS 14.0, *)
+@available(macOS 15.0, *)
 public struct NewProjectForm: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
     @Environment(\.dismiss) private var dismiss
@@ -44,6 +45,8 @@ public struct NewProjectForm: View {
     @Stored private var corrections: [Correction] = []
     @Stored private var suggestions: [String] = []
     @Stored private var suggesting = false
+    @Stored private var referencesExpanded = false
+    @Stored private var scrollPosition = ScrollPosition(edge: .top)
 
     private enum Folder { case output, repo, documents }
     private struct Correction: Identifiable {
@@ -71,6 +74,13 @@ public struct NewProjectForm: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            Text(project == nil ? "新規プロジェクト" : "プロジェクトを編集")
+                .font(.system(size: 21, weight: .semibold))
+                .accessibilityAddTraits(.isHeader)
+                .padding(.horizontal, 24)
+                .padding(.top, 24)
+                .padding(.bottom, 16)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     field("プロジェクト名") {
@@ -81,7 +91,7 @@ public struct NewProjectForm: View {
                     field("書き出し先") {
                         pathField("書き出し先", placeholder: "~/Documents/議事録", value: $output, target: .output)
                     }
-                    DisclosureGroup("参照資料と用語集") {
+                    DisclosureGroup("参照資料と用語集", isExpanded: $referencesExpanded) {
                         VStack(alignment: .leading, spacing: 16) {
                             field("リポジトリ") {
                                 pathField("リポジトリ", placeholder: "任意", value: $repo, target: .repo)
@@ -153,20 +163,16 @@ public struct NewProjectForm: View {
                         Text(problem).font(.callout).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 1)
-                .padding(.vertical, 2)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 4)
             }
-            .defaultScrollAnchor(.top)
+            .defaultScrollAnchor(.top, for: .sizeChanges)
+            .scrollPosition($scrollPosition)
+            .onChange(of: referencesExpanded) { _, _ in
+                scrollPosition.scrollTo(edge: .top)
+            }
             .scrollBounceBehavior(.basedOnSize)
-            .scrollEdgeBar(blur: false) {
-                Text(project == nil ? "新規プロジェクト" : "プロジェクトを編集")
-                    .font(.system(size: 21, weight: .semibold))
-                    .accessibilityAddTraits(.isHeader)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 19)
-            }
-            .frame(maxHeight: 369)
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxHeight: .infinity)
             .textFieldStyle(.roundedBorder)
             .disabled(saving)
 
@@ -180,10 +186,13 @@ public struct NewProjectForm: View {
                     .disabled(saving || cleaned(name).isEmpty || cleaned(output).isEmpty)
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(.top, 21)
+            .padding(.horizontal, 24)
+            .padding(.top, 17)
+            .padding(.bottom, 24)
         }
-        .padding(24)
-        .frame(width: 445)
+        // Keep the sheet stationary as the optional fields expand inside the scroll view.
+        .frame(width: 445, height: 440)
+        .presentationSizing(.fitted)
         .task { nameFocused = true }
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.folder], allowsMultipleSelection: folder == .documents) {
             result in
