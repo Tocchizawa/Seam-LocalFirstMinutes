@@ -167,7 +167,7 @@ private struct CaptureTranscript: View {
     let tint: Color
 
     var body: some View {
-        ScrollView {
+        SeamScrollView {
             LazyVStack(alignment: .leading, spacing: expanded ? 22 : 16) {
                 if rows.isEmpty {
                     Text(deferred ? "録音を保存した後に文字起こしを行います" : "発話を待機中")

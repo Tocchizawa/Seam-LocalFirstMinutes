@@ -68,8 +68,7 @@ private struct Workspace: View {
     @Stored private var searchOpen = false
     @Stored private var search = ""
     @Stored private var chooseRecordingProject = false
-    @Stored private var creatingProject = false
-    @Stored private var editingProject: Project?
+    @Stored private var pageBeforeProjectEditor: ArchivePage?
     @Stored private var deletingProject: Project?
     @Stored private var importProject: Project?
     @Stored private var choosingAudio = false
@@ -92,11 +91,13 @@ private struct Workspace: View {
         case list
         case detail(Minutes)
         case settings
+        case projectEditor(Project?, UUID)
 
         enum Destination: Equatable {
             case list
             case detail(String)
             case settings
+            case projectEditor(UUID)
         }
 
         var destination: Destination {
@@ -104,6 +105,7 @@ private struct Workspace: View {
             case .list: .list
             case .detail(let note): .detail(note.id)
             case .settings: .settings
+            case .projectEditor(_, let identity): .projectEditor(identity)
             }
         }
     }
@@ -173,23 +175,6 @@ private struct Workspace: View {
         } message: {
             Text(session.error ?? "")
         }
-        .sheet(isPresented: $creatingProject) {
-            NewProjectForm { draft in
-                let project = try await session.api.createProject(draft)
-                creatingProject = false
-                projects.append(project)
-                select(project.id)
-            }
-        }
-        .sheet(item: $editingProject) { project in
-            NewProjectForm(project: project, suggest: {
-                try await session.api.suggestGlossary(projectId: project.id)
-            }) { draft in
-                let saved = try await session.api.updateProject(project, draft: draft)
-                if let index = projects.firstIndex(where: { $0.id == saved.id }) { projects[index] = saved }
-                editingProject = nil
-            }
-        }
         .confirmationDialog("プロジェクトを削除しますか？", isPresented: Binding(
             get: { deletingProject != nil }, set: { if !$0 { deletingProject = nil } }
         ), presenting: deletingProject) { project in
@@ -249,15 +234,22 @@ private struct Workspace: View {
         case .list:
             list(compact: compact)
                 .scrollEdgeBar { header(compact: compact, reading: false) }
+        case .projectEditor(let project, let identity):
+            ProjectEditor(project: project, compact: compact, suggest: project.map { existing in
+                { try await session.api.suggestGlossary(projectId: existing.id) }
+            }, cancel: closeProjectEditor) { draft in
+                try await saveProject(draft, editing: project, identity: identity)
+            }
+            .id(identity)
         }
     }
 
     private func sidebar(narrow: Bool) -> some View {
         VStack(spacing: 10) {
-            ScrollView {
+            SeamScrollView {
                 ProjectOrderList(ids: Binding(get: { projects.map(\.id) }, set: reorder)) { id in
                     if let project = projects.first(where: { $0.id == id }) {
-                        projectRow(project.name, id: project.id, symbol: "folder")
+                        projectRow(project.name, id: project.id, symbol: "folder", project: project)
                     }
                 }
                 .padding(.vertical, 4)
@@ -277,7 +269,7 @@ private struct Workspace: View {
                 .padding(.top, 7)
                 .padding(.bottom, 4)
             }
-            NewProjectButton { creatingProject = true }
+            NewProjectButton { openProjectEditor() }
                 .disabled(!session.connected)
             Button(action: openSettings) {
                 sidebarLabel("設定", symbol: "gearshape", selected: settingsOpen)
@@ -294,13 +286,23 @@ private struct Workspace: View {
         .padding(.vertical, 13)
     }
 
-    private func projectRow(_ title: String, id: String?, symbol: String) -> some View {
-        Button { select(id) } label: { sidebarLabel(title, symbol: symbol, selected: !settingsOpen && id == projectID) }
-            .buttonStyle(.plain)
+    private func projectRow(_ title: String, id: String?, symbol: String, project: Project? = nil) -> some View {
+        Button { select(id) } label: {
+            sidebarLabel(title, symbol: symbol, selected: !settingsOpen && id == projectID, project: project)
+        }
+        .buttonStyle(.plain)
     }
 
-    private func sidebarLabel(_ title: String, symbol: String, selected: Bool) -> some View {
-        Label(title, systemImage: symbol)
+    private func sidebarLabel(_ title: String, symbol: String, selected: Bool, project: Project? = nil) -> some View {
+        Label {
+            Text(verbatim: title)
+        } icon: {
+            if let project {
+                ProjectMark(emoji: project.emoji, color: project.color)
+            } else {
+                Image(systemName: symbol).frame(width: 22)
+            }
+        }
             .font(.system(size: 13, weight: .medium))
             .lineLimit(1)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -341,7 +343,7 @@ private struct Workspace: View {
     }
 
     private func list(compact: Bool) -> some View {
-        ScrollView {
+        SeamScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if session.recovery?.state == "running" {
                     HStack(spacing: 8) {
@@ -352,18 +354,8 @@ private struct Workspace: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 10)
                 }
-                ForEach(workForProject, id: \.sessionId) { job in
-                    HStack(spacing: 8) {
-                        if job.state == "transcribing" { ProgressView().controlSize(.mini) }
-                        Text(job.error ?? job.stageLabel ?? job.message)
-                        if job.state == "error", let id = job.sessionId {
-                            Button(recoveringSession == id ? "復旧中" : "議事録として復旧") { recover(id) }
-                                .disabled(recoveringSession != nil)
-                        }
-                    }
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
+                ForEach(pendingRecordings, id: \.sessionId) { job in
+                    pendingRecording(job)
                 }
 
                 if let loadError {
@@ -372,19 +364,22 @@ private struct Workspace: View {
                     Text("録音サービスに接続中").font(.callout).foregroundStyle(.secondary).padding(.vertical, 12)
                 } else if loading && minutes.isEmpty {
                     ProgressView().controlSize(.small).padding(.vertical, 12)
-                } else if minutes.isEmpty && workForProject.isEmpty {
+                } else if minutes.isEmpty && pendingRecordings.isEmpty {
                     Text(scope.term.isEmpty ? "議事録がありません" : "一致する議事録がありません")
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 12)
                 }
 
                 ForEach(minutes) { note in
+                    let job = session.work.first { $0.sessionId == note.sessionId }
+                    let summary = session.summaries.first { $0.minutesId == note.id }
+                    let activity = job.map(recordingActivity) ?? summary.map(summaryActivity)
+                    let failed = job?.state == "error"
                     Button(action: { open(note) }) {
                         VStack(alignment: .leading, spacing: 6) {
-                            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                resultText(note.highlights?.title ?? note.title)
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .lineLimit(2)
+                            HStack(spacing: 10) {
+                                rowTitle(resultText(note.highlights?.title ?? note.title), activity: activity,
+                                         failure: failed ? job?.error : nil)
                                 Spacer(minLength: 0)
                                 Text(verbatim: formattedDate(note))
                                     .font(.system(size: 11))
@@ -407,8 +402,12 @@ private struct Workspace: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
+                    .accessibilityValue(activity.map(statusText) ?? "")
                     .overlay(alignment: .bottom) {
                         Rectangle().fill(Color.primary.opacity(0.065)).frame(height: 1)
+                    }
+                    .contextMenu {
+                        if let job, failed, let id = job.sessionId { recoveryButton(id) }
                     }
                 }
 
@@ -427,10 +426,87 @@ private struct Workspace: View {
         }
     }
 
-    private var workForProject: [PipelineStatus] {
-        session.work.filter { job in
-            job.sessionId != nil && (projectID == nil || job.projectId == projectID)
+    private var pendingRecordings: [PipelineStatus] {
+        guard scope.term.isEmpty else { return [] }
+        let displayedSessions = Set(minutes.map(\.sessionId))
+        return session.work.filter { job in
+            guard let sessionId = job.sessionId else { return false }
+            return job.minutesId == nil && !displayedSessions.contains(sessionId)
+                && (projectID == nil || job.projectId == projectID)
         }
+    }
+
+    private func pendingRecording(_ job: PipelineStatus) -> some View {
+        let activity = recordingActivity(job)
+        return HStack(spacing: 10) {
+            rowTitle(Text("新しい録音"), activity: activity, failure: job.error)
+                .accessibilityElement(children: .combine)
+                .accessibilityValue(statusText(activity))
+            Spacer(minLength: 0)
+            if let date = job.startedAt.flatMap(formattedRecordingDate) {
+                Text(verbatim: date).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if job.state == "error", let id = job.sessionId { recoveryButton(id) }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(minHeight: 54)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.primary.opacity(0.065)).frame(height: 1)
+        }
+    }
+
+    private func recoveryButton(_ id: String) -> some View {
+        Button(recoveringSession == id ? "復旧中" : "議事録として復旧") { recover(id) }
+            .disabled(recoveringSession != nil)
+    }
+
+    private func rowTitle(_ title: Text, activity: BackgroundActivity?, failure: String?) -> some View {
+        HStack(spacing: 8) {
+            title.font(.system(size: 15, weight: .semibold)).lineLimit(1)
+            if let activity {
+                Group {
+                    if activity.symbol == "exclamationmark.circle" {
+                        Image(systemName: activity.symbol).font(.caption).foregroundStyle(.orange)
+                    } else if reduceMotion {
+                        Image(systemName: "clock").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ProgressView().controlSize(.mini).tint(.secondary)
+                    }
+                }
+                .frame(width: 14, height: 14)
+                .accessibilityHidden(true)
+                .help(failure ?? statusText(activity))
+            }
+        }
+    }
+
+    private func statusText(_ activity: BackgroundActivity) -> String {
+        guard let progress = activity.progress else { return activity.name }
+        return activity.name + " " + progress.formatted(.percent.precision(.fractionLength(0)))
+    }
+
+    private func recordingActivity(_ job: PipelineStatus) -> BackgroundActivity {
+        let title = job.minutesTitle ?? minutes.first { $0.sessionId == job.sessionId }?.title
+        let detail = title ?? projects.first { $0.id == job.projectId }?.name
+        let label: String
+        switch job.state {
+        case "error": label = "文字起こしに失敗"
+        case "stopping": label = "録音を保存中"
+        default: label = job.stageLabel ?? "文字起こし中"
+        }
+        return .init(id: "transcribe-\(job.sessionId ?? "")", name: label, detail: detail,
+                     symbol: job.state == "error" ? "exclamationmark.circle" : "waveform", progress: job.progress)
+    }
+
+    private func summaryActivity(_ job: ActiveSummary) -> BackgroundActivity {
+        let label = switch job.state {
+        case "queued": "要約を待機中"
+        case "dictionary_update": "用語辞書を整理中"
+        default: "要約中"
+        }
+        let detail = minutes.first { $0.id == job.minutesId }?.title ?? job.title ?? projects.first { $0.id == job.projectId }?.name
+        return .init(id: "summary-\(job.minutesId)", name: label, detail: detail, symbol: "doc.text")
     }
 
     private var backgroundWork: [BackgroundActivity] {
@@ -441,21 +517,8 @@ private struct Workspace: View {
         if session.recovery?.state == "running" {
             active.append(.init(id: "restore", name: "録音を復元中", detail: session.recovery?.item?.date, symbol: "arrow.trianglehead.clockwise"))
         }
-        for job in session.work where job.state == "transcribing" {
-            guard let id = job.sessionId else { continue }
-            let detail = projects.first { $0.id == job.projectId }?.name
-            active.append(.init(id: "transcribe-\(id)", name: job.stageLabel ?? "文字起こし中",
-                                detail: detail, symbol: "waveform", progress: job.progress))
-        }
-        for job in session.summaries {
-            let label = switch job.state {
-            case "queued": "要約を待機中"
-            case "dictionary_update": "用語辞書を整理中"
-            default: "要約中"
-            }
-            let detail = minutes.first { $0.id == job.minutesId }?.title ?? projects.first { $0.id == job.projectId }?.name
-            active.append(.init(id: "summary-\(job.minutesId)", name: label, detail: detail, symbol: "doc.text"))
-        }
+        active += session.work.filter { $0.sessionId != nil && $0.state != "error" }.map(recordingActivity)
+        active += session.summaries.map(summaryActivity)
         return active
     }
 
@@ -509,6 +572,7 @@ private struct Workspace: View {
         }
         projectID = id
         readerExpanded = false
+        pageBeforeProjectEditor = nil
         page = .list
     }
 
@@ -528,7 +592,32 @@ private struct Workspace: View {
         liveExpanded = false
         searchOpen = false
         search = ""
+        pageBeforeProjectEditor = nil
         page = .settings
+    }
+
+    private func openProjectEditor(_ project: Project? = nil) {
+        if case .projectEditor = page { return }
+        pageBeforeProjectEditor = page
+        readerExpanded = false
+        page = .projectEditor(project, UUID())
+    }
+
+    private func closeProjectEditor() {
+        page = pageBeforeProjectEditor ?? .list
+        pageBeforeProjectEditor = nil
+    }
+
+    private func saveProject(_ draft: ProjectDraft, editing project: Project?, identity: UUID) async throws {
+        if let project {
+            let saved = try await session.api.updateProject(project, draft: draft)
+            if let index = projects.firstIndex(where: { $0.id == saved.id }) { projects[index] = saved }
+            if page.destination == .projectEditor(identity) { closeProjectEditor() }
+        } else {
+            let saved = try await session.api.createProject(draft)
+            if !projects.contains(where: { $0.id == saved.id }) { projects.append(saved) }
+            if page.destination == .projectEditor(identity) { select(saved.id) }
+        }
     }
 
     private func start() {
@@ -549,7 +638,7 @@ private struct Workspace: View {
                 choosingAudio = true
             }
             .disabled(importingAudio)
-            Button("プロジェクトを編集…") { editingProject = project }
+            Button("プロジェクトを編集…") { openProjectEditor(project) }
             Button("書き出し先を開く") { NSWorkspace.shared.open(URL(fileURLWithPath: project.outputDir)) }
             Divider()
             Button("プロジェクトを削除…", role: .destructive) { deletingProject = project }
@@ -585,7 +674,7 @@ private struct Workspace: View {
             do {
                 let note = try await session.api.importAudio(at: url, projectId: project.id)
                 session.archiveChanged()
-                if projectID == project.id, !settingsOpen { open(note) }
+                if projectID == project.id, case .list = page { open(note) }
             } catch { session.error = error.localizedDescription }
         }
     }

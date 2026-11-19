@@ -3,6 +3,8 @@ import Foundation
 public struct Project: Decodable, Identifiable, Sendable {
     public let id: String
     public let name: String
+    public let emoji: String?
+    public let color: String?
     public let outputDir: String
     public let repoPath: String?
     public let docDirs: [String]?
@@ -126,12 +128,19 @@ public struct TranscriptDraft: Decodable, Equatable, Sendable {
 
 public struct PipelineStatus: Decodable, Sendable {
     public let sessionId: String?
+    public let minutesId: String?
+    public let minutesTitle: String?
     public let projectId: String?
+    public let startedAt: String?
     public let state: String
     public let message: String
     public let progress: Double?
     public let stageLabel: String?
     public let error: String?
+
+    public var showsInArchive: Bool {
+        ["stopping", "transcribing", "error"].contains(state)
+    }
 }
 
 public struct RecoveryStatus: Decodable, Sendable {

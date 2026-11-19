@@ -232,7 +232,7 @@ private struct MinutesTranscript: View {
     }
 
     var body: some View {
-        ScrollView {
+        SeamScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if sections.isEmpty {
                     readerText(AttributedString(untimed.isEmpty ? "文字起こしはまだありません" : untimed),

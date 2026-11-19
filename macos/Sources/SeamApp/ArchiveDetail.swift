@@ -191,6 +191,7 @@ struct ArchiveDetail: View {
                 TextField("タイトル", text: $edited)
             } else {
                 TextEditor(text: $edited)
+                    .overlayEditorScrollIndicators()
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 270)
                     .accessibilityLabel("要約のMarkdown")
@@ -266,7 +267,11 @@ struct ArchiveDetail: View {
 }
 
 func formattedDate(_ note: Minutes) -> String {
+    formattedRecordingDate(note.startedAt) ?? note.date
+}
+
+func formattedRecordingDate(_ timestamp: String) -> String? {
     let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-    let start = (try? iso.parse(note.startedAt)) ?? (try? Date.ISO8601FormatStyle().parse(note.startedAt))
-    return start?.formatted(.dateTime.year().month().day().hour().minute().locale(Locale(identifier: "ja_JP"))) ?? note.date
+    let start = (try? iso.parse(timestamp)) ?? (try? Date.ISO8601FormatStyle().parse(timestamp))
+    return start?.formatted(.dateTime.year().month().day().hour().minute().locale(Locale(identifier: "ja_JP")))
 }

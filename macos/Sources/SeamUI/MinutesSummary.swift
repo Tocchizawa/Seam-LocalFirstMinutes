@@ -65,7 +65,7 @@ struct MinutesSummary: View {
         GeometryReader { geometry in
             let headings = blocks.filter { $0.heading != nil }
             HStack(alignment: .top, spacing: 32) {
-                ScrollView {
+                SeamScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if blocks.isEmpty && markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Text("要約はまだありません")
@@ -101,7 +101,7 @@ struct MinutesSummary: View {
 
     private func outline(_ headings: [SummaryBlock]) -> some View {
         let active = headings.last { $0.id <= (position ?? 0) }?.id
-        return ScrollView {
+        return SeamScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(headings) { block in
                     Button {
@@ -136,7 +136,7 @@ struct MinutesSummary: View {
                 .accessibilityAddTraits(.isHeader)
                 .padding(.top, block.id == 0 ? 0 : (level <= 2 ? 13 : 5))
         case .codeBlock:
-            ScrollView(.horizontal) {
+            SeamScrollView(.horizontal) {
                 readerText(block.text, query: query, tint: tint)
                     .font(.system(.footnote, design: .monospaced))
                     .fixedSize()
@@ -183,7 +183,7 @@ struct MinutesSummary: View {
     }
 
     private func table(_ rows: [[AttributedString]]) -> some View {
-        ScrollView(.horizontal) {
+        SeamScrollView(.horizontal) {
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 0) {
                 ForEach(rows.indices, id: \.self) { row in
                     GridRow(alignment: .top) {

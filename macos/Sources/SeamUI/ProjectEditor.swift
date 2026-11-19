@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -29,12 +30,17 @@ public struct NewProjectButton: View {
 }
 
 @available(macOS 15.0, *)
-public struct NewProjectForm: View {
+public struct ProjectEditor: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var nameFocused: Bool
+    @FocusState private var emojiFocused: Bool
     @Stored private var name = ""
     @Stored private var output = ""
+    @Stored private var emoji = ""
+    @Stored private var emojiInput = ""
+    @Stored private var choosingEmoji = false
+    @Stored private var accent: ProjectAccent?
     @Stored private var repo = ""
     @Stored private var terms = ""
     @Stored private var documents: [String] = []
@@ -56,38 +62,43 @@ public struct NewProjectForm: View {
     }
 
     private let project: Project?
+    private let compact: Bool
     private let suggest: (@MainActor () async throws -> [String])?
-    private let create: @MainActor (ProjectDraft) async throws -> Void
+    private let cancel: () -> Void
+    private let save: @MainActor (ProjectDraft) async throws -> Void
 
-    public init(project: Project? = nil, suggest: (@MainActor () async throws -> [String])? = nil,
-                create: @escaping @MainActor (ProjectDraft) async throws -> Void) {
+    public init(project: Project? = nil, compact: Bool = false, suggest: (@MainActor () async throws -> [String])? = nil,
+                cancel: @escaping () -> Void, save: @escaping @MainActor (ProjectDraft) async throws -> Void) {
         self.project = project
+        self.compact = compact
         self.suggest = suggest
-        self.create = create
+        self.cancel = cancel
+        self.save = save
         _name = Stored(initialValue: project?.name ?? "")
         _output = Stored(initialValue: project?.outputDir ?? "")
+        _emoji = Stored(initialValue: project?.emoji ?? "")
+        _accent = Stored(initialValue: project?.color.flatMap(ProjectAccent.init(rawValue:)))
         _repo = Stored(initialValue: project?.repoPath ?? "")
         _terms = Stored(initialValue: project?.glossary?.joined(separator: "\n") ?? "")
         _documents = Stored(initialValue: project?.docDirs ?? [])
         _corrections = Stored(initialValue: (project?.corrections ?? []).map { Correction(wrong: $0.wrong, correct: $0.correct) })
     }
 
+    private var gutter: CGFloat { compact ? 14 : 33 }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(project == nil ? "新規プロジェクト" : "プロジェクトを編集")
-                .font(.system(size: 21, weight: .semibold))
+                .font(.system(size: compact ? 22 : 28, weight: .semibold))
                 .accessibilityAddTraits(.isHeader)
-                .padding(.horizontal, 24)
-                .padding(.top, 24)
+                .padding(.horizontal, gutter)
+                .padding(.top, 22)
                 .padding(.bottom, 16)
 
-            ScrollView {
+            SeamScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    field("プロジェクト名") {
-                        TextField("プロジェクト名", text: $name, prompt: Text("名前を入力"))
-                            .labelsHidden()
-                            .focused($nameFocused)
-                    }
+                    nameField
+                    colorField
                     field("書き出し先") {
                         pathField("書き出し先", placeholder: "~/Documents/議事録", value: $output, target: .output)
                     }
@@ -113,6 +124,7 @@ public struct NewProjectForm: View {
                             }
                             field("用語集") {
                                 TextEditor(text: $terms)
+                                    .overlayEditorScrollIndicators()
                                     .frame(height: 75)
                                     .padding(3)
                                     .overlay { RoundedRectangle(cornerRadius: 5).strokeBorder(.quaternary) }
@@ -163,8 +175,11 @@ public struct NewProjectForm: View {
                         Text(problem).font(.callout).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 4)
+                .frame(maxWidth: 590, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, gutter)
+                .padding(.top, 4)
+                .padding(.bottom, 24)
             }
             .defaultScrollAnchor(.top, for: .sizeChanges)
             .scrollPosition($scrollPosition)
@@ -176,9 +191,11 @@ public struct NewProjectForm: View {
             .textFieldStyle(.roundedBorder)
             .disabled(saving)
 
+            Divider()
+                .padding(.horizontal, gutter)
             HStack(spacing: 9) {
                 Spacer()
-                Button("キャンセル") { dismiss() }
+                Button("キャンセル", action: cancel)
                     .disabled(saving)
                     .keyboardShortcut(.cancelAction)
                 Button(saving ? "保存中" : (project == nil ? "作成" : "保存"), action: submit)
@@ -186,13 +203,10 @@ public struct NewProjectForm: View {
                     .disabled(saving || cleaned(name).isEmpty || cleaned(output).isEmpty)
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 17)
-            .padding(.bottom, 24)
+            .padding(.horizontal, gutter)
+            .padding(.vertical, 14)
         }
-        // Keep the sheet stationary as the optional fields expand inside the scroll view.
-        .frame(width: 445, height: 440)
-        .presentationSizing(.fitted)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { nameFocused = true }
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.folder], allowsMultipleSelection: folder == .documents) {
             result in
@@ -210,6 +224,127 @@ public struct NewProjectForm: View {
         }
     }
 
+    private var nameField: some View {
+        field("プロジェクト名") {
+            HStack(spacing: 8) {
+                Button {
+                    emojiInput = ""
+                    choosingEmoji.toggle()
+                } label: {
+                    HStack(spacing: 2) {
+                        ProjectMark(emoji: emoji, color: accent?.rawValue, size: 28)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 5)
+                    .frame(height: 34)
+                    .background(.primary.opacity(0.05), in: .rect(cornerRadius: 8))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
+                .accessibilityLabel("プロジェクトのアイコンを選ぶ")
+                .help("プロジェクトのアイコンを選ぶ")
+                .popover(isPresented: $choosingEmoji, arrowEdge: .bottom) { emojiPicker }
+
+                TextField("プロジェクト名", text: $name, prompt: Text("名前を入力"))
+                    .labelsHidden()
+                    .controlSize(.large)
+                    .accessibilityLabel("プロジェクト名")
+                    .focused($nameFocused)
+            }
+        }
+    }
+
+    private var colorField: some View {
+        field("色") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 30, maximum: 32), spacing: 3)], spacing: 3) {
+                colorButton(nil)
+                ForEach(ProjectAccent.allCases, id: \.self) { colorButton($0) }
+            }
+            .frame(maxWidth: 318, alignment: .leading)
+        }
+    }
+
+    private var emojiPicker: some View {
+        let symbols = ["📝", "💬", "🎙️", "📅", "📁", "📌", "🧭", "💡", "🎯", "🛠️", "💻", "🚀",
+                       "📊", "🤝", "🏢", "📚", "🎨", "⭐"]
+        return VStack(alignment: .leading, spacing: 12) {
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(33), spacing: 4), count: 6), spacing: 4) {
+                ForEach(symbols, id: \.self) { symbol in
+                    Button {
+                        emoji = symbol
+                        choosingEmoji = false
+                    } label: {
+                        Text(verbatim: symbol)
+                            .font(.system(size: 19))
+                            .frame(width: 33, height: 32)
+                            .background(.primary.opacity(emoji == symbol ? 0.11 : 0), in: .rect(cornerRadius: 7))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
+                    .accessibilityAddTraits(emoji == symbol ? .isSelected : [])
+                }
+            }
+            Divider()
+            HStack(spacing: 6) {
+                TextField("絵文字を入力", text: $emojiInput)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($emojiFocused)
+                    .accessibilityLabel("絵文字を入力")
+                    .onChange(of: emojiInput) { _, value in
+                        let symbol = String(cleaned(value).prefix(1))
+                        if symbol != value { emojiInput = symbol }
+                        if !symbol.isEmpty { emoji = symbol }
+                    }
+                    .onSubmit { choosingEmoji = false }
+                Button {
+                    emojiFocused = true
+                    Task { @MainActor in
+                        await Task.yield()
+                        NSApp.orderFrontCharacterPalette(nil)
+                    }
+                } label: {
+                    Image(systemName: "face.smiling").frame(width: 25, height: 24)
+                }
+                .accessibilityLabel("絵文字ビューアを開く")
+                .help("Macの絵文字ビューアを開く")
+            }
+            if !emoji.isEmpty {
+                Button("フォルダに戻す") {
+                    emoji = ""
+                    choosingEmoji = false
+                }
+                .buttonStyle(.link)
+            }
+        }
+        .padding(12)
+        .frame(width: 245)
+    }
+
+    private func colorButton(_ choice: ProjectAccent?) -> some View {
+        let selected = accent == choice
+        let tint = choice?.tint ?? .secondary
+        return Button { accent = choice } label: {
+            ZStack {
+                Circle().strokeBorder(tint.opacity(selected ? 0.92 : 0), lineWidth: 1.5)
+                Circle().fill(tint.opacity(choice == nil ? 0.13 : 0.86)).padding(4)
+                if choice == nil {
+                    Image(systemName: "minus")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 27, height: 27)
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
+        .accessibilityLabel(choice?.label ?? "標準色")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(choice?.label ?? "標準色")
+    }
+
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
@@ -221,6 +356,7 @@ public struct NewProjectForm: View {
         HStack(spacing: 6) {
             TextField(label, text: value, prompt: Text(placeholder))
                 .labelsHidden()
+                .accessibilityLabel(label)
             Button { choose(target) } label: {
                 Image(systemName: "folder")
                     .font(.system(size: 14))
@@ -253,10 +389,11 @@ public struct NewProjectForm: View {
                                  repoPath: repository.isEmpty ? nil : repository,
                                  docDirs: documents,
                                  glossary: terms.split(whereSeparator: \.isNewline).map { cleaned(String($0)) }.filter { !$0.isEmpty },
-                                 corrections: project == nil ? nil : rules)
+                                 corrections: project == nil ? nil : rules,
+                                 emoji: emoji.isEmpty ? nil : emoji, color: accent?.rawValue)
         Task {
             defer { saving = false }
-            do { try await create(draft) }
+            do { try await save(draft) }
             catch { problem = error.localizedDescription }
         }
     }

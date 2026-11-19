@@ -195,7 +195,7 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     private var settingsContent: some View {
-        ScrollView {
+        SeamScrollView {
             Group(sections: fields) { sections in
                 VStack(alignment: .leading, spacing: 24) {
                     ForEach(sections) { section in
@@ -474,6 +474,7 @@ public struct NativeSettings<Appearance: View>: View {
             SettingsDisclosure(title: "要約プロンプト") {
                 SettingsRow {
                     TextEditor(text: text("minutes_ai.custom_system_prompt"))
+                        .overlayEditorScrollIndicators()
                         .font(.system(size: 13))
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 112)

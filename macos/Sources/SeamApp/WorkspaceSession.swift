@@ -30,6 +30,7 @@ final class WorkspaceSession: ObservableObject {
     private var changing = false
     private var captureRevision = 0
     private var requestedNotifications = false
+    private var needsSummaryRefresh = false
 
     init(api: SeamAPI) { self.api = api }
 
@@ -119,6 +120,7 @@ final class WorkspaceSession: ObservableObject {
                     install(restoredCapture(status))
                 }
                 if cycle % 4 == 0 { await refreshWork() }
+                else if needsSummaryRefresh { await refreshSummaries() }
                 cycle += 1
             } catch {
                 if Task.isCancelled { return }
@@ -189,12 +191,17 @@ final class WorkspaceSession: ObservableObject {
     private func refreshWork() async {
         async let pipelines = api.pipelines()
         async let restoring = api.recoveryStatus()
-        async let activeSummaries = api.activeSummaries()
+        async let summaryRefresh: Void = refreshSummaries()
         if let items = try? await pipelines {
-            work = items.filter { ["transcribing", "error"].contains($0.state) }
+            work = items.filter(\.showsInArchive)
         }
         recovery = try? await restoring
-        if let active = try? await activeSummaries, active != summaries { summaries = active }
+        await summaryRefresh
+    }
+
+    private func refreshSummaries() async {
+        needsSummaryRefresh = false
+        if let active = try? await api.activeSummaries(), active != summaries { summaries = active }
     }
 
     private func listen() async {
@@ -246,11 +253,15 @@ final class WorkspaceSession: ObservableObject {
         case .pipeline(let progress):
             guard let id = progress.sessionId else { return }
             work.removeAll { $0.sessionId == id }
-            if ["transcribing", "error"].contains(progress.state) { work.insert(progress, at: 0) }
+            if progress.showsInArchive { work.insert(progress, at: 0) }
             if progress.state == "transcribing", capture?.id == id, capture?.phase == .stopping {
                 install(nil)
             }
         case .other(let type):
+            if ["summary_stage", "summary_done", "summary_failed", "summary_cancelled", "summary_skipped",
+                "dictionary_update_started", "dictionary_update_finished"].contains(type) {
+                needsSummaryRefresh = true
+            }
             if ["minutes_saved", "minutes_title_updated", "summary_done", "summary_failed", "pipeline_done", "session_recovery_finished"].contains(type) {
                 archiveChanged()
             }

@@ -3,19 +3,23 @@ import Foundation
 public struct ProjectDraft: Encodable, Sendable {
     public let name: String
     public let outputDir: String
+    public let emoji: String?
+    public let color: String?
     public let repoPath: String?
     public let docDirs: [String]
     public let glossary: [String]
     public let corrections: [ProjectCorrection]?
 
     public init(name: String, outputDir: String, repoPath: String? = nil, docDirs: [String] = [], glossary: [String] = [],
-                corrections: [ProjectCorrection]? = nil) {
+                corrections: [ProjectCorrection]? = nil, emoji: String? = nil, color: String? = nil) {
         self.name = name
         self.outputDir = outputDir
         self.repoPath = repoPath
         self.docDirs = docDirs
         self.glossary = glossary
         self.corrections = corrections
+        self.emoji = emoji
+        self.color = color
     }
 }
 
@@ -32,6 +36,7 @@ public struct SummaryJob: Decodable, Sendable {
 public struct ActiveSummary: Decodable, Equatable, Sendable {
     public let minutesId: String
     public let projectId: String?
+    public let title: String?
     public let state: String?
 }
 
@@ -46,6 +51,8 @@ extension SeamAPI {
         var fields = SettingsDocument()
         if draft.name != previous.name { fields["name"] = .text(draft.name) }
         if draft.outputDir != previous.outputDir { fields["output_dir"] = .text(draft.outputDir) }
+        if draft.emoji != previous.emoji { fields["emoji"] = draft.emoji.map(SettingValue.text) ?? .null }
+        if draft.color != previous.color { fields["color"] = draft.color.map(SettingValue.text) ?? .null }
         if draft.repoPath != previous.repoPath { fields["repo_path"] = draft.repoPath.map(SettingValue.text) ?? .null }
         if draft.docDirs != previous.docDirs ?? [] { fields["doc_dirs"] = .values(draft.docDirs.map(SettingValue.text)) }
         if draft.glossary != previous.glossary ?? [] { fields["glossary"] = .values(draft.glossary.map(SettingValue.text)) }

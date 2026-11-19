@@ -123,7 +123,7 @@ public struct ActivityControl: View {
     }
 
     private var popover: some View {
-        ScrollView {
+        SeamScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if let model = modelActivity {
                     row(model)
