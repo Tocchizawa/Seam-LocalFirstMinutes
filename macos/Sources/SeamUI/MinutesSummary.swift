@@ -218,11 +218,16 @@ func readerText(_ original: AttributedString, query: String, tint: Color) -> Tex
     return Text(text)
 }
 
-struct ReaderHoverStyle: ButtonStyle {
+public struct ReaderHoverStyle: ButtonStyle {
     let tint: Color
     let motion: Animation?
 
-    func makeBody(configuration: Configuration) -> some View {
+    public init(tint: Color, motion: Animation?) {
+        self.tint = tint
+        self.motion = motion
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
         Hoverable(label: configuration.label, pressed: configuration.isPressed, tint: tint, motion: motion)
     }
 

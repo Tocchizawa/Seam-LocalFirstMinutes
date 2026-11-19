@@ -56,7 +56,7 @@ public struct ProjectOrderList<Row: View>: View {
     }
 
     private var step: CGFloat { height + spacing }
-    private var slide: Animation? { reduceMotion || !animated ? nil : .spring(response: 0.27, dampingFraction: 0.88) }
+    private var slide: Animation? { reduceMotion || !animated ? nil : SeamMotion.reposition }
 
     private func drag(_ id: String, distance: CGFloat) {
         guard let source = ids.firstIndex(of: id), picked == nil || picked == id, ids.count > 1 else { return }

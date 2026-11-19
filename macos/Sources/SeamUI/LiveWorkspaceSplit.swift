@@ -4,6 +4,7 @@ import SwiftUI
 /// returns to the archive. The archive uses the full width when capture ends.
 public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     private let recording: Bool
     private let expanded: Bool
     private let animated: Bool
@@ -40,7 +41,10 @@ public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
                 if recording {
                     transcript(full)
                         .frame(width: full ? geometry.size.width : compactTrack, height: geometry.size.height)
-                        .transition(motion == nil ? .identity : .move(edge: .trailing).combined(with: .opacity))
+                        .background(Color.seamPaper(for: colorScheme))
+                        .clipped()
+                        .transition(motion == nil ? .identity : .move(edge: .trailing))
+                        .zIndex(1)
                 }
             }
             .animation(motion, value: recording)
@@ -49,6 +53,6 @@ public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
     }
 
     private var motion: Animation? {
-        reduceMotion || !animated ? nil : .spring(response: 0.30, dampingFraction: 0.95)
+        reduceMotion || !animated ? nil : SeamMotion.reposition
     }
 }

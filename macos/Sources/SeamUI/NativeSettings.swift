@@ -142,7 +142,7 @@ public struct NativeSettings<Appearance: View>: View {
         self.appearance = appearance
     }
 
-    private var motion: Animation? { reduceMotion ? nil : .easeOut(duration: 0.18) }
+    private var motion: Animation? { reduceMotion ? nil : SeamMotion.feedback }
     private var accent: Color {
         colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
     }
@@ -161,33 +161,12 @@ public struct NativeSettings<Appearance: View>: View {
     private var gutter: CGFloat { compact ? 16 : 32 }
 
     public var body: some View {
-        ScrollView {
-            Group(sections: fields) { sections in
-                VStack(alignment: .leading, spacing: 24) {
-                    ForEach(sections) { section in
-                        VStack(alignment: .leading, spacing: 8) {
-                            section.header
-                                .font(.system(size: 14, weight: .semibold))
-                                .accessibilityAddTraits(.isHeader)
-                            SettingsRows { section.content }
-                                .background(alignment: .top) {
-                                    Rectangle()
-                                        .fill(Color.primary.opacity(0.09))
-                                        .frame(height: 1)
-                                        .allowsHitTesting(false)
-                                }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                    .padding(.top, 16)
-                .padding(.bottom, 24)
-                .padding(.horizontal, gutter)
-            }
+        ZStack(alignment: .topLeading) {
+            settingsContent
+                .id(page)
+                .transition(.identity)
         }
-        .disabled(editor.loading || editor.saving || busy)
-        .id(page)
-        .transition(.identity)
+        .animatePageChange(for: page, enabled: !reduceMotion)
         .scrollEdgeBar { settingsHeader }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .tint(.primary)
@@ -213,6 +192,34 @@ public struct NativeSettings<Appearance: View>: View {
         } message: {
             Text("文字起こしの本文が\(provider.label)に送信されます。")
         }
+    }
+
+    private var settingsContent: some View {
+        ScrollView {
+            Group(sections: fields) { sections in
+                VStack(alignment: .leading, spacing: 24) {
+                    ForEach(sections) { section in
+                        VStack(alignment: .leading, spacing: 8) {
+                            section.header
+                                .font(.system(size: 14, weight: .semibold))
+                                .accessibilityAddTraits(.isHeader)
+                            SettingsRows { section.content }
+                                .background(alignment: .top) {
+                                    Rectangle()
+                                        .fill(Color.primary.opacity(0.09))
+                                        .frame(height: 1)
+                                        .allowsHitTesting(false)
+                                }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.top, 16)
+                .padding(.bottom, 24)
+                .padding(.horizontal, gutter)
+            }
+        }
+        .disabled(editor.loading || editor.saving || busy)
     }
 
     private var settingsHeader: some View {

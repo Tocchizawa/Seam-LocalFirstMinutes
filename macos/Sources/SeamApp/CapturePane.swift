@@ -9,7 +9,7 @@ struct CapturePane: View {
     @ObservedObject var session: WorkspaceSession
     @Binding var expanded: Bool
 
-    private var transition: Animation? { reduceMotion ? nil : .smooth(duration: 0.25) }
+    private var transition: Animation? { reduceMotion ? nil : SeamMotion.update }
     private var red: Color {
         colorScheme == .dark ? Color(red: 1, green: 0.52, blue: 0.56) : Color(red: 0.68, green: 0.12, blue: 0.20)
     }
@@ -77,7 +77,7 @@ struct CapturePane: View {
             let label = expanded ? "並行表示に戻す" : "文字起こしを全体表示"
             control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                     name: label, size: 32) {
-                withAnimation(transition) { expanded.toggle() }
+                expanded.toggle()
             }
         }
         .padding(.top, 26)
@@ -103,6 +103,7 @@ struct CapturePane: View {
                         .font(.system(size: 14, weight: .medium, design: .monospaced))
                         .contentTransition(.numericText())
                         .accessibilityLabel("経過時間 \(elapsed)")
+                        .animation(transition, value: elapsed)
                         .padding(.leading, 10)
                     Button {
                         Task { await session.toggleMicrophone() }
@@ -130,7 +131,6 @@ struct CapturePane: View {
             .disabled(capture.phase == .starting || capture.phase == .stopping)
             .animation(transition, value: capture.muted)
             .animation(transition, value: capture.phase)
-            .animation(transition, value: minutesTime(capture.elapsed))
         }
     }
 
@@ -240,7 +240,7 @@ private struct CaptureTranscript: View {
     }
 
     private func jumpToEnd() {
-        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { position.scrollTo(edge: .bottom) }
+        withAnimation(reduceMotion ? nil : SeamMotion.update) { position.scrollTo(edge: .bottom) }
     }
 }
 

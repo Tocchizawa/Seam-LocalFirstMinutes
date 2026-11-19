@@ -156,7 +156,7 @@ struct WhisperModelRows: View {
     let remove: (WhisperModels.Model) -> Void
 
     private let featuredIDs = ["small", "medium", "large-v3-turbo"]
-    private var motion: Animation? { reduceMotion ? nil : .easeOut(duration: 0.14) }
+    private var motion: Animation? { reduceMotion ? nil : SeamMotion.update }
 
     var body: some View {
         if downloads.models.isEmpty {

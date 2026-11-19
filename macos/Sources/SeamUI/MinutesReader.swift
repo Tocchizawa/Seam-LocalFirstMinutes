@@ -11,7 +11,6 @@ public struct MinutesReader: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var tabIndicator
     @Stored private var summaryPosition: Int?
     @Stored private var transcriptPosition: Int?
 
@@ -52,21 +51,19 @@ public struct MinutesReader: View {
     private var tint: Color {
         colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
     }
-    private var motion: Animation? { animated && !reduceMotion ? .easeOut(duration: 0.18) : nil }
+    private var motion: Animation? { animated && !reduceMotion ? SeamMotion.update : nil }
     private var padding: CGFloat { compact ? 14 : 33 }
+    private let tabWidth: CGFloat = 78
+    private let tabSpacing: CGFloat = 2
 
     public var body: some View {
         ZStack(alignment: .topLeading) {
-            if showTranscript {
-                transcript.transition(paneTransition(x: 5))
-            } else {
-                MinutesSummary(markdown: summary, query: query, compact: compact, tint: tint, motion: motion,
-                               position: $summaryPosition)
-                    .transition(paneTransition(x: -5))
-            }
+            activeTab
+                .transition(.identity)
         }
         .padding(.horizontal, padding)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animatePageChange(for: showTranscript, enabled: animated && !reduceMotion)
         .scrollEdgeBar { header }
         .scrollEdgeBar(.bottom) {
             if let playback {
@@ -77,7 +74,16 @@ public struct MinutesReader: View {
             }
         }
         .clipped()
-        .animation(motion, value: showTranscript)
+    }
+
+    @ViewBuilder
+    private var activeTab: some View {
+        if showTranscript {
+            transcript
+        } else {
+            MinutesSummary(markdown: summary, query: query, compact: compact, tint: tint, motion: motion,
+                           position: $summaryPosition)
+        }
     }
 
     @ViewBuilder
@@ -89,11 +95,6 @@ public struct MinutesReader: View {
             MinutesTranscript(sections: sections, untimed: untimedTranscript, query: query, compact: compact,
                               tint: tint, motion: motion, position: $transcriptPosition)
         }
-    }
-
-    private func paneTransition(x: CGFloat) -> AnyTransition {
-        guard let motion else { return .identity }
-        return .asymmetric(insertion: .opacity.combined(with: .offset(x: x)).animation(motion), removal: .identity)
     }
 
     private var header: some View {
@@ -108,8 +109,7 @@ public struct MinutesReader: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 2) {
-                tab("要約", transcript: false)
-                tab("文字起こし", transcript: true)
+                tabs
                 Spacer(minLength: 0)
                 if let toggleExpanded {
                     let label = expanded ? "通常表示に戻す" : (showTranscript ? "文字起こしを全体表示" : "議事録を全体表示")
@@ -130,23 +130,30 @@ public struct MinutesReader: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var tabs: some View {
+        HStack(spacing: tabSpacing) {
+            tab("要約", transcript: false)
+            tab("文字起こし", transcript: true)
+        }
+        .overlay(alignment: .bottom) {
+            Capsule()
+                .fill(tint)
+                .frame(width: tabWidth, height: 2)
+                .frame(maxWidth: .infinity, alignment: showTranscript ? .trailing : .leading)
+                .animation(motion, value: showTranscript)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
     private func tab(_ label: String, transcript: Bool) -> some View {
         let selected = showTranscript == transcript
         return Button { showTranscript = transcript } label: {
             Text(label)
                 .font(.system(size: 13, weight: selected ? .semibold : .medium))
                 .foregroundStyle(selected ? tint : Color.secondary)
-                .frame(minWidth: 68, minHeight: 40)
-                .padding(.horizontal, 5)
+                .frame(width: tabWidth, height: 40)
                 .contentShape(Rectangle())
-                .overlay(alignment: .bottom) {
-                    if selected {
-                        Capsule()
-                            .fill(tint)
-                            .frame(height: 2)
-                            .matchedGeometryEffect(id: "selectedTab", in: tabIndicator)
-                    }
-                }
         }
         .buttonStyle(ReaderHoverStyle(tint: tint, motion: motion))
         .accessibilityAddTraits(selected ? .isSelected : [])

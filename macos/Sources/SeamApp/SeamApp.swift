@@ -60,11 +60,10 @@ private struct Workspace: View {
     @Stored private var pageFull = false
     @Stored private var loading = false
     @Stored private var loadError: String?
-    @Stored private var selected: Minutes?
+    @Stored private var page: ArchivePage = .list
     @Stored private var showTranscript = false
     @Stored private var readerExpanded = false
     @Stored private var liveExpanded = false
-    @Stored private var settingsOpen = false
     @Stored private var settingsPage: NativeSettingsPage = .transcription
     @Stored private var searchOpen = false
     @Stored private var search = ""
@@ -89,17 +88,35 @@ private struct Workspace: View {
         let connected: Bool
     }
 
+    private enum ArchivePage {
+        case list
+        case detail(Minutes)
+        case settings
+
+        enum Destination: Equatable {
+            case list
+            case detail(String)
+            case settings
+        }
+
+        var destination: Destination {
+            switch self {
+            case .list: .list
+            case .detail(let note): .detail(note.id)
+            case .settings: .settings
+            }
+        }
+    }
+
     private var scope: Scope {
         Scope(project: projectID, term: search.trimmingCharacters(in: .whitespacesAndNewlines),
               revision: session.archiveRevision, connected: session.connected)
     }
-    private var motion: Animation? { reduceMotion ? nil : .smooth(duration: 0.25) }
-    private var pageTransition: AnyTransition {
-        guard !reduceMotion else { return .identity }
-        return .asymmetric(insertion: .opacity.combined(with: .offset(y: 3)).animation(.easeOut(duration: 0.17)),
-                           removal: .identity)
+    private var motion: Animation? { reduceMotion ? nil : SeamMotion.reposition }
+    private var settingsOpen: Bool {
+        if case .settings = page { return true }
+        return false
     }
-    private var paper: Color { colorScheme == .dark ? Color(white: 0.087) : Color(white: 0.991) }
     private var accent: Color { Color(red: 0.70, green: 0.12, blue: 0.21) }
     private var projectName: String {
         projects.first { $0.id == projectID }?.name ?? "すべての議事録"
@@ -148,7 +165,7 @@ private struct Workspace: View {
                     }
             }
         }
-        .background(paper)
+        .background(Color.seamPaper(for: colorScheme))
         .alert("操作を完了できませんでした", isPresented: Binding(
             get: { session.error != nil }, set: { if !$0 { session.error = nil } }
         )) {
@@ -195,41 +212,43 @@ private struct Workspace: View {
                     .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(x: -16)))
             }
 
-            VStack(spacing: 0) {
-                if settingsOpen {
-                    NativeSettings(api: session.api, downloads: downloads, page: $settingsPage, compact: compact) {
-                        Section("表示") {
-                            SettingsRow("外観") {
-                                Picker("外観", selection: $appearance) {
-                                    Text("システム").tag("system")
-                                    Text("ライト").tag("light")
-                                    Text("ダーク").tag("dark")
-                                }
-                                .labelsHidden()
-                                .pickerStyle(.menu)
-                                .controlSize(.large)
-                                .frame(maxWidth: 245, alignment: .trailing)
-                            }
-                        }
-                    }
-                    .transition(pageTransition)
-                } else {
-                    Group {
-                        if let selected {
-                            ArchiveDetail(session: session, item: selected, projects: projects, query: scope.term,
-                                          compact: compact, expanded: $readerExpanded, showTranscript: $showTranscript,
-                                          close: closeDetail)
-                                .id(selected.id)
-                                .transition(pageTransition)
-                        } else {
-                            list(compact: compact).transition(pageTransition)
-                        }
-                    }
-                    .scrollEdgeBar { header(compact: compact) }
-                    .transition(pageTransition)
-                }
+            ZStack(alignment: .topLeading) {
+                archivePage(compact: compact)
+                    .transition(.identity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animatePageChange(for: page.destination, enabled: !reduceMotion)
+        }
+    }
+
+    @ViewBuilder
+    private func archivePage(compact: Bool) -> some View {
+        switch page {
+        case .settings:
+            NativeSettings(api: session.api, downloads: downloads, page: $settingsPage, compact: compact) {
+                Section("表示") {
+                    SettingsRow("外観") {
+                        Picker("外観", selection: $appearance) {
+                            Text("システム").tag("system")
+                            Text("ライト").tag("light")
+                            Text("ダーク").tag("dark")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.large)
+                        .frame(maxWidth: 245, alignment: .trailing)
+                    }
+                }
+            }
+        case .detail(let note):
+            ArchiveDetail(session: session, item: note, projects: projects, query: scope.term,
+                          compact: compact, expanded: $readerExpanded, showTranscript: $showTranscript,
+                          close: closeDetail)
+                .id(note.id)
+                .scrollEdgeBar { header(compact: compact, reading: true) }
+        case .list:
+            list(compact: compact)
+                .scrollEdgeBar { header(compact: compact, reading: false) }
         }
     }
 
@@ -290,9 +309,9 @@ private struct Workspace: View {
             .contentShape(Rectangle())
     }
 
-    private func header(compact: Bool) -> some View {
+    private func header(compact: Bool, reading: Bool) -> some View {
         HStack(spacing: 8) {
-            if selected != nil {
+            if reading {
                 Button(action: closeDetail) {
                     Label(projectName, systemImage: "chevron.left")
                         .font(.system(size: 13, weight: .medium))
@@ -308,7 +327,7 @@ private struct Workspace: View {
                     .accessibilityAddTraits(.isHeader)
             }
             Spacer(minLength: 0)
-            if selected == nil, let project = projects.first(where: { $0.id == projectID }) {
+            if !reading, let project = projects.first(where: { $0.id == projectID }) {
                 projectActions(project)
             }
             MinutesSearchField(expanded: $searchOpen, query: $search, width: compact ? 174 : 230,
@@ -387,7 +406,7 @@ private struct Workspace: View {
                         .frame(minHeight: 54)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
                     .overlay(alignment: .bottom) {
                         Rectangle().fill(Color.primary.opacity(0.065)).frame(height: 1)
                     }
@@ -484,36 +503,32 @@ private struct Workspace: View {
     }
 
     private func select(_ id: String?) {
-        withAnimation(motion) {
-            if projectID != id { minutes = []; pageFull = false }
-            settingsOpen = false
-            closeDetail()
-            projectID = id
+        if projectID != id {
+            minutes = []
+            pageFull = false
         }
+        projectID = id
+        readerExpanded = false
+        page = .list
     }
 
     private func open(_ note: Minutes) {
-        withAnimation(motion) {
-            showTranscript = note.highlights?.transcript != nil || (note.summary?.isEmpty != false)
-            selected = note
-        }
+        showTranscript = note.highlights?.transcript != nil || (note.summary?.isEmpty != false)
+        page = .detail(note)
     }
 
     private func closeDetail() {
-        withAnimation(motion) {
-            selected = nil
-            readerExpanded = false
-        }
+        guard case .detail = page else { return }
+        readerExpanded = false
+        page = .list
     }
 
     private func openSettings() {
-        withAnimation(motion) {
-            closeDetail()
-            liveExpanded = false
-            searchOpen = false
-            search = ""
-            settingsOpen = true
-        }
+        readerExpanded = false
+        liveExpanded = false
+        searchOpen = false
+        search = ""
+        page = .settings
     }
 
     private func start() {

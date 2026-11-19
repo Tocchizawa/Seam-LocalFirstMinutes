@@ -72,7 +72,7 @@ public struct SettingsToggleRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : .easeOut(duration: 0.12)))
+        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
         .accessibilityRepresentation {
             Toggle(title, isOn: $isOn).toggleStyle(.switch)
         }
@@ -89,7 +89,7 @@ struct SettingsDisclosure<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     private var showing: Bool { expanded ?? initiallyExpanded }
-    private var motion: Animation? { reduceMotion ? nil : .smooth(duration: 0.22) }
+    private var motion: Animation? { reduceMotion ? nil : SeamMotion.reposition }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -133,6 +133,6 @@ struct SettingsActionStyle: ButtonStyle {
             .opacity(enabled ? 1 : 0.48)
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: pressed)
+            .animation(reduceMotion ? nil : SeamMotion.feedback, value: pressed)
     }
 }

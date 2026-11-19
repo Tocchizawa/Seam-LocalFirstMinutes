@@ -45,6 +45,6 @@ private struct RecordingStartStyle: ButtonStyle {
             .opacity(enabled ? 1 : 0.42)
             .scaleEffect(pressed && !reduceMotion ? 0.97 : 1)
             .contentShape(Capsule())
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.13), value: pressed)
+            .animation(reduceMotion ? nil : SeamMotion.feedback, value: pressed)
     }
 }

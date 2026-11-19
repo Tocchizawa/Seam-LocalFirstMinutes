@@ -50,7 +50,7 @@ struct ArchiveDetail: View {
                       playback: hasAudio ? playback : nil, compact: compact, expanded: expanded,
                       showTranscript: $showTranscript,
                       toggleExpanded: compact ? nil : {
-                          withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { expanded.toggle() }
+                          withAnimation(reduceMotion ? nil : SeamMotion.reposition) { expanded.toggle() }
                       },
                       menu: AnyView(commands))
         .scrollEdgeBar { statusBar }

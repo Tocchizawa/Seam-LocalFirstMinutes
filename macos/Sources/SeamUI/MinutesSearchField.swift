@@ -22,7 +22,7 @@ public struct MinutesSearchField: View {
         self.onEdit = onEdit
     }
 
-    private var motion: Animation? { animated && !reduceMotion ? .spring(response: 0.28, dampingFraction: 0.91) : nil }
+    private var motion: Animation? { animated && !reduceMotion ? SeamMotion.reposition : nil }
     private var searchText: Binding<String> {
         Binding(get: { query }, set: { query = $0; onEdit() })
     }
@@ -46,10 +46,8 @@ public struct MinutesSearchField: View {
                 Button {
                     if expanded { collapse() }
                     else {
-                        withAnimation(motion) {
-                            onOpen()
-                            expanded = true
-                        }
+                        onOpen()
+                        expanded = true
                     }
                 } label: {
                     icon
@@ -76,10 +74,8 @@ public struct MinutesSearchField: View {
 
     private func collapse() {
         focused = false
-        withAnimation(motion) {
-            expanded = false
-            query = ""
-        }
+        expanded = false
+        query = ""
     }
 
     @ViewBuilder
