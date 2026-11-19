@@ -13,5 +13,6 @@ let package = Package(
         .target(name: "SeamCore"),
         .target(name: "SeamUI", dependencies: ["SeamCore"]),
         .executableTarget(name: "SeamApp", dependencies: ["SeamCore", "SeamUI"]),
+        .testTarget(name: "SeamCoreTests", dependencies: ["SeamCore"]),
     ]
 )

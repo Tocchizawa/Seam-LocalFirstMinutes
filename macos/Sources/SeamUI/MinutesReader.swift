@@ -5,7 +5,7 @@ import SwiftUI
 import SeamCore
 #endif
 
-/// Reads a saved meeting while its audio controls stay available in each tab.
+/// 保存済み議事録を表示する。タブを切り替えても音声操作を使える。
 @available(macOS 15.0, *)
 public struct MinutesReader: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
@@ -53,10 +53,12 @@ public struct MinutesReader: View {
     }
     private var motion: Animation? { animated && !reduceMotion ? SeamMotion.update : nil }
     private var padding: CGFloat { compact ? 14 : 33 }
+    // タブの横幅。ラベルを変える場合は幅も合わせて確認する。
     private let tabWidth: CGFloat = 78
     private let tabSpacing: CGFloat = 2
 
     public var body: some View {
+        // 議事録の読み取り画面。ヘッダー、要約/全文タブ、音声操作を組み合わせる。
         ZStack(alignment: .topLeading) {
             activeTab
                 .transition(.identity)
@@ -77,6 +79,7 @@ public struct MinutesReader: View {
     }
 
     @ViewBuilder
+    // 選択中タブの内容。要約と全文のレイアウトは専用ビューに分けている。
     private var activeTab: some View {
         if showTranscript {
             transcript
@@ -186,6 +189,48 @@ public struct MinutesReader: View {
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+#Preview("要約") {
+    if #available(macOS 15.0, *) {
+        MinutesReader(
+            title: "週次プロダクトレビュー",
+            date: "2026年11月19日 10:30",
+            summary: """
+            ## 決定事項
+
+            - 次回リリースは **12月第1週** を目標にする
+            - 検索結果にプロジェクト名を表示する
+
+            ## 次のアクション
+
+            UI案を水曜日までに共有する。
+            """,
+            sections: [], showTranscript: .constant(false)
+        )
+        .frame(width: 900, height: 720)
+        .background(Color.seamPaper(for: .dark))
+        .preferredColorScheme(.dark)
+    }
+}
+
+#Preview("文字起こし") {
+    if #available(macOS 15.0, *) {
+        MinutesReader(
+            title: "週次プロダクトレビュー",
+            date: "2026年11月19日 10:30",
+            summary: "",
+            sections: [
+                TranscriptSegment(start: 0, end: 8, text: "では、今週の進捗から確認していきましょう。", speakerLabel: "田中"),
+                TranscriptSegment(start: 8, end: 17, text: "検索画面は一覧と詳細の両方から使えるようにしました。", speakerLabel: "佐藤"),
+                TranscriptSegment(start: 17, end: 25, text: "いいですね。次のリリースに含める範囲を決めましょう。", speakerLabel: "田中")
+            ],
+            showTranscript: .constant(true)
+        )
+        .frame(width: 900, height: 720)
+        .background(Color.seamPaper(for: .dark))
+        .preferredColorScheme(.dark)
     }
 }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// 一覧ヘッダーの検索アイコンと入力欄。初期幅は init の width で指定する。
 public struct MinutesSearchField: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focused: Bool
@@ -28,6 +29,7 @@ public struct MinutesSearchField: View {
     }
 
     public var body: some View {
+        // 入力欄は開閉に合わせて幅を変える。control は常に表示するボタン部分の幅。
         surface(
             HStack(spacing: 0) {
                 TextField("タイトル・本文・要約", text: searchText)

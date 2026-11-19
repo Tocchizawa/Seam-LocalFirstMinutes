@@ -2,6 +2,7 @@ import SeamCore
 import SeamUI
 import SwiftUI
 
+/// 録音中に表示する文字起こし、波形、録音操作の画面。
 @available(macOS 26.0, *)
 struct CapturePane: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -11,10 +12,12 @@ struct CapturePane: View {
 
     private var transition: Animation? { reduceMotion ? nil : SeamMotion.update }
     private var red: Color {
+        // 録音中の強調色。ライト/ダークで読みやすさを保つため別々に指定する。
         colorScheme == .dark ? Color(red: 1, green: 0.52, blue: 0.56) : Color(red: 0.68, green: 0.12, blue: 0.20)
     }
 
     var body: some View {
+        // 画面の間隔や左右余白は VStack spacing / padding の値で調整する。
         if let capture = session.capture {
             VStack(spacing: 16) {
                 if let reminder = session.idleReminder, capture.phase == .running {
@@ -38,6 +41,7 @@ struct CapturePane: View {
                     .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 9))
                 }
                 CaptureTranscript(rows: session.transcript.segments + session.transcript.draftSegments,
+                                  lastFinalizedStart: session.transcript.segments.last?.start,
                                   expanded: expanded, deferred: capture.deferred, tint: red)
                     .scrollEdgeBar { header(capture) }
 
@@ -57,6 +61,7 @@ struct CapturePane: View {
         }
     }
 
+    // 録音状態と文字起こしの全体表示切り替えを置く上部バー。
     private func header(_ capture: WorkspaceSession.Capture) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 8) {
@@ -93,6 +98,7 @@ struct CapturePane: View {
         }
     }
 
+    // 経過時間、マイク、再開/一時停止、停止の操作列。
     private func transport(_ capture: WorkspaceSession.Capture) -> some View {
         let paused = capture.phase == .paused
         return GlassEffectContainer(spacing: 9) {
@@ -162,19 +168,22 @@ private struct CaptureTranscript: View {
     @Stored private var firstVisible: Double?
 
     let rows: [TranscriptSegment]
+    let lastFinalizedStart: Double?
     let expanded: Bool
     let deferred: Bool
     let tint: Color
 
     var body: some View {
+        // 新しい発話を自動追従する。手動でスクロールした場合は位置を保つ。
         SeamScrollView {
             LazyVStack(alignment: .leading, spacing: expanded ? 22 : 16) {
                 if rows.isEmpty {
-                    Text(deferred ? "録音を保存した後に文字起こしを行います" : "発話を待機中")
+                    Text(deferred ? "確定版は録音後に作成します" : "発話を待機中")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
                 ForEach(rows) { row in
+                    let isDraft = row.start > (lastFinalizedStart ?? -.infinity)
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 8) {
                             Text(minutesTime(row.start)).monospacedDigit()
@@ -183,8 +192,9 @@ private struct CaptureTranscript: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(row.id == rows.last?.id ? tint : .secondary)
 
-                        TranscriptText(row.text, duration: row.id == rows.last?.id && !reduceMotion ? 0.31 : 0)
+                        TranscriptText(row.text, duration: !isDraft && row.id == rows.last?.id && !reduceMotion ? 0.31 : 0)
                             .font(.system(size: expanded ? 17 : 14))
+                            .foregroundStyle(isDraft ? .secondary : .primary)
                             .lineSpacing(expanded ? 6 : 4)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -250,6 +260,7 @@ private struct CaptureWaveform: View {
     let running: Bool
 
     var body: some View {
+        // 波形の密度や振れ幅は step と barHeight の計算で調整する。
         Canvas { context, geometry in
             let step = 5.2
             let count = max(2, Int(geometry.width / step))

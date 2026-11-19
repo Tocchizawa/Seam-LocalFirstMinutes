@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Markdown を表示用の見出し・段落・表に分けた単位。
 private struct SummaryBlock: Identifiable {
     let id: Int
     let intents: [PresentationIntent.IntentType]
@@ -49,6 +50,7 @@ private struct SummaryBlock: Identifiable {
 }
 
 @available(macOS 14.0, *)
+/// 要約をMarkdownの見出し、文章、表として表示するビュー。
 struct MinutesSummary: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
 
@@ -62,6 +64,7 @@ struct MinutesSummary: View {
     @Stored private var blocks: [SummaryBlock] = []
 
     var body: some View {
+        // 文字の大きさと行間は compact に応じて変わる。目次の幅は outline を参照する。
         GeometryReader { geometry in
             let headings = blocks.filter { $0.heading != nil }
             HStack(alignment: .top, spacing: 32) {

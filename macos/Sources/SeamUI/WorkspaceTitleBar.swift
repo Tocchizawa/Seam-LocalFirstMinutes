@@ -2,6 +2,7 @@ import SwiftUI
 
 @available(macOS 15.0, *)
 public extension View {
+    /// ウィンドウ上端の共通操作バー。高さや左右の余白は下の frame/padding で調整する。
     func workspaceTitleBar<Actions: View>(@ViewBuilder actions: () -> Actions) -> some View {
         scrollEdgeBar(blur: false) {
             HStack(spacing: 12) {

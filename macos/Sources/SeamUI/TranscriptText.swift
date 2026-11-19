@@ -3,8 +3,8 @@ import SwiftUI
 import SeamCore
 #endif
 
-/// Animates the glyphs added by each live revision.
-/// Full text is measured up front so the reveal doesn't reflow the paragraph.
+/// 文字起こしの新しく増えた部分を順に表示する。全文を先に測るため、表示中に段落が動かない。
+/// 表示速度は init の duration で調整する。0 にするとアニメーションを止める。
 public struct TranscriptText: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let text: String

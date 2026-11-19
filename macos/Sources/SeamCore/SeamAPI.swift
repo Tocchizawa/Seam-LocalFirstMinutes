@@ -11,6 +11,10 @@ public struct BackendError: LocalizedError, Sendable {
 /// Accesses the existing FastAPI service on loopback. Requests that change state
 /// are attempted once so a lost response cannot silently repeat an operation.
 public struct SeamAPI: Sendable {
+    // Keep the event stream on a dedicated session with Foundation's default
+    // resource timeout so it can stay open for the lifetime of the workspace.
+    private static let eventSession = URLSession(configuration: .ephemeral)
+
     private let port: Int
     private let session: URLSession
 
@@ -94,6 +98,10 @@ public struct SeamAPI: Sendable {
         try await request(["api", "recording", "sessions", sessionId, "segments"])
     }
 
+    public func liveAudioSource(for sessionId: String) async throws -> LiveAudioSource {
+        try await request(["api", "recording", "sessions", sessionId, "live-audio"])
+    }
+
     public func pipelines() async throws -> [PipelineStatus] {
         try await request(["api", "recording", "pipelines"])
     }
@@ -107,7 +115,7 @@ public struct SeamAPI: Sendable {
     }
 
     public func events() throws -> BackendEventConnection {
-        let socket = session.webSocketTask(with: try endpoint(["ws"], scheme: "ws"))
+        let socket = Self.eventSession.webSocketTask(with: try endpoint(["ws"], scheme: "ws"))
         socket.resume()
         return BackendEventConnection(socket: socket)
     }

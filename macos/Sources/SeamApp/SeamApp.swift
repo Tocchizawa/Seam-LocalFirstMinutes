@@ -15,6 +15,7 @@ struct SeamApp: App {
     }()
 
     var body: some Scene {
+        // ウィンドウの標準サイズと最小サイズ。狭くする場合は各画面の幅制限も確認する。
         Window("Seam", id: "workspace") {
             if #available(macOS 26.0, *) {
                 Group {
@@ -124,6 +125,7 @@ private struct Workspace: View {
         projects.first { $0.id == projectID }?.name ?? "すべての議事録"
     }
 
+    // 画面全体の入口。録音中の分割は LiveWorkspaceSplit、文字起こし側は CapturePane で調整する。
     var body: some View {
         LiveWorkspaceSplit(recording: session.capture != nil, expanded: liveExpanded) { compact, narrow in
             archive(compact: compact, narrow: narrow)
@@ -142,6 +144,13 @@ private struct Workspace: View {
             else { liveExpanded = false }
         }
         .task { await session.run() }
+        #if compiler(>=6.2) && canImport(Speech)
+        .task(id: session.speechDraftSessionId) {
+            if let id = session.speechDraftSessionId {
+                await session.displaySpeechDraft(for: id)
+            }
+        }
+        #endif
         .task { await downloads.monitor() }
         .task(id: session.connected) {
             if session.connected { await loadProjects() }
@@ -190,6 +199,7 @@ private struct Workspace: View {
         }
     }
 
+    // 左のプロジェクト一覧と右側のページを並べる領域。
     private func archive(compact: Bool, narrow: Bool) -> some View {
         HStack(spacing: 0) {
             if !readerExpanded {
@@ -207,6 +217,7 @@ private struct Workspace: View {
     }
 
     @ViewBuilder
+    // 選択中のページごとの内容。ページを増やす場合は ArchivePage とここをセットで更新する。
     private func archivePage(compact: Bool) -> some View {
         switch page {
         case .settings:
@@ -244,6 +255,7 @@ private struct Workspace: View {
         }
     }
 
+    // 左サイドバー。幅や内側の余白、項目の並びはこの関数で調整する。
     private func sidebar(narrow: Bool) -> some View {
         VStack(spacing: 10) {
             SeamScrollView {
@@ -311,6 +323,7 @@ private struct Workspace: View {
             .contentShape(Rectangle())
     }
 
+    // 一覧・詳細画面の上部バー。検索欄や操作ボタンの配置を調整する場所。
     private func header(compact: Bool, reading: Bool) -> some View {
         HStack(spacing: 8) {
             if reading {
@@ -342,6 +355,7 @@ private struct Workspace: View {
         .padding(.bottom, 8)
     }
 
+    // 議事録一覧。行の見た目は pendingRecording とこの下の行構成を参照する。
     private func list(compact: Bool) -> some View {
         SeamScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {

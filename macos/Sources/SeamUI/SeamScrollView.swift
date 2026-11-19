@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Uses overlay indicators so showing a scrollbar never takes space from the content.
+/// スクロールバーを内容に重ねて表示し、表示切り替えで本文の幅が変わらないようにする。
 public struct SeamScrollView<Content: View>: View {
     private let axes: Axis.Set
     private let content: () -> Content

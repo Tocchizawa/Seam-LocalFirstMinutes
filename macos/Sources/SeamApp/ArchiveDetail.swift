@@ -3,6 +3,7 @@ import SeamCore
 import SeamUI
 import SwiftUI
 
+/// 保存済み議事録の詳細画面。本文レイアウトは SeamUI の MinutesReader が担当する。
 @available(macOS 26.0, *)
 struct ArchiveDetail: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
@@ -45,6 +46,7 @@ struct ArchiveDetail: View {
     private var summarizing: Bool { summaryJob?.active == true }
 
     var body: some View {
+        // 本文、進行状況、操作メニューを組み合わせて詳細画面を作る。
         MinutesReader(title: note.title, date: formattedDate(note), summary: note.summary ?? "",
                       sections: note.transcript ?? [], query: query,
                       playback: hasAudio ? playback : nil, compact: compact, expanded: expanded,
@@ -86,6 +88,7 @@ struct ArchiveDetail: View {
     }
 
     @ViewBuilder
+    // 文字起こしや要約の処理中に表示する状態の帯。
     private var statusBar: some View {
         if transcribing, let pipeline {
             activity(pipeline.stageLabel ?? pipeline.message, progress: pipeline.progress)
@@ -101,6 +104,7 @@ struct ArchiveDetail: View {
         }
     }
 
+    // タイトル/要約の編集、再処理、削除などの詳細画面操作。
     private var commands: some View {
         Menu("議事録の操作", systemImage: "ellipsis") {
             Button("タイトルを編集") { openEditor(.title, value: note.title) }

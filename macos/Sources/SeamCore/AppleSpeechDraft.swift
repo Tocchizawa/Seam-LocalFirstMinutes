@@ -1,5 +1,19 @@
 @preconcurrency import AVFoundation
 import Foundation
+
+public struct SpeechDraftUpdate: Codable, Equatable, Sendable {
+    struct Part: Codable, Equatable, Sendable {
+        let start: Double
+        let text: String
+    }
+
+    public let start: Double
+    public let end: Double
+    public let text: String
+    public let isFinal: Bool
+    let parts: [Part]
+}
+
 #if compiler(>=6.2) && canImport(Speech)
 import Speech
 
@@ -19,13 +33,6 @@ public enum AppleSpeechDraftError: LocalizedError {
         case .inputBacklog: "音声速報の処理が追いつきませんでした"
         }
     }
-}
-
-public struct SpeechDraftUpdate: Codable, Equatable, Sendable {
-    public let start: Double
-    public let end: Double
-    public let text: String
-    public let isFinal: Bool
 }
 
 /// Uses the local speech model for low latency preview text. The caller
@@ -102,12 +109,19 @@ public actor AppleSpeechDraft {
         _ onUpdate: @Sendable (SpeechDraftUpdate) async -> Void
     ) async throws {
         for try await result in transcriber.results {
-            let text = String(result.text.characters)
+            let attributed = result.text
+            let text = String(attributed.characters)
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             let start = result.range.start.seconds
             guard start.isFinite else { continue }
             let end = result.range.end.seconds
-            await onUpdate(.init(start: start, end: end.isFinite ? end : start, text: text, isFinal: result.isFinal))
+            var partStart = start
+            let parts = attributed.runs.map { run in
+                if let time = run.audioTimeRange?.start.seconds, time.isFinite { partStart = time }
+                return SpeechDraftUpdate.Part(start: partStart, text: String(attributed[run.range].characters))
+            }
+            await onUpdate(.init(start: start, end: end.isFinite ? end : start, text: text,
+                                 isFinal: result.isFinal, parts: parts))
         }
     }
 }

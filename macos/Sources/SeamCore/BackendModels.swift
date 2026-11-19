@@ -64,6 +64,12 @@ public struct RecordingStatus: Decodable, Sendable {
     public let transcriptionDeferred: Bool?
 }
 
+public struct LiveAudioSource: Decodable, Sendable {
+    public let path: String
+    public let sampleRate: Int
+    public let language: String
+}
+
 public struct RecordingStart: Decodable, Sendable {
     public let sessionId: String
     public let hasSystemAudio: Bool

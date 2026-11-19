@@ -1,12 +1,14 @@
 import SwiftUI
 
 public extension Color {
+    /// ウィンドウ背景色。ライト/ダークの基準色はここで調整する。
     static func seamPaper(for scheme: ColorScheme) -> Color {
         Color(white: scheme == .dark ? 0.087 : 0.991)
     }
 }
 
 public extension View {
+    /// スクロール領域に重なる上端/下端バー。blur を false にするとぼかしを外す。
     @ViewBuilder
     func scrollEdgeBar<Bar: View>(_ edge: VerticalEdge = .top, blur: Bool = true,
                                   @ViewBuilder bar: () -> Bar) -> some View {

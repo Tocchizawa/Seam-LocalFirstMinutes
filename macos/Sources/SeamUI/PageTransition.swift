@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// ページ切り替え時の短い縦移動。距離と時間は keyframe の値で調整する。
 @available(macOS 15.0, *)
 public extension View {
     @ViewBuilder

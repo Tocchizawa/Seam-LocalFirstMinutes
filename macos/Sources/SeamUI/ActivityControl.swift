@@ -16,6 +16,7 @@ public struct BackgroundActivity: Identifiable {
     }
 }
 
+/// ツールバーにバックグラウンド処理の状態をまとめて表示するボタン。
 @available(macOS 26.0, *)
 public struct ActivityControl: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
@@ -33,6 +34,7 @@ public struct ActivityControl: View {
     }
 
     public var body: some View {
+        // 先頭の処理だけボタンに表示し、残りの詳細はポップオーバーにまとめる。
         if let lead = modelActivity ?? activities.first {
             let extra = activities.count - (modelActivity == nil ? 1 : 0)
             Button {
@@ -122,6 +124,7 @@ public struct ActivityControl: View {
         return nil
     }
 
+    // ダウンロードや処理の詳細行。行間と内側の余白を調整する場所。
     private var popover: some View {
         SeamScrollView {
             VStack(alignment: .leading, spacing: 12) {

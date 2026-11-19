@@ -88,8 +88,7 @@ private enum SummaryProvider: String, CaseIterable, Identifiable {
     var requiresKey: Bool { self == .claude_api || self == .openai || self == .gemini }
 }
 
-/// An embedded settings panel. App preferences save only the edited fields
-/// through the original backend API, leaving unrelated config values intact.
+/// アプリ内の設定画面。保存時は変更した項目だけをバックエンドへ送る。
 @available(macOS 15.0, *)
 public struct NativeSettings<Appearance: View>: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
@@ -158,9 +157,11 @@ public struct NativeSettings<Appearance: View>: View {
                                 effort: provider == .codex ? editor.document[path + ".reasoning_effort"]?.text : nil)
     }
 
+    // 設定ページ左右の余白。狭い画面用と通常幅を別々に調整できる。
     private var gutter: CGFloat { compact ? 16 : 32 }
 
     public var body: some View {
+        // 選択中のページを表示する外枠。各設定項目は下のページ別プロパティに分かれている。
         ZStack(alignment: .topLeading) {
             settingsContent
                 .id(page)
@@ -194,6 +195,7 @@ public struct NativeSettings<Appearance: View>: View {
         }
     }
 
+    // 現在選択中の設定ページの内容をスクロール表示する。
     private var settingsContent: some View {
         SeamScrollView {
             Group(sections: fields) { sections in
@@ -265,6 +267,7 @@ public struct NativeSettings<Appearance: View>: View {
         }
     }
 
+    // 設定カテゴリの切り替え。ラベルと順番は NativeSettingsPage を編集する。
     private var tabs: some View {
         let pages = NativeSettingsPage.allCases
         return ViewThatFits(in: .horizontal) {
@@ -315,6 +318,7 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     @ViewBuilder
+    // 録音入力と無音通知の設定項目。
     private var inputSettings: some View {
         Section("入力") {
             SettingsRow("マイク") {
@@ -340,6 +344,7 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     @ViewBuilder
+    // Whisperモデルと言語、認識、パフォーマンスの設定項目。
     private var transcriptionSettings: some View {
         Section("Whisperモデル") {
             WhisperModelRows(downloads: downloads, selection: text("whisper.model", fallback: "medium"),
@@ -373,6 +378,7 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     @ViewBuilder
+    // 要約プロバイダー、モデル、接続テストの設定項目。
     private var summarySettings: some View {
         Section("モデル") {
             choose("要約プロバイダ", "minutes_ai.provider", fallback: "ollama",
@@ -489,6 +495,7 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     @ViewBuilder
+    // 話者分離と話者プロファイルの設定項目。
     private var speakerSettings: some View {
         let prefix = "whisper.speaker_memory."
         Section("話者分離") {

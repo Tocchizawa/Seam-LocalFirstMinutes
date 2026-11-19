@@ -4,6 +4,7 @@ import SwiftUI
 import SeamCore
 #endif
 
+/// Whisperモデルの取得状態を管理する。画面側のモデル一覧は下の WhisperModelRows。
 @MainActor
 public final class WhisperDownloads: ObservableObject {
     @Published public private(set) var models: [WhisperModels.Model]
@@ -159,6 +160,7 @@ struct WhisperModelRows: View {
     private var motion: Animation? { reduceMotion ? nil : SeamMotion.update }
 
     var body: some View {
+        // おすすめモデルと各モデルの一覧を組み立てる。
         if downloads.models.isEmpty {
             SettingsRow {
                 if let error = downloads.catalogError {

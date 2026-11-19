@@ -24,6 +24,7 @@ var settingsSeparator: some View {
         .accessibilityHidden(true)
 }
 
+/// 設定名と操作部品を横並びにする共通行。ページ間で見た目を揃える。
 public struct SettingsRow<Control: View>: View {
     private let title: String?
     private let control: () -> Control
@@ -50,6 +51,7 @@ public struct SettingsRow<Control: View>: View {
     }
 }
 
+/// 設定名とトグルを並べる行。
 public struct SettingsToggleRow: View {
     private let title: String
     @Binding private var isOn: Bool

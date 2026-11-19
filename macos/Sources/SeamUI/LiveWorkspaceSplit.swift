@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Keeps the same transcript view mounted while the reader expands it or
-/// returns to the archive. The archive uses the full width when capture ends.
+/// 録音中に文字起こし画面を表示し、終了後は議事録一覧に幅を戻す。
+/// 録音中の左右幅は compactTrack、狭い画面の判定は 920 の値で調整する。
 public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -24,6 +24,7 @@ public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
     public var body: some View {
         GeometryReader { geometry in
             let full = recording && expanded
+            // 文字起こし側に割り当てる幅。割合と上限を変えると左右のバランスが変わる。
             let compactTrack = min(336, geometry.size.width * 0.355)
             let archiveWidth = max(0, geometry.size.width - (recording ? compactTrack : 0))
 

@@ -162,6 +162,30 @@ final class WorkspaceSession: ObservableObject {
         transcript.recover(saved, for: id)
     }
 
+    #if compiler(>=6.2) && canImport(Speech)
+    var speechDraftSessionId: String? {
+        capture?.phase == .stopping ? nil : capture?.id
+    }
+
+    @available(macOS 26.0, *)
+    func displaySpeechDraft(for id: String) async {
+        do {
+            let source = try await api.liveAudioSource(for: id)
+            try Task.checkCancellation()
+            try await source.transcribe { [weak self] update in
+                guard !Task.isCancelled else { return }
+                await self?.receiveSpeechDraft(update, for: id)
+            }
+        } catch {
+            // Whisper continues to supply the transcript when Apple Speech is unavailable.
+        }
+    }
+
+    private func receiveSpeechDraft(_ update: SpeechDraftUpdate, for id: String) {
+        transcript.receive(update, for: id)
+    }
+    #endif
+
     private func enableBackgroundReminders() {
         guard !requestedNotifications, Bundle.main.bundleIdentifier != nil else { return }
         requestedNotifications = true

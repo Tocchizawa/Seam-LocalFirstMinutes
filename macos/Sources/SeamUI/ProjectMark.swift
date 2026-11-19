@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// プロジェクトアイコンに使う色候補。追加すると色選択UIにも候補が増える。
 enum ProjectAccent: String, CaseIterable {
     case blue, teal, green, amber, red, pink, purple, slate
 
@@ -30,6 +31,7 @@ enum ProjectAccent: String, CaseIterable {
     }
 }
 
+/// プロジェクトの絵文字または色付きフォルダアイコン。
 public struct ProjectMark: View {
     private let emoji: String?
     private let accent: ProjectAccent?

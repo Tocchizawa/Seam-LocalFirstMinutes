@@ -1,15 +1,33 @@
 import Foundation
 
-/// One session's in-memory transcript. The live and backfill feeds can arrive
-/// in either order. Finalized and provisional rows use the same start time.
+/// One session's transcript. Whisper fills in confirmed rows while Apple
+/// Speech supplies the portion of the live text that Whisper has yet to cover.
 public struct LiveTranscript: Sendable {
     public private(set) var sessionId: String?
     public private(set) var segments: [TranscriptSegment] = []
     private var preview: TranscriptDraft?
+    private var speechDrafts: [SpeechDraftUpdate] = []
 
     public init() {}
 
     public var draftSegments: [TranscriptSegment] {
+        let whisper = whisperDraftSegments
+        let coveredThrough = max(segments.last?.end ?? 0, whisper.last?.end ?? 0)
+        let tail = speechDrafts.compactMap { draft -> TranscriptSegment? in
+            guard draft.end > coveredThrough else { return nil }
+            if draft.start >= coveredThrough {
+                return TranscriptSegment(start: draft.start, end: draft.end, text: draft.text, sessionId: sessionId)
+            }
+            let parts = draft.parts.drop(while: { $0.start < coveredThrough })
+            guard let start = parts.first?.start else { return nil }
+            let text = parts.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return TranscriptSegment(start: start, end: draft.end, text: text, sessionId: sessionId)
+        }
+        return whisper + tail
+    }
+
+    private var whisperDraftSegments: [TranscriptSegment] {
         guard let preview else { return [] }
         let finalizedStartTimes = Set(segments.map(\.start))
         let lastStart = segments.last?.start ?? -.infinity
@@ -25,6 +43,16 @@ public struct LiveTranscript: Sendable {
         self.sessionId = sessionId
         segments = []
         preview = nil
+        speechDrafts = []
+    }
+
+    public mutating func receive(_ incoming: SpeechDraftUpdate, for sessionId: String) {
+        guard sessionId == self.sessionId, incoming.end > (segments.last?.end ?? 0) else { return }
+        // A volatile phrase is revised until SpeechTranscriber finalizes it.
+        speechDrafts.removeAll {
+            !$0.isFinal && $0.start < incoming.end && $0.end > incoming.start
+        }
+        speechDrafts.append(incoming)
     }
 
     public mutating func receive(_ incoming: TranscriptDraft) {
@@ -52,6 +80,9 @@ public struct LiveTranscript: Sendable {
         var byStart = Dictionary(uniqueKeysWithValues: segments.map { ($0.start, $0) })
         for segment in incoming { byStart[segment.start] = segment }
         segments = byStart.values.sorted { $0.start < $1.start }
-        if draftSegments.isEmpty { preview = nil }
+        if whisperDraftSegments.isEmpty { preview = nil }
+        if let coveredThrough = segments.last?.end {
+            speechDrafts.removeAll { $0.end <= coveredThrough }
+        }
     }
 }

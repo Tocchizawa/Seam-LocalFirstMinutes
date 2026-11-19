@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// 録音開始ボタン。寸法や赤色の見た目は RecordingStartStyle で調整する。
 public struct RecordingStartButton: View {
     private let action: () -> Void
 
@@ -27,6 +28,7 @@ private struct RecordingStartStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
+        // ボタンの基本色。背景色を変える場合は CapturePane の録音中カラーも合わせる。
         let red = Color(.sRGB, red: 0.70, green: 0.12, blue: 0.21, opacity: 1)
         configuration.label
             .padding(.horizontal, 14)

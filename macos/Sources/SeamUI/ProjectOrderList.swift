@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Rows move with the pointer and neighbouring rows move into the free slot.
-/// IDs stay stable through the drop so callers can save the returned order.
+/// プロジェクト行の並べ替え。ドラッグ中は隣の行が空いた位置へ移動する。
+/// 行の高さは init の height、行間は spacing で調整する。
 public struct ProjectOrderList<Row: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private typealias Stored<Value> = SwiftUI.State<Value>

@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -33,7 +33,7 @@ from src.audio.resource_monitor import (
 )
 from src.config import config
 from src.project.manager import project_manager
-from src.security import is_safe_session_id
+from src.security import is_loopback_client_host, is_safe_session_id
 from src.speakers import speaker_memory
 from src.transcribe.streaming import StreamingTranscriber
 
@@ -1432,6 +1432,19 @@ async def play_audio(session_id: str) -> FileResponse:
         }.get(audio.suffix.lower(), "application/octet-stream")
         return FileResponse(str(audio), media_type=media_type)
     raise not_found("FILE_NOT_FOUND", f"音声ファイルが見つかりません: {sid}")
+
+
+@router.get("/sessions/{session_id}/live-audio")
+async def get_live_audio_source(session_id: str, request: Request) -> dict:
+    writer = _mix_writers.get(session_id)
+    host = request.client.host if request.client else None
+    if not is_loopback_client_host(host) or session_id != _active_session_id or writer is None:
+        raise not_found("LIVE_AUDIO_UNAVAILABLE", "録音中の音声が見つかりません")
+    return {
+        "path": str(writer.wav_path.absolute()),
+        "sample_rate": writer.sample_rate,
+        "language": config.get("whisper", "language", default="ja"),
+    }
 
 
 @router.get("/sessions/{session_id}/segments")
