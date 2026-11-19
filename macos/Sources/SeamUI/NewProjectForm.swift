@@ -158,7 +158,7 @@ public struct NewProjectForm: View {
             }
             .defaultScrollAnchor(.top)
             .scrollBounceBehavior(.basedOnSize)
-            .scrollEdgeBar {
+            .scrollEdgeBar(blur: false) {
                 Text(project == nil ? "新規プロジェクト" : "プロジェクトを編集")
                     .font(.system(size: 21, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)

@@ -243,7 +243,7 @@ private struct Workspace: View {
                 }
                 .padding(.vertical, 4)
             }
-            .scrollEdgeBar {
+            .scrollEdgeBar(blur: false) {
                 VStack(alignment: .leading, spacing: 6) {
                     projectRow("すべての議事録", id: nil, symbol: "tray")
                         .frame(height: 34)

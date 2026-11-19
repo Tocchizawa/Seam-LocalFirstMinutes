@@ -3,7 +3,7 @@ import SwiftUI
 @available(macOS 15.0, *)
 public extension View {
     func workspaceTitleBar<Actions: View>(@ViewBuilder actions: () -> Actions) -> some View {
-        scrollEdgeBar {
+        scrollEdgeBar(blur: false) {
             HStack(spacing: 12) {
                 Spacer(minLength: 76)
                 actions()

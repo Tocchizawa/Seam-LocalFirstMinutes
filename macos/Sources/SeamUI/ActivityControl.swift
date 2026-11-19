@@ -111,7 +111,7 @@ public struct ActivityControl: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .scrollEdgeBar {
+        .scrollEdgeBar(blur: false) {
             Text("バックグラウンド処理")
                 .font(.system(size: 14, weight: .semibold))
                 .accessibilityAddTraits(.isHeader)
