@@ -516,7 +516,6 @@ async def _stream_levels() -> None:
     silent_since: float | None = None
     reminded_in_current_silence = False
     # マイク無音早期検知: 録音開始後一定時間ずっと level=0 ならハードウェア/権限の異常
-    started_at = _time.monotonic()
     mic_seen_audio = False
     mic_silent_warned = False
     mic_failure_handled = False
@@ -553,26 +552,28 @@ async def _stream_levels() -> None:
         if (
             not mic_silent_warned
             and not mic_seen_audio
+            and not _recording_paused
             and sid
-            and (now - started_at) >= MIC_SILENT_WARN_SEC
+            and recorder.elapsed_sec >= MIC_SILENT_WARN_SEC
         ):
             mic_silent_warned = True
+            active_elapsed = recorder.elapsed_sec
             mic_err = recorder.error if hasattr(recorder, "error") else None
             logger.warning(
                 "[mic-silent] no audio detected (mic+system) for %.1fs (session=%s, error=%s)",
-                now - started_at, sid, mic_err,
+                active_elapsed, sid, mic_err,
             )
             await ws_manager.broadcast({
                 "type": "mic_silent_warning",
                 "data": {
                     "session_id": sid,
-                    "since_sec": int(now - started_at),
+                    "since_sec": int(active_elapsed),
                     "error": mic_err,
                 },
             })
 
-        # recording_status: 1秒に1回(タイマー更新用)
-        if (now - last_status) >= 1.0 * scale:
+        # recording_status は高負荷時も1秒間隔を維持する。
+        if (now - last_status) >= 1.0:
             await ws_manager.broadcast({
                 "type": "recording_status",
                 "data": {
@@ -587,7 +588,10 @@ async def _stream_levels() -> None:
 
         # stop-forget reminder: 無音が一定時間続いたら通知(停止はしない)。
         # mic + system いずれも閾値未満のときだけ「無音」扱い。
-        if reminder_enabled and sid and not _recording_paused:
+        if _recording_paused:
+            silent_since = None
+            reminded_in_current_silence = False
+        elif reminder_enabled and sid:
             if _combined_level() < reminder_level_threshold:
                 if silent_since is None:
                     silent_since = now
@@ -972,9 +976,7 @@ async def _start_recording(req: StartRequest) -> dict:
 
     def _on_mixed_chunk(samples) -> None:
         if _recording_paused:
-            import numpy as np
-
-            samples = np.zeros_like(samples)
+            return
         try:
             mix_writer.feed(samples)
         except Exception as e:
@@ -1099,11 +1101,31 @@ async def recording_status() -> dict:
 
 @router.post("/pause")
 async def set_recording_paused(body: dict) -> dict:
-    """録音音声への入力を無音にし、録音時間軸を保ったまま一時停止する。"""
+    """マイク・内部音声・ミックス音声を止め、録音時間から停止時間を除く。"""
     global _recording_paused
     if not recorder.is_recording or _active_session_id is None:
         raise conflict("NOT_RECORDING", "録音中ではありません")
-    _recording_paused = bool(body.get("paused", False))
+    requested = bool(body.get("paused", False))
+    sid = _active_session_id
+    mixer = _mixers.get(sid)
+    if requested:
+        # Block the mixer immediately so samples already in flight cannot cross
+        # the pause boundary while the capture processes are being stopped. The
+        # public state stays unchanged until all capture processes acknowledge.
+        if mixer is not None:
+            mixer.pause()
+    try:
+        loop = asyncio.get_running_loop()
+        actual_paused = await loop.run_in_executor(None, recorder.set_paused, requested)
+    except Exception as error:
+        _recording_paused = recorder.is_paused
+        if not _recording_paused and mixer is not None:
+            mixer.resume()
+        raise conflict("RECORDING_PAUSE_FAILED", f"録音の一時停止状態を切り替えられませんでした: {error}") from error
+
+    _recording_paused = actual_paused
+    if not actual_paused and mixer is not None:
+        mixer.resume()
     payload = {
         "state": "recording",
         "elapsed_sec": round(recorder.elapsed_sec, 1),
@@ -1111,7 +1133,7 @@ async def set_recording_paused(body: dict) -> dict:
         "paused": _recording_paused,
     }
     await ws_manager.broadcast({"type": "recording_status", "data": payload})
-    return {"status": "ok", "paused": _recording_paused}
+    return {"status": "ok", "paused": _recording_paused, "elapsed_sec": payload["elapsed_sec"]}
 
 
 @router.post("/mic-mute")

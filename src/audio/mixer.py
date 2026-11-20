@@ -44,6 +44,7 @@ class RealtimeMixer:
         self._consumer: threading.Thread | None = None
         self._consumer_generation = 0
         self._running = False
+        self._paused = False
         self._has_system = False
         self._system_seen = False
         self._mic_seen = False
@@ -60,6 +61,7 @@ class RealtimeMixer:
         with self._lock:
             self._mic_buf = np.zeros(0, dtype=np.float32)
             self._sys_buf = np.zeros(0, dtype=np.float32)
+            self._paused = False
         self._consumer_generation += 1
         self._consumer = threading.Thread(
             target=self._consume,
@@ -77,6 +79,22 @@ class RealtimeMixer:
             self._consumer.join(timeout=2)
             self._consumer = None
         self._flush_remaining()
+
+    def pause(self) -> None:
+        """Discard buffered pre-pause samples and ignore input until resumed."""
+        with self._cond:
+            self._paused = True
+            self._mic_buf = np.zeros(0, dtype=np.float32)
+            self._sys_buf = np.zeros(0, dtype=np.float32)
+            self._cond.notify_all()
+
+    def resume(self) -> None:
+        """Resume mixing from fresh audio without bridging the pause gap."""
+        with self._cond:
+            self._mic_buf = np.zeros(0, dtype=np.float32)
+            self._sys_buf = np.zeros(0, dtype=np.float32)
+            self._paused = False
+            self._cond.notify_all()
 
     @property
     def consumer_alive(self) -> bool:
@@ -129,7 +147,7 @@ class RealtimeMixer:
     # ─── feeds ───────────────────────────────────────────────
 
     def feed_mic(self, samples_int16: np.ndarray, sample_rate: int) -> None:
-        if not self._running or samples_int16 is None or len(samples_int16) == 0:
+        if not self._running or self._paused or samples_int16 is None or len(samples_int16) == 0:
             return
         try:
             f32 = (samples_int16.astype(np.float32) / 32768.0)
@@ -138,6 +156,8 @@ class RealtimeMixer:
             logger.error("Mixer mic resample error: %s", e)
             return
         with self._cond:
+            if self._paused:
+                return
             self._mic_buf = np.concatenate([self._mic_buf, f32])
             if len(self._mic_buf) > self._max_buf:
                 self._mic_buf = self._mic_buf[-self._max_buf:]
@@ -145,7 +165,7 @@ class RealtimeMixer:
             self._cond.notify()
 
     def feed_system(self, samples_f32: np.ndarray, sample_rate: int = 48000) -> None:
-        if not self._running or samples_f32 is None or len(samples_f32) == 0:
+        if not self._running or self._paused or samples_f32 is None or len(samples_f32) == 0:
             return
         try:
             f32 = self._resample(samples_f32.astype(np.float32), sample_rate)
@@ -153,6 +173,8 @@ class RealtimeMixer:
             logger.error("Mixer system resample error: %s", e)
             return
         with self._cond:
+            if self._paused:
+                return
             self._sys_buf = np.concatenate([self._sys_buf, f32])
             if len(self._sys_buf) > self._max_buf:
                 self._sys_buf = self._sys_buf[-self._max_buf:]
@@ -175,6 +197,9 @@ class RealtimeMixer:
             try:
                 with self._cond:
                     while self._running:
+                        if self._paused:
+                            self._cond.wait(timeout=0.5)
+                            continue
                         mic_n = len(self._mic_buf)
                         sys_n = len(self._sys_buf)
                         if self._has_system:
@@ -229,11 +254,11 @@ class RealtimeMixer:
                 mixed = self._mic_buf if len(self._mic_buf) > 0 else None
             self._mic_buf = np.zeros(0, dtype=np.float32)
             self._sys_buf = np.zeros(0, dtype=np.float32)
-        if mixed is not None and len(mixed) > 0:
+        if not self._paused and mixed is not None and len(mixed) > 0:
             self._dispatch(mixed)
 
     def _dispatch(self, samples: np.ndarray) -> None:
-        if self._on_chunk is None:
+        if self._paused or self._on_chunk is None:
             return
         if self._gain is not None:
             samples = self._gain.process(samples)

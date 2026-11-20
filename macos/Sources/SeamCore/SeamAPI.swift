@@ -95,10 +95,11 @@ public struct SeamAPI: Sendable {
         try await request(["api", "recording", "status"], timeout: timeout)
     }
 
-    public func setPaused(_ paused: Bool) async throws -> Bool {
-        struct Pause: Codable { let paused: Bool }
-        let result: Pause = try await write(["api", "recording", "pause"], method: "POST", body: Pause(paused: paused))
-        return result.paused
+    public func setPaused(_ paused: Bool) async throws -> (paused: Bool, elapsed: Double?) {
+        struct Request: Encodable { let paused: Bool }
+        struct Response: Decodable { let paused: Bool; let elapsedSec: Double? }
+        let result: Response = try await write(["api", "recording", "pause"], method: "POST", body: Request(paused: paused))
+        return (result.paused, result.elapsedSec)
     }
 
     public func setMicMuted(_ muted: Bool) async throws -> Bool {

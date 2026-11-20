@@ -27,11 +27,45 @@ package final class WorkspaceSession: ObservableObject {
         package private(set) var id: String?
         package var phase: Phase
         package var elapsed = 0.0
+        var elapsedUpdatedAt = ProcessInfo.processInfo.systemUptime
         package var muted = false
         package var microphoneName: String?
         var microphoneUID: String?
         var canSwitchMicrophone = false
         var deferred = false
+
+        mutating func advanceElapsed(at uptime: Double = ProcessInfo.processInfo.systemUptime) {
+            if phase == .running {
+                elapsed += max(0, uptime - elapsedUpdatedAt)
+            }
+            elapsedUpdatedAt = uptime
+        }
+
+        mutating func reconcileElapsed(_ serverElapsed: Double?, phase nextPhase: Phase?) {
+            let now = ProcessInfo.processInfo.systemUptime
+            advanceElapsed(at: now)
+            if let serverElapsed, serverElapsed.isFinite {
+                if nextPhase == .paused || phase == .paused || nextPhase == .stopping {
+                    elapsed = max(0, serverElapsed)
+                } else {
+                    elapsed = max(elapsed, max(0, serverElapsed))
+                }
+            }
+            if let nextPhase, phase != .stopping {
+                phase = nextPhase
+            }
+            elapsedUpdatedAt = now
+        }
+
+        mutating func reconcile(with next: Capture) {
+            let phase: Phase = self.phase == .stopping ? .stopping : next.phase
+            reconcileElapsed(next.elapsed, phase: phase)
+            muted = next.muted
+            microphoneName = next.microphoneName
+            microphoneUID = next.microphoneUID
+            canSwitchMicrophone = next.canSwitchMicrophone
+            deferred = next.deferred
+        }
     }
 
     let api: SeamAPI
@@ -82,8 +116,23 @@ package final class WorkspaceSession: ObservableObject {
 
     package func run() async {
         async let snapshots: Void = poll()
+        async let clock: Void = advanceCaptureClock()
         await listen()
         await snapshots
+        await clock
+    }
+
+    private func advanceCaptureClock() async {
+        let clock = ContinuousClock()
+        var deadline = clock.now.advanced(by: .seconds(1))
+        while !Task.isCancelled {
+            do { try await clock.sleep(until: deadline) }
+            catch { return }
+            deadline = deadline.advanced(by: .seconds(1))
+            guard var current = capture, current.phase == .running else { continue }
+            current.advanceElapsed()
+            capture = current
+        }
     }
 
     func start(in projectId: String) async {
@@ -121,8 +170,9 @@ package final class WorkspaceSession: ObservableObject {
         captureRevision += 1
         defer { isChanging = false }
         do {
-            let paused = try await api.setPaused(initial.phase != .paused)
-            if capture?.id == id { capture?.phase = paused ? .paused : .running }
+            let result = try await api.setPaused(initial.phase != .paused)
+            guard capture?.id == id else { return }
+            capture?.reconcileElapsed(result.elapsed, phase: result.paused ? .paused : .running)
         } catch { self.error = error.localizedDescription }
     }
 
@@ -233,6 +283,12 @@ package final class WorkspaceSession: ObservableObject {
     }
 
     private func install(_ next: Capture?) {
+        if let current = capture, let next, current.id == next.id {
+            var reconciled = current
+            reconciled.reconcile(with: next)
+            capture = reconciled
+            return
+        }
         let oldID = transcript.sessionId
         capture = next
         guard oldID != next?.id else { return }
@@ -324,10 +380,8 @@ package final class WorkspaceSession: ObservableObject {
         switch event {
         case .recording(let update):
             guard capture?.id == update.sessionId else { return }
-            capture?.elapsed = update.elapsedSec
-            if capture?.phase != .stopping, let paused = update.paused {
-                capture?.phase = paused ? .paused : .running
-            }
+            let phase = update.paused.map { $0 ? Capture.Phase.paused : .running }
+            capture?.reconcileElapsed(update.elapsedSec, phase: phase)
             if let deferred = update.transcriptionDeferred { capture?.deferred = deferred }
         case .stopped(let result):
             guard let id = result.sessionId, id == capture?.id else { return }

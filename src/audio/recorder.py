@@ -107,6 +107,13 @@ class Recorder:
         self._mic_operation_lock = threading.Lock()
         self._sys_capture = None
         self._start_time: float = 0
+        self._paused = False
+        self._pause_started_at: float | None = None
+        self._paused_total: float = 0.0
+        self._mic_resume_event = threading.Event()
+        self._mic_resume_event.set()
+        self._mic_pause_ack = threading.Event()
+        self._mic_resume_ack = threading.Event()
         self._session_dir: Path | None = None
         self._session_id: str = ""
         self._mic_device: int | None = None
@@ -130,6 +137,10 @@ class Recorder:
     def is_recording(self) -> bool:
         return self._recording
 
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
     def set_mic_muted(self, muted: bool) -> None:
         self._mic_muted = bool(muted)
         logger.info("Mic muted = %s", self._mic_muted)
@@ -142,6 +153,80 @@ class Recorder:
                 raise RuntimeError("録音中のマイク切り替えにはCore Audioが必要です")
             self._mic_capture.switch_device(device_uid)
             return self._microphone_status()
+
+    def set_paused(self, paused: bool) -> bool:
+        """Pause or resume every audio source as one operation."""
+        paused = bool(paused)
+        with self._mic_operation_lock:
+            if not self._recording:
+                raise RuntimeError("録音中ではありません")
+            if self._paused == paused:
+                return self._paused
+
+            mic_capture = self._mic_capture
+            sys_capture = self._sys_capture
+            mic_thread = self._mic_thread
+
+            if paused:
+                self._paused = True
+                self._mic_pause_ack.clear()
+                self._mic_resume_event.clear()
+                paused_sources: list[object] = []
+                try:
+                    if mic_capture is not None:
+                        paused_sources.append(mic_capture)
+                        mic_capture.pause()
+                    if sys_capture is not None:
+                        paused_sources.append(sys_capture)
+                        sys_capture.pause()
+                    if mic_capture is None and mic_thread is not None and mic_thread.is_alive():
+                        if not self._mic_pause_ack.wait(timeout=3):
+                            raise RuntimeError("マイク入力を一時停止できませんでした")
+                    self._pause_started_at = time.monotonic()
+                except Exception:
+                    self._paused = False
+                    self._pause_started_at = None
+                    self._mic_resume_event.set()
+                    for source in reversed(paused_sources):
+                        try:
+                            source.resume()
+                        except Exception:
+                            logger.exception("Failed to roll back a partial recording pause")
+                    raise
+                logger.info("Recording paused (session=%s)", self._session_id)
+                return True
+
+            # Resume system capture first so the new audio segment is ready before
+            # the microphone begins forwarding samples into the mixer.
+            resumed_sources: list[object] = []
+            self._mic_resume_ack.clear()
+            try:
+                if sys_capture is not None:
+                    sys_capture.resume()
+                    resumed_sources.append(sys_capture)
+                if mic_capture is not None:
+                    mic_capture.resume()
+                    resumed_sources.append(mic_capture)
+                self._paused = False
+                self._mic_resume_event.set()
+                if mic_capture is None and mic_thread is not None and mic_thread.is_alive():
+                    if not self._mic_resume_ack.wait(timeout=3):
+                        raise RuntimeError("マイク入力を再開できませんでした")
+                resumed_at = time.monotonic()
+                if self._pause_started_at is not None:
+                    self._paused_total += max(0.0, resumed_at - self._pause_started_at)
+                self._pause_started_at = None
+            except Exception:
+                self._paused = True
+                self._mic_resume_event.clear()
+                for source in reversed(resumed_sources):
+                    try:
+                        source.pause()
+                    except Exception:
+                        logger.exception("Failed to roll back a partial recording resume")
+                raise
+            logger.info("Recording resumed (session=%s)", self._session_id)
+            return False
 
     def _microphone_status(self) -> dict:
         capture = self._mic_capture
@@ -167,7 +252,8 @@ class Recorder:
     def elapsed_sec(self) -> float:
         if not self._recording:
             return 0
-        return time.monotonic() - self._start_time
+        now = self._pause_started_at if self._paused and self._pause_started_at is not None else time.monotonic()
+        return max(0.0, now - self._start_time - self._paused_total)
 
     def _default_input_device_index(self) -> int | None:
         try:
@@ -546,6 +632,12 @@ class Recorder:
 
         self._recording = True
         self._start_time = time.monotonic()
+        self._paused = False
+        self._pause_started_at = None
+        self._paused_total = 0.0
+        self._mic_resume_event.set()
+        self._mic_pause_ack.clear()
+        self._mic_resume_ack.clear()
 
         # Start system audio first. If it is requested and cannot start,
         # fail the recording before opening the microphone.
@@ -696,6 +788,8 @@ class Recorder:
             block_size = int(capture_rate * block_ms / 1000)
 
             def _emit_mic_samples(mono: np.ndarray) -> None:
+                if self._paused:
+                    return
                 try:
                     wf.writeframes(mono.tobytes())
                 except Exception as e:
@@ -781,11 +875,34 @@ class Recorder:
                         int(block_size / capture_rate * 1000),
                         latency,
                     )
+                if not self._paused:
+                    self._mic_resume_ack.set()
 
                 read_errors = 0
                 overflow_streak = 0
                 try:
                     while self._recording:
+                        if self._paused:
+                            try:
+                                stream.stop()
+                            except Exception as e:
+                                logger.warning("Mic stream pause failed: %s", e)
+                                self._error = str(e)
+                                break
+                            self._mic_pause_ack.set()
+                            while self._recording and self._paused:
+                                self._mic_resume_event.wait(timeout=0.1)
+                            self._mic_pause_ack.clear()
+                            if not self._recording:
+                                break
+                            try:
+                                stream.start()
+                            except Exception as e:
+                                self._error = str(e)
+                                logger.warning("Mic stream resume failed; reopening input: %s", e)
+                                break
+                            self._mic_resume_ack.set()
+                            continue
                         try:
                             data, overflowed = stream.read(block_size)
                             read_errors = 0
@@ -857,6 +974,8 @@ class Recorder:
             elapsed = self.elapsed_sec
             system_backend = self._sys_capture.backend if self._sys_capture else None
             self._recording = False
+            self._paused = False
+            self._mic_resume_event.set()
 
             if self._mic_capture:
                 try:
@@ -1063,6 +1182,7 @@ class Recorder:
         return {
             "recording": self._recording,
             "elapsed_sec": round(self.elapsed_sec, 1) if self._recording else 0,
+            "paused": self._paused,
             "mic_reopen_total": self._mic_reopen_total,
             "mic_stream_alive": self.mic_stream_alive,
             "mic_backend": self._mic_backend,
