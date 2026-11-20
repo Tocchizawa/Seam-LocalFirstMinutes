@@ -90,6 +90,7 @@ private struct SeamWindow: View {
             } else {
                 ServiceStartupView(service: service)
                     .transition(.opacity)
+                    .zIndex(1)
             }
         }
         .onAppear {

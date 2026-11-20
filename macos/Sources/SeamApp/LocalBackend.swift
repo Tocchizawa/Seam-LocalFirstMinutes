@@ -11,12 +11,31 @@ final class LocalBackend: ObservableObject {
         case failed(String)
     }
 
-    struct StartupProgress: Decodable, Equatable {
-        let message: String
-        let progress: Double
+    enum StartupStage: Int, CaseIterable {
+        case resources, environment, service
 
-        static let resources = Self(message: "アプリのファイルを確認中", progress: 0.10)
-        static let environment = Self(message: "録音サービスの実行環境を準備中", progress: 0.35)
+        var title: String {
+            switch self {
+            case .resources: "アプリの確認"
+            case .environment: "実行環境の準備"
+            case .service: "録音サービスの起動"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .resources: "app.badge.checkmark"
+            case .environment: "shippingbox"
+            case .service: "waveform"
+            }
+        }
+    }
+
+    struct StartupProgress: Equatable {
+        let stage: StartupStage
+        let detail: String
+
+        static let resources = Self(stage: .resources, detail: "アプリに含まれるファイルを確認しています。")
     }
 
     @Published private(set) var state: State = .preparing(.resources)
@@ -69,6 +88,11 @@ final class LocalBackend: ObservableObject {
         let error: String?
     }
 
+    private struct BackendProgress: Decodable {
+        let phase: String
+        let message: String
+    }
+
     private struct Failure: LocalizedError {
         let message: String
         var errorDescription: String? { message }
@@ -110,6 +134,8 @@ final class LocalBackend: ObservableObject {
         let logHandle = try FileHandle(forWritingTo: output)
         defer { try? logHandle.close() }
         try logHandle.truncate(atOffset: 0)
+        let startupLog = try? FileHandle(forReadingFrom: output)
+        defer { try? startupLog?.close() }
 
         let standardPaths = ["/opt/homebrew/bin", "/usr/local/bin"] +
             [".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin"].map { home.appendingPathComponent($0).path }
@@ -124,32 +150,42 @@ final class LocalBackend: ObservableObject {
         env["SEAM_SPEECH_TRANSCRIBE_BIN"] = resources.appendingPathComponent("apple-speech-transcriber").path
         env["XDG_CACHE_HOME"] = runtime.appendingPathComponent("cache").path
         env["OLLAMA_MODELS"] = runtime.appendingPathComponent("ollama/models").path
-        env["UV_PROJECT_ENVIRONMENT"] = support.appendingPathComponent("python-env").path
+        let pythonEnvironment = support.appendingPathComponent("python-env", isDirectory: true)
+        env["UV_PROJECT_ENVIRONMENT"] = pythonEnvironment.path
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
 
         let child = Process()
         child.executableURL = uv
         child.currentDirectoryURL = source
-        child.arguments = ["run", "--frozen", "--no-dev", "--python", "3.13", "python", "-m", "src.desktop"]
+        child.arguments = ["run", "--color", "never", "--frozen", "--no-dev", "--python", "3.13", "python", "-m", "src.desktop"]
         child.environment = env
         child.standardOutput = logHandle
         child.standardError = logHandle
-        state = .preparing(.environment)
+        let hasEnvironment = files.isExecutableFile(atPath: pythonEnvironment.appendingPathComponent("bin/python").path)
+        var progress = StartupProgress(stage: .environment, detail: hasEnvironment
+            ? "保存済みの実行環境を確認しています。"
+            : "初回起動では、必要に応じてファイルをダウンロードします。")
+        state = .preparing(progress)
         try child.run()
         process = child
         defer {
             if child.isRunning { child.terminate() }
             process = nil
         }
-        // Keep the attempt alive while uv is preparing its environment.
         var api: SeamAPI?
-        var progress = StartupProgress.environment
         while child.isRunning {
             try Task.checkCancellation()
+            var update = progress
             if let bytes = try? Data(contentsOf: progressFile),
-               let update = try? JSONDecoder().decode(StartupProgress.self, from: bytes),
-               update != progress, update.progress >= progress.progress {
+               let reported = try? JSONDecoder().decode(BackendProgress.self, from: bytes) {
+                let detail = reported.phase == "ready" ? "録音サービスに接続中" : reported.message
+                update = StartupProgress(stage: .service, detail: detail)
+            } else if progress.stage == .environment, let startupLog,
+                      let detail = Self.environmentDetail(from: startupLog) {
+                update = StartupProgress(stage: .environment, detail: detail)
+            }
+            if update != progress {
                 progress = update
                 state = .preparing(update)
             }
@@ -172,5 +208,33 @@ final class LocalBackend: ObservableObject {
            let status = try? JSONDecoder().decode(Startup.self, from: bytes),
            let message = status.error { throw Failure(message: message) }
         throw Failure(message: "録音サービスが終了しました（終了コード \(child.terminationStatus)）。")
+    }
+
+    private static func environmentDetail(from log: FileHandle) -> String? {
+        // uv's console messages can add detail during setup. The backend's own
+        // progress file is what advances startup to the next stage.
+        guard let end = try? log.seekToEnd(), end > 0 else { return nil }
+        let start = end > 8_192 ? end - 8_192 : 0
+        guard (try? log.seek(toOffset: start)) != nil,
+              let bytes = try? log.read(upToCount: Int(end - start)) else { return nil }
+        let output = String(decoding: bytes, as: UTF8.self)
+        guard let lastNewline = output.lastIndex(of: "\n") else { return nil }
+        let lines = output[..<lastNewline].split(separator: "\n", omittingEmptySubsequences: false)
+        for rawLine in lines.dropFirst(start == 0 ? 0 : 1).reversed() {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("Downloading cpython-") { return "Python をダウンロード中" }
+            if line.hasPrefix("Creating virtual environment") || line.hasPrefix("Downloaded cpython-") {
+                return "Python の実行環境を作成中"
+            }
+            if line.hasPrefix("Downloading ") {
+                return "必要なライブラリをダウンロード中"
+            }
+            if line.hasPrefix("Downloaded ") { return "必要なライブラリを準備中" }
+            if line.hasPrefix("Prepared ") { return "ライブラリをインストール中" }
+            if line.hasPrefix("Installed ") || line.hasPrefix("Audited ") {
+                return "実行環境を確認しました。録音サービスを読み込み中"
+            }
+        }
+        return nil
     }
 }

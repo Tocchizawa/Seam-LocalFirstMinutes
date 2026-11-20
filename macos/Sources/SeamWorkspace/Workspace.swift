@@ -37,6 +37,8 @@ public struct Workspace: View {
     @Stored private var settingsPage: NativeSettingsPage = .transcription
     @Stored private var searchOpen = false
     @Stored private var search = ""
+    @Stored private var minutesEditor: MinutesEditRequest?
+    @Stored private var deletingMinutes: Minutes?
     @Stored private var projectEditor: ProjectEditorPresentation?
     @Stored private var deletingProject: Project?
     @Stored private var importProject: Project?
@@ -67,6 +69,12 @@ public struct Workspace: View {
     private struct ProjectEditorPresentation: Identifiable {
         let id = UUID()
         let project: Project?
+    }
+
+    private struct MinutesEditRequest: Identifiable {
+        let id = UUID()
+        let note: Minutes
+        let field: MinutesEditField
     }
 
     private enum ArchivePage {
@@ -151,7 +159,7 @@ public struct Workspace: View {
         }
         .task(id: scope) { await loadMinutes(scope) }
         .task(id: projectScope) { await loadMinutesCount(projectScope) }
-        .workspaceTitleBar(title: projectName, subtitle: projectSubtitle, sidebarVisible: showsSidebar,
+        .workspaceTitleBar(projectID: projectID, title: projectName, subtitle: projectSubtitle, sidebarVisible: showsSidebar,
                            recording: session.capture != nil, toggleSidebar: toggleSidebar) {
             ActivityControl(activities: session.backgroundActivities) { activity, dismiss in
                 if let job = session.summaries.first(where: { activity.id == "summary-\($0.minutesId)" }) {
@@ -166,6 +174,7 @@ public struct Workspace: View {
         }
         .background(Color.seamPaper(for: colorScheme))
         .sheet(item: $projectEditor, content: projectEditorSheet)
+        .sheet(item: $minutesEditor, content: minutesEditorSheet)
         .alert(errorTitle, isPresented: Binding(
             get: { session.error != nil }, set: { if !$0 { session.error = nil } }
         )) {
@@ -183,6 +192,18 @@ public struct Workspace: View {
             Button("削除", role: .destructive) { delete(project) }
         } message: { project in
             Text("「\(project.name)」とその議事録が一覧から外れます。議事録データは保存されます。")
+        }
+        .confirmationDialog("この議事録を削除しますか？", isPresented: Binding(
+            get: { deletingMinutes != nil }, set: { if !$0 { deletingMinutes = nil } }
+        ), presenting: deletingMinutes) { note in
+            Button("削除", role: .destructive) {
+                performMinutesAction {
+                    try await session.api.deleteMinutes(id: note.id)
+                    session.archiveChanged()
+                }
+            }
+        } message: { note in
+            Text(verbatim: note.title)
         }
         .fileImporter(isPresented: $choosingAudio, allowedContentTypes: [.audio, .movie, .folder]) { result in
             guard let project = importProject else { return }
@@ -380,16 +401,28 @@ public struct Workspace: View {
     }
 
     private func searchHeader(compact: Bool) -> some View {
-        MinutesSearchField(expanded: $searchOpen, query: $search, width: compact ? 174 : 230,
-                           animated: !reduceMotion, onOpen: closeDetail, onEdit: closeDetail)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .frame(height: 45)
-            .padding(.horizontal, compact ? 14 : 33)
-            .padding(.top, 22)
-            .padding(.bottom, 8)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(scope.term.isEmpty ? "議事録" : "検索結果")
+                    .font(.system(size: 23, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                if !scope.term.isEmpty && !searchOpen {
+                    Text(verbatim: scope.term)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            MinutesSearchField(expanded: $searchOpen, query: $search, width: compact ? 174 : 230,
+                               animated: !reduceMotion)
+        }
+        .frame(height: 45)
+        .padding(.horizontal, compact ? 14 : 33)
+        .padding(.top, 22)
+        .padding(.bottom, 8)
     }
 
-    // 議事録一覧。行の見た目は pendingRecording とこの下の行構成を参照する。
     private func list(compact: Bool) -> some View {
         let workBySession = session.work.reduce(into: [String: PipelineStatus]()) { result, job in
             if let sessionId = job.sessionId { result[sessionId] = job }
@@ -400,7 +433,7 @@ public struct Workspace: View {
         let pending = pendingRecordings
 
         return SeamScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 if session.recovery?.state == "running" {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.mini)
@@ -408,63 +441,39 @@ public struct Workspace: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(.vertical, 10)
-                }
-                ForEach(pending, id: \.sessionId) { job in
-                    pendingRecording(job)
+                    .padding(.vertical, 8)
                 }
 
                 if let loadError {
-                    Text(loadError).font(.callout).foregroundStyle(.secondary).padding(.vertical, 12)
+                    archiveMessage(loadError, symbol: "exclamationmark.circle")
                 } else if projectsLoaded && projectID == nil {
-                    Text("新規プロジェクトを作成すると、ここに議事録が表示されます。")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 12)
+                    archiveMessage("新規プロジェクトを作成すると、ここに議事録が表示されます。", symbol: "folder")
                 } else if loadedMinutesScope == scope && minutes.isEmpty && pending.isEmpty {
-                    Text(scope.term.isEmpty ? "議事録がありません" : "一致する議事録がありません")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 12)
+                    archiveMessage(scope.term.isEmpty ? "議事録がありません" : "一致する議事録がありません",
+                                   symbol: scope.term.isEmpty ? "doc.text" : "magnifyingglass")
                 }
 
-                ForEach(minutes) { note in
-                    let job = workBySession[note.sessionId]
-                    let summary = summariesByMinutes[note.id]
-                    let activity = job.map { $0.activity(title: note.title) } ?? summary?.activity
-                    let failed = job?.state == "error"
-                    Button(action: { open(note) }) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 10) {
-                                rowTitle(resultText(note.highlights?.title ?? note.title), activity: activity,
-                                         failure: failed ? job?.error : nil)
-                                Spacer(minLength: 0)
-                                Text(verbatim: formattedDate(note))
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize()
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            if let snippet = note.highlights?.transcript ?? note.highlights?.summary {
-                                resultText(snippet)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
+                if !pending.isEmpty || !minutes.isEmpty {
+                    LazyVStack(spacing: 0) {
+                        ForEach(pending, id: \.sessionId) { job in
+                            pendingRecording(job)
+                                .overlay(alignment: .bottom) {
+                                    if job.sessionId != pending.last?.sessionId || !minutes.isEmpty { archiveDivider }
+                                }
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 7)
-                        .frame(minHeight: 54)
-                        .contentShape(Rectangle())
+                        ForEach(minutes) { note in
+                            minutesRow(note, job: workBySession[note.sessionId], summary: summariesByMinutes[note.id])
+                                .overlay(alignment: .bottom) {
+                                    if note.id != minutes.last?.id { archiveDivider }
+                                }
+                        }
                     }
-                    .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
-                    .accessibilityValue(activity.map(statusText) ?? "")
-                    .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color.primary.opacity(0.065)).frame(height: 1)
-                    }
-                    .contextMenu {
-                        if let summary { summaryMenu(summary, dismiss: {}) }
-                        if let job, failed, let id = job.sessionId { recoveryButton(id) }
+                    .padding(4)
+                    .background(.primary.opacity(0.035), in: .rect(cornerRadius: 16))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16)
+                            .strokeBorder(.primary.opacity(0.075), lineWidth: 1 / displayScale)
+                            .allowsHitTesting(false)
                     }
                 }
 
@@ -473,14 +482,42 @@ public struct Workspace: View {
                         let next = scope
                         Task { await loadMinutes(next, offset: minutes.count) }
                     }
+                    .buttonStyle(.glass)
                     .disabled(loading)
-                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, compact ? 14 : 33)
             .padding(.bottom, 24)
         }
+    }
+
+    private var archiveDivider: some View {
+        Divider()
+            .padding(.leading, 62)
+            .padding(.trailing, 12)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private func archiveMessage(_ message: String, symbol: String) -> some View {
+        ContentUnavailableView(message, systemImage: symbol)
+            .frame(maxWidth: .infinity, minHeight: 180)
+    }
+
+    private func minutesRow(_ note: Minutes, job: PipelineStatus?, summary: ActiveSummary?) -> some View {
+        let activity = job.map { $0.activity(title: note.title) } ?? summary?.activity
+        let snippet = note.highlights?.transcript ?? note.highlights?.summary
+        return Button { open(note) } label: {
+            ArchiveListRow(title: resultText(note.highlights?.title ?? note.title), date: formattedDate(note),
+                           duration: note.durationSec, preview: snippet.map(resultText), activity: activity,
+                           problem: job?.error, opensDetail: true)
+        }
+        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
+        .allowsWindowActivationEvents(true)
+        .contextMenu { minutesMenu(note, job: job, summary: summary) }
     }
 
     private var pendingRecordings: [PipelineStatus] {
@@ -494,22 +531,12 @@ public struct Workspace: View {
     }
 
     private func pendingRecording(_ job: PipelineStatus) -> some View {
-        let activity = job.activity()
-        return HStack(spacing: 10) {
-            rowTitle(Text("新しい録音"), activity: activity, failure: job.error)
-                .accessibilityElement(children: .combine)
-                .accessibilityValue(statusText(activity))
-            Spacer(minLength: 0)
-            if let date = job.startedAt.flatMap(formattedRecordingDate) {
-                Text(verbatim: date).font(.system(size: 11)).foregroundStyle(.secondary)
+        HStack(spacing: 0) {
+            ArchiveListRow(title: Text("新しい録音"), date: job.startedAt.flatMap(formattedRecordingDate),
+                           duration: nil, preview: nil, activity: job.activity(), problem: job.error, opensDetail: false)
+            if job.state == "error", let id = job.sessionId {
+                recoveryButton(id).padding(.trailing, 12)
             }
-            if job.state == "error", let id = job.sessionId { recoveryButton(id) }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .frame(minHeight: 54)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.primary.opacity(0.065)).frame(height: 1)
         }
     }
 
@@ -518,37 +545,62 @@ public struct Workspace: View {
             .disabled(recoveringSession != nil)
     }
 
-    private func rowTitle(_ title: Text, activity: BackgroundActivity?, failure: String?) -> some View {
-        HStack(spacing: 8) {
-            title.font(.system(size: 15, weight: .semibold)).lineLimit(1)
-            if let activity {
-                Group {
-                    if activity.symbol == "exclamationmark.circle" {
-                        Image(systemName: activity.symbol).font(.caption).foregroundStyle(.orange)
-                    } else if reduceMotion {
-                        Image(systemName: "clock").font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        ProgressView().controlSize(.mini).tint(.secondary)
+    @ViewBuilder
+    private func minutesMenu(_ note: Minutes, job: PipelineStatus?, summary: ActiveSummary?) -> some View {
+        let transcribing = job?.state == "transcribing" || job?.state == "stopping"
+        let processing = transcribing || summary != nil
+        Button("議事録を開く", systemImage: "doc.text") { open(note) }
+        Divider()
+        Button("タイトルを編集…", systemImage: "pencil") {
+            minutesEditor = MinutesEditRequest(note: note, field: .title)
+        }
+        Button("要約を編集…", systemImage: "square.and.pencil") {
+            minutesEditor = MinutesEditRequest(note: note, field: .summary)
+        }
+        .disabled(processing)
+        if projects.contains(where: { $0.id != note.projectId }) {
+            Menu("別のプロジェクトへ移動", systemImage: "folder") {
+                ForEach(projects.filter { $0.id != note.projectId }) { project in
+                    Button(project.name) {
+                        performMinutesAction {
+                            try await session.api.reassignMinutes(id: note.id, projectId: project.id)
+                            session.archiveChanged()
+                        }
                     }
                 }
-                .frame(width: 14, height: 14)
-                .accessibilityHidden(true)
-                .help(failure ?? statusText(activity))
             }
+            .disabled(processing)
         }
+        Button("議事録のMarkdownをコピー", systemImage: "document.on.document") { copyMarkdown(note.id) }
+
+        if summary != nil || job?.state == "error" {
+            Divider()
+            if let summary { cancelSummaryButton(summary) }
+            if job?.state == "error", let id = job?.sessionId { recoveryButton(id) }
+        }
+
+        Divider()
+        Button("議事録を削除…", systemImage: "trash", role: .destructive) { deletingMinutes = note }
+            .disabled(processing)
     }
 
-    private func statusText(_ activity: BackgroundActivity) -> String {
-        let label = activity.stage ?? activity.name
-        guard let progress = activity.progress else { return label }
-        return label + " " + progress.formatted(.percent.precision(.fractionLength(0)))
+    private func minutesEditorSheet(_ request: MinutesEditRequest) -> some View {
+        let loadSummary: (() async throws -> String)? = request.field == .summary ? {
+            let fullNote = try await session.api.minutes(id: request.note.id, includeTranscript: false)
+            return fullNote.summary ?? ""
+        } : nil
+        return MinutesEditor(field: request.field, value: request.field == .title ? request.note.title : "",
+                             load: loadSummary) { value in
+            _ = try await request.field.save(value, to: request.note.id, via: session.api)
+            session.archiveChanged()
+        }
     }
 
     @ViewBuilder
     private func summaryMenu(_ job: ActiveSummary, dismiss: @escaping () -> Void) -> some View {
         Button("議事録を開く", systemImage: "doc.text") {
             dismiss()
-            performSummaryAction {
+            performMinutesAction {
                 let note = try await session.api.minutes(id: job.minutesId, includeTranscript: false)
                 if note.projectId != projectID, projects.contains(where: { $0.id == note.projectId }) {
                     select(note.projectId)
@@ -556,21 +608,27 @@ public struct Workspace: View {
                 open(note)
             }
         }
-        Button("議事録のMarkdownをコピー", systemImage: "document.on.document") {
-            performSummaryAction {
-                let markdown = try await session.api.markdown(for: job.minutesId)
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(markdown, forType: .string)
-            }
-        }
+        Button("議事録のMarkdownをコピー", systemImage: "document.on.document") { copyMarkdown(job.minutesId) }
         Divider()
+        cancelSummaryButton(job)
+    }
+
+    private func cancelSummaryButton(_ job: ActiveSummary) -> some View {
         Button(job.state == "dictionary_update" ? "用語辞書の整理を中止" : "要約を中止",
                systemImage: "stop.circle", role: .destructive) {
-            performSummaryAction { try await session.cancelSummary(id: job.minutesId) }
+            performMinutesAction { try await session.cancelSummary(id: job.minutesId) }
         }
     }
 
-    private func performSummaryAction(_ operation: @escaping @MainActor () async throws -> Void) {
+    private func copyMarkdown(_ id: String) {
+        performMinutesAction {
+            let markdown = try await session.api.markdown(for: id)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(markdown, forType: .string)
+        }
+    }
+
+    private func performMinutesAction(_ operation: @escaping @MainActor () async throws -> Void) {
         Task {
             do { try await operation() }
             catch { session.error = error.localizedDescription }
@@ -666,6 +724,7 @@ public struct Workspace: View {
     }
 
     private func open(_ note: Minutes) {
+        searchOpen = false
         showTranscript = note.highlights?.transcript != nil || (note.summary?.isEmpty != false)
         page = .detail(note)
     }

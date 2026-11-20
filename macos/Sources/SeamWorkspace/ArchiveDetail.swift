@@ -19,8 +19,7 @@ struct ArchiveDetail: View {
     @Stored private var exportNotice: ExportNotice?
     @Stored private var problem: String?
     @Stored private var working = false
-    @Stored private var editor: Editor?
-    @Stored private var edited = ""
+    @Stored private var editor: MinutesEditField?
     @Stored private var confirmation: Confirmation?
 
     let item: Minutes
@@ -31,12 +30,6 @@ struct ArchiveDetail: View {
     @Binding var expanded: Bool
     @Binding var showTranscript: Bool
     let close: () -> Void
-
-    private enum Editor: String, Identifiable {
-        case title = "タイトルを編集"
-        case summary = "要約を編集"
-        var id: Self { self }
-    }
 
     private struct ExportNotice {
         let id = UUID()
@@ -94,7 +87,12 @@ struct ArchiveDetail: View {
         }
         .task { await watchSummary() }
         .onDisappear { playback.pause() }
-        .sheet(item: $editor) { field in editorSheet(field) }
+        .sheet(item: $editor) { field in
+            MinutesEditor(field: field, value: field == .title ? note.title : (note.summary ?? "")) { value in
+                current = try await field.save(value, to: item.id, via: session.api)
+                session.archiveChanged()
+            }
+        }
         .alert(confirmation?.rawValue ?? "", isPresented: Binding(
             get: { confirmation != nil },
             set: { if !$0 { confirmation = nil } }
@@ -133,9 +131,9 @@ struct ArchiveDetail: View {
     // タイトル/要約の編集、再処理、削除などの詳細画面操作。
     private var commands: some View {
         Menu {
-            Button("タイトルを編集…", systemImage: "pencil") { openEditor(.title, value: note.title) }
-            Button("要約を編集…", systemImage: "square.and.pencil") { openEditor(.summary, value: note.summary ?? "") }
-                .disabled(transcribing || summarizing)
+            Button("タイトルを編集…", systemImage: "pencil") { editor = .title }
+            Button("要約を編集…", systemImage: "square.and.pencil") { editor = .summary }
+                .disabled(transcribing || summarizing || current == nil)
             Divider()
             Button("議事録のMarkdownをコピー", systemImage: "document.on.document") {
                 perform {
@@ -223,47 +221,6 @@ struct ArchiveDetail: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .glassEffect(.regular, in: .capsule)
-    }
-
-    private func openEditor(_ field: Editor, value: String) {
-        edited = value
-        editor = field
-    }
-
-    private func editorSheet(_ field: Editor) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(field.rawValue).font(.headline)
-            if field == .title {
-                TextField("タイトル", text: $edited)
-            } else {
-                TextEditor(text: $edited)
-                    .overlayEditorScrollIndicators()
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 270)
-                    .accessibilityLabel("要約のMarkdown")
-            }
-            HStack {
-                Spacer()
-                Button("キャンセル") { editor = nil }.keyboardShortcut(.cancelAction)
-                Button("保存") {
-                    let value = edited
-                    perform {
-                        if field == .title {
-                            current = try await session.api.renameMinutes(id: item.id, title: value)
-                        } else {
-                            current = try await session.api.updateSummary(id: item.id, markdown: value)
-                        }
-                        editor = nil
-                        session.archiveChanged()
-                    }
-                }
-                .disabled(working || (field == .title && edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
-                .keyboardShortcut(.defaultAction)
-            }
-            if let problem { Text(problem).foregroundStyle(.secondary).font(.callout) }
-        }
-        .padding(22)
-        .frame(minWidth: 420)
     }
 
     private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
