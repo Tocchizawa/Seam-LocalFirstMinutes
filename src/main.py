@@ -108,7 +108,7 @@ def _ensure_ffmpeg_on_path() -> None:
 
 
 _ensure_ffmpeg_on_path()
-emit_progress("init", "バックエンドを初期化中", 0.72)
+emit_progress("init", "録音サービスを初期化中", 0.72)
 
 log_cfg = config.get("logging") or {}
 log_level = log_cfg.get("level", "INFO")

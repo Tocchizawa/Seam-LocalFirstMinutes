@@ -10,30 +10,23 @@ public struct MinutesSearchField: View {
 
     private let width: CGFloat
     private let animated: Bool
-    private let onOpen: () -> Void
-    private let onEdit: () -> Void
     private let control: CGFloat = 36
 
-    public init(expanded: Binding<Bool>, query: Binding<String>, width: CGFloat = 230, animated: Bool = true,
-                onOpen: @escaping () -> Void, onEdit: @escaping () -> Void) {
+    public init(expanded: Binding<Bool>, query: Binding<String>, width: CGFloat = 230, animated: Bool = true) {
         self._expanded = expanded
         self._query = query
         self.width = max(120, width)
         self.animated = animated
-        self.onOpen = onOpen
-        self.onEdit = onEdit
     }
 
     private var motion: Animation? { animated && !reduceMotion ? SeamMotion.reposition : nil }
-    private var searchText: Binding<String> {
-        Binding(get: { query }, set: { query = $0; onEdit() })
-    }
+    private var hasFilter: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     public var body: some View {
         // 入力欄は開閉に合わせて幅を変える。control は常に表示するボタン部分の幅。
         surface(
             HStack(spacing: 0) {
-                TextField("タイトル・本文・要約", text: searchText)
+                TextField("タイトル・本文・要約", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .focused($focused)
@@ -48,10 +41,7 @@ public struct MinutesSearchField: View {
 
                 Button {
                     if expanded { collapse() }
-                    else {
-                        onOpen()
-                        expanded = true
-                    }
+                    else { expanded = true }
                 }
                 label: {
                     icon
@@ -61,10 +51,9 @@ public struct MinutesSearchField: View {
                 }
                 .buttonStyle(.plain)
                 .opacity(hidingCloseButton ? 0 : 1)
-                .disabled(hidingCloseButton)
                 .accessibilityHidden(hidingCloseButton)
-                .accessibilityLabel(expanded ? "検索を閉じる" : "検索")
-                .help(expanded ? "検索を閉じる Esc" : "議事録を検索 ⌘F")
+                .accessibilityLabel(expanded ? "検索をクリア" : (hasFilter ? "検索条件を編集" : "検索"))
+                .help(expanded ? "検索をクリア Esc" : (hasFilter ? "検索条件を編集 ⌘F" : "議事録を検索 ⌘F"))
                 .keyboardShortcut(expanded ? nil : KeyboardShortcut("f", modifiers: .command))
             }
             .frame(width: expanded ? width : control, height: control, alignment: .trailing)
@@ -80,9 +69,19 @@ public struct MinutesSearchField: View {
                 if !Task.isCancelled { focused = true }
             }
         }
+        .task(id: hidingCloseButton) {
+            guard hidingCloseButton else { return }
+            if motion != nil {
+                do { try await Task.sleep(for: .milliseconds(70)) }
+                catch { return }
+            }
+            expanded = false
+            hidingCloseButton = false
+        }
     }
 
     private func collapse() {
+        query = ""
         focused = false
         closeSearch()
     }
@@ -90,17 +89,11 @@ public struct MinutesSearchField: View {
     private func closeSearch() {
         guard expanded, !hidingCloseButton else { return }
         hidingCloseButton = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(70))
-            expanded = false
-            query = ""
-            hidingCloseButton = false
-        }
     }
 
     @ViewBuilder
     private var icon: some View {
-        let mark = Image(systemName: expanded ? "xmark" : "magnifyingglass")
+        let mark = Image(systemName: expanded ? "xmark" : (hasFilter ? "line.3.horizontal.decrease" : "magnifyingglass"))
         if #available(macOS 14.0, *) {
             mark.contentTransition(reduceMotion || !animated ? .identity : .symbolEffect(.replace))
         } else {

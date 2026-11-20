@@ -3,6 +3,20 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.1] - 2026-11-20
+
+### Changed
+
+- Show the current startup stage with animation and report runtime setup activity when it is available.
+- Redesign the minutes list with recording times, durations, and inline processing status.
+- Add a context menu for editing, moving, copying, and deleting minutes from the list.
+- Animate the header title and count when switching projects, and support native window zoom by double-clicking the header.
+
+### Fixed
+
+- Keep the project panel button responsive when clicking it to activate the window.
+- Open minutes on the first click while searching and keep the search filter when the field loses focus.
+
 ## [0.2.3] - 2026-09-15
 
 ### Added
