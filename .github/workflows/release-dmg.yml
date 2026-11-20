@@ -2,6 +2,11 @@ name: Release DMG
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "既存タグを指定すると、そのタグのアプリをビルドしてGitHub Releaseへ公開します"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -16,6 +21,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # A dispatch from main can rebuild an existing, immutable release tag
+          # with this newer workflow definition.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.release_tag || github.ref }}
+
+      - name: Resolve release tag
+        id: release
+        env:
+          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          else
+            release_tag="$DISPATCH_RELEASE_TAG"
+          fi
+          if [[ -n "$release_tag" && ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Release tag must look like v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         run: |
@@ -23,15 +48,15 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Validate release signing secrets
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
@@ -41,9 +66,9 @@ jobs:
             APPLE_CERTIFICATE_PASSWORD \
             APPLE_KEYCHAIN_PASSWORD \
             APPLE_SIGNING_IDENTITY \
-            APPLE_ID \
-            APPLE_APP_PASSWORD \
-            APPLE_TEAM_ID \
+            APPLE_API_KEY_ID \
+            APPLE_API_ISSUER_ID \
+            APPLE_API_PRIVATE_KEY \
             SPARKLE_PUBLIC_KEY \
             SPARKLE_PRIVATE_KEY; do
             if [ -z "${!key}" ]; then
@@ -54,7 +79,7 @@ jobs:
           exit "$missing"
 
       - name: Import release signing certificate
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -77,34 +102,38 @@ jobs:
         run: bash scripts/build-native.sh
 
       - name: Notarize app and DMG
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
           APP_PATH="macos/.build/distribution/Seam.app"
           DMG_PATH="$(find macos/.build/distribution -maxdepth 1 -name '*.dmg' -print -quit)"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$API_KEY_PATH"
+          chmod 600 "$API_KEY_PATH"
           ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/Seam.app.zip"
           xcrun notarytool submit "$RUNNER_TEMP/Seam.app.zip" \
-            --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+            --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
           xcrun stapler staple "$APP_PATH"
           xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+            --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$APP_PATH"
           xcrun stapler validate "$DMG_PATH"
 
       - name: Sign updater feed
-        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        if: (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')) && !contains(steps.release.outputs.tag, '-')
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          test "$GITHUB_REF_NAME" = "v$(tr -d '\n' < macos/VERSION)"
+          RELEASE_TAG="${{ steps.release.outputs.tag }}"
+          test "$RELEASE_TAG" = "v$(tr -d '\n' < macos/VERSION)"
           SPARKLE_TOOLS="macos/.build/artifacts/macos/Sparkle/bin"
           printf '%s\n' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_TOOLS/generate_appcast" \
             --ed-key-file - --maximum-deltas 0 \
-            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/" \
             macos/.build/distribution
           grep -q 'sparkle:edSignature=' macos/.build/distribution/appcast.xml
           grep -q 'sparkle-signatures:' macos/.build/distribution/appcast.xml
@@ -117,10 +146,11 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release Asset
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
           files: |
             macos/.build/distribution/*.dmg
             macos/.build/distribution/appcast.xml
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.release.outputs.tag, '-') }}
