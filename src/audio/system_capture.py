@@ -127,6 +127,7 @@ class SystemAudioCapture:
         self._wav_path: Path | None = None
         self._meta_path: Path | None = None
         self._error: str | None = None
+        self._paused = False
         self._sample_rate: int = 48000
         self._backend: str | None = None
         self._process: subprocess.Popen | None = None
@@ -257,6 +258,7 @@ class SystemAudioCapture:
 
         with self._state_lock:
             self._error = None
+            self._paused = False
             self._backend = None
             self._external_callback = external_callback
             self._sample_rate = max(8000, min(192000, int(sample_rate or 48000)))
@@ -715,6 +717,8 @@ class SystemAudioCapture:
         with self._state_lock:
             if not self._running:
                 return None
+            if self._paused:
+                return None
             if self._recovery_exhausted:
                 return None
             if self._pending_restart_reason:
@@ -794,22 +798,22 @@ class SystemAudioCapture:
         )
 
     def _restart_capture(self, reason: str, max_restarts: int, failure_backoff_sec: float) -> bool:
-        with self._state_lock:
-            if not self._running:
-                return False
-            next_index = self._segment_index + 1
-            self._last_restart_at = time.monotonic()
-            self._pending_restart_reason = None
-            self._next_restart_at = 0.0
-            restart_number = self._restart_count + 1
         logger.warning(
             "System audio unhealthy reason=%s; restarting ScreenCaptureKit restart=%d consecutive_failure_limit=%d",
             reason,
-            restart_number,
+            self._restart_count + 1,
             max_restarts,
         )
         self._log_disk_space("restart_requested")
         with self._capture_operation_lock:
+            with self._state_lock:
+                if not self._running or self._paused:
+                    return False
+                next_index = self._segment_index + 1
+                self._last_restart_at = time.monotonic()
+                self._pending_restart_reason = None
+                self._next_restart_at = 0.0
+                restart_number = self._restart_count + 1
             try:
                 now = time.monotonic()
                 with self._state_lock:
@@ -872,6 +876,40 @@ class SystemAudioCapture:
                 )
                 self._log_disk_space("restart_failed")
                 return False
+
+    def pause(self) -> None:
+        """Stop ScreenCaptureKit while a recording is paused."""
+        with self._capture_operation_lock:
+            with self._state_lock:
+                if not self._running or self._paused:
+                    return
+                self._paused = True
+                self._pending_restart_reason = None
+                self._next_restart_at = 0.0
+            self._stop_active_segment()
+        logger.info("System audio capture paused")
+
+    def resume(self) -> None:
+        """Start a fresh segment so paused audio is never written to disk."""
+        with self._capture_operation_lock:
+            with self._state_lock:
+                if not self._running or not self._paused:
+                    return
+                next_index = self._segment_index + 1
+            try:
+                self._start_segment(next_index)
+            except Exception:
+                # A failed metadata handshake can leave the sidecar alive even
+                # though the recorder must remain paused. Tear it down before
+                # returning the error so paused state never captures in the background.
+                self._stop_active_segment()
+                raise
+            with self._state_lock:
+                self._paused = False
+                self._error = None
+                self._restart_failure_count = 0
+                self._recovery_exhausted = False
+        logger.info("System audio capture resumed")
 
     def _stop_sidecar_process(self) -> None:
         process = self._process
@@ -1005,6 +1043,7 @@ class SystemAudioCapture:
             return
         with self._state_lock:
             self._running = False
+            self._paused = False
         self._watchdog_stop.set()
         self._watchdog_wakeup.set()
         watchdog_thread = self._watchdog_thread

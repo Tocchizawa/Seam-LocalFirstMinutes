@@ -159,6 +159,7 @@ class CoreAudioMicCapture:
         self._input_lock = threading.Lock()
         self._wav_path: Path | None = None
         self._wav_file: wave.Wave_write | None = None
+        self._raw_base_path: Path | None = None
         self._sample_rate = 16000
         self._error: str | None = None
         self._tail_thread: threading.Thread | None = None
@@ -166,16 +167,24 @@ class CoreAudioMicCapture:
         self._external_callback: AudioCallback | None = None
         self._level_callback: AudioCallback | None = None
         self._muted_getter: Callable[[], bool] | None = None
+        self._device_name: str | None = None
+        self._device_uid: str | None = None
+        self._resume_index = 0
+        self._paused = False
 
     @property
     def running(self) -> bool:
         source = self._input
-        return bool(self._running and source and source.running)
+        return bool(self._running and (self._paused or (source and source.running)))
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     @property
     def device_info(self) -> tuple[str | None, str | None]:
         source = self._input
-        return (source.device_name, source.device_uid) if source else (None, None)
+        return (source.device_name, source.device_uid) if source else (self._device_name, self._device_uid)
 
     @property
     def error(self) -> str | None:
@@ -200,7 +209,8 @@ class CoreAudioMicCapture:
         if platform.system() != "Darwin":
             raise RuntimeError("Core Audio mic sidecar は macOS でのみ利用できます")
 
-        source = _MicrophoneInput(output_path.with_suffix(".raw"), max(8000, min(48000, int(sample_rate or 16000))))
+        raw_path = output_path.with_suffix(".raw")
+        source = _MicrophoneInput(raw_path, max(8000, min(48000, int(sample_rate or 16000))))
         try:
             source.start(device_name=device_name)
             wav_file = wave.open(str(output_path), "wb")
@@ -214,10 +224,15 @@ class CoreAudioMicCapture:
         self._input = source
         self._wav_path = output_path
         self._wav_file = wav_file
+        self._raw_base_path = raw_path
         self._sample_rate = source.sample_rate
         self._external_callback = external_callback
         self._level_callback = level_callback
         self._muted_getter = muted_getter
+        self._device_name = source.device_name
+        self._device_uid = source.device_uid
+        self._resume_index = 0
+        self._paused = False
         self._error = None
         self._tail_stop.clear()
         self._running = True
@@ -229,7 +244,7 @@ class CoreAudioMicCapture:
 
     def switch_device(self, device_uid: str | None) -> None:
         previous = self._input
-        if not self._running or previous is None or self._wav_path is None:
+        if not self._running or self._paused or previous is None or self._wav_path is None:
             raise RuntimeError("録音中ではありません")
         if device_uid is None:
             device_uid = list_microphones().get("default_uid")
@@ -253,6 +268,8 @@ class CoreAudioMicCapture:
                     self._emit_samples(samples)
                 candidate.discard_buffered_audio()
                 self._input = candidate
+                self._device_name = candidate.device_name
+                self._device_uid = candidate.device_uid
         except Exception:
             candidate.close()
             raise
@@ -262,6 +279,43 @@ class CoreAudioMicCapture:
         except Exception:
             logger.exception("Failed to close the previous microphone")
         logger.info("Microphone switched to %s", candidate.device_name)
+
+    def pause(self) -> None:
+        with self._input_lock:
+            if not self._running or self._paused:
+                return
+            self._paused = True
+            source = self._input
+            self._input = None
+            if source is not None:
+                self._device_name = source.device_name
+                self._device_uid = source.device_uid
+                source.close()
+        logger.info("Microphone capture paused")
+
+    def resume(self) -> None:
+        with self._input_lock:
+            if not self._running or not self._paused:
+                return
+            if self._raw_base_path is None:
+                raise RuntimeError("マイクの保存先がありません")
+            self._resume_index += 1
+            raw_path = self._raw_base_path.with_name(
+                f"{self._raw_base_path.stem}.resume{self._resume_index}{self._raw_base_path.suffix}"
+            )
+            source = _MicrophoneInput(raw_path, self._sample_rate)
+            try:
+                source.start(device_name=self._device_name, device_uid=self._device_uid, wait_for_audio=True)
+                if source.sample_rate != self._sample_rate:
+                    raise RuntimeError("選択したマイクのサンプルレートが変わりました")
+            except Exception:
+                source.close()
+                raise
+            self._input = source
+            self._device_name = source.device_name
+            self._device_uid = source.device_uid
+            self._paused = False
+        logger.info("Microphone capture resumed")
 
     def _tail_raw_audio(self) -> None:
         while True:
@@ -280,7 +334,7 @@ class CoreAudioMicCapture:
                 time.sleep(0.1)
 
     def _emit_samples(self, samples_f32: np.ndarray) -> None:
-        if samples_f32.size == 0:
+        if samples_f32.size == 0 or self._paused:
             return
         try:
             muted = bool(self._muted_getter()) if self._muted_getter is not None else False
@@ -316,23 +370,32 @@ class CoreAudioMicCapture:
                 pass
 
     def stop(self) -> None:
-        source = self._input
-        if source is None:
+        if not self._running:
             return
         self._running = False
+        source = self._input
         try:
-            source.stop_process()
+            if source is not None:
+                source.stop_process()
+        except Exception as error:
+            self._error = f"Mic capture stop failed: {error}"
+            logger.warning("Mic capture process stop failed: %s", error)
         finally:
             with self._input_lock:
+                self._input = None
+                self._paused = False
                 self._tail_stop.set()
-            if self._tail_thread is not None:
-                self._tail_thread.join()
-                self._tail_thread = None
-            if self._wav_file is not None:
-                self._wav_file.close()
-                self._wav_file = None
-            self._input = None
-        source.remove_files()
+        if self._tail_thread is not None:
+            self._tail_thread.join()
+            self._tail_thread = None
+        if self._wav_file is not None:
+            self._wav_file.close()
+            self._wav_file = None
+        if source is not None:
+            try:
+                source.remove_files()
+            except Exception as error:
+                logger.warning("Mic capture temporary file cleanup failed: %s", error)
 
         if not self._wav_path or not self._wav_path.exists() or self._wav_path.stat().st_size <= 44:
             self._error = "Mic capture produced no usable audio"
