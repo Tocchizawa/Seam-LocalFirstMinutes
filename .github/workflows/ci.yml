@@ -24,3 +24,13 @@ jobs:
 
       - name: Compile Python Sources
         run: python -m compileall src
+
+  native-swift-build:
+    name: Native Swift Build
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Seam App
+        run: swift build --package-path macos --product SeamApp
