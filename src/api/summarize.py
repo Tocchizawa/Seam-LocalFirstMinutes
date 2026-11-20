@@ -106,7 +106,13 @@ async def summarize_status(minutes_id: str) -> dict:
 
 @router.post("/api/minutes/{minutes_id}/summarize/cancel")
 async def summarize_cancel(minutes_id: str) -> dict:
-    ok = await get_runner().cancel(minutes_id)
+    try:
+        ok = await get_runner().cancel(minutes_id)
+    except OSError as exc:
+        raise internal_error(
+            "SUMMARY_QUEUE_PERSIST_FAILED",
+            "要約キューを保存できなかったため、処理を中止できません",
+        ) from exc
     return {"state": "cancelled" if ok else "none"}
 
 

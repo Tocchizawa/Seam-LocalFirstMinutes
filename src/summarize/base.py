@@ -54,7 +54,6 @@ class ProjectContext:
 
     Note:
         members → 「会議の登場人物」のヒントとしてのみ提示。
-        speaker_id ↔ member_name の対応は LLM の文脈推論に委ねる。
 
     repo_path / doc_dirs は CLI agent (claude_code / codex) では
     --add-dir flag で渡し、agent が必要に応じて自分で Read/Grep する。

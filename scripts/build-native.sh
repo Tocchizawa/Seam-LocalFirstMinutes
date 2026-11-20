@@ -6,24 +6,25 @@ mkdir -p "$output"
 staging="$(mktemp -d "$output/.stage.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 
-app="$staging/Seam Native.app"
+app="$staging/Seam.app"
 contents="$app/Contents"
 resources="$contents/Resources"
 mkdir -p "$contents/MacOS" "$resources/backend"
 swift build --package-path "$repo/macos" --configuration release --product SeamApp
 bin="$(swift build --package-path "$repo/macos" --configuration release --show-bin-path)"
 cp "$bin/SeamApp" "$contents/MacOS/SeamApp"
-cp "$repo/gui/src-tauri/icons/icon.icns" "$resources/icon.icns"
+cp "$repo/macos/Resources/icons/icon.icns" "$resources/icon.icns"
+cp "$repo/macos/Resources/icons/SeamMenuBar.svg" "$resources/SeamMenuBar.svg"
 
 SEAM_BUNDLE_RESOURCES="$resources" bash "$repo/scripts/bundle-backend.sh"
 tar -xzf "$resources/seam-backend.tar.gz" -C "$resources/backend"
 rm "$resources/seam-backend.tar.gz"
 
-version="$(/usr/bin/plutil -extract version raw "$repo/gui/src-tauri/tauri.conf.json")"
+version="$(tr -d '\n' < "$repo/macos/VERSION")"
 short_version="${version%%-*}"
-cp "$repo/gui/src-tauri/Info.plist" "$contents/Info.plist"
+cp "$repo/macos/Resources/Info.plist" "$contents/Info.plist"
 plist="$contents/Info.plist"
-plutil -insert CFBundleName -string "Seam Native" "$plist"
+plutil -insert CFBundleName -string "Seam" "$plist"
 plutil -insert CFBundleDisplayName -string "Seam" "$plist"
 plutil -insert CFBundleIdentifier -string com.seamapp.seam.native "$plist"
 plutil -insert CFBundlePackageType -string APPL "$plist"
@@ -40,17 +41,17 @@ sign=(codesign --force)
 if [[ "$identity" != "-" ]]; then
     sign+=(--options runtime --timestamp)
 fi
-entitlements="$repo/gui/src-tauri/entitlements.plist"
-for binary in "$resources/uv" "$resources/audio-capture"; do
+entitlements="$repo/macos/Resources/entitlements.plist"
+for binary in "$resources/uv" "$resources/audio-capture" "$resources/apple-speech-transcriber"; do
     "${sign[@]}" --entitlements "$entitlements" --sign "$identity" "$binary"
 done
 "${sign[@]}" --entitlements "$entitlements" --sign "$identity" "$app"
 codesign --verify --deep --strict "$app"
 
 ln -s /Applications "$staging/Applications"
-dmg="$output/Seam_Native_${short_version}_arm64.dmg"
-hdiutil create -volname "Seam Native" -srcfolder "$staging" -format UDZO -ov "$dmg"
-destination="$output/Seam Native.app"
+dmg="$output/Seam_${short_version}_arm64.dmg"
+hdiutil create -volname "Seam" -srcfolder "$staging" -format UDZO -ov "$dmg"
+destination="$output/Seam.app"
 if [[ -e "$destination" ]]; then
     mv "$destination" "$staging/previous.app"
 fi

@@ -84,47 +84,6 @@ public struct SettingsDocument: Codable, Equatable, Sendable {
     }
 }
 
-public struct WhisperModels: Decodable, Sendable {
-    public struct Model: Decodable, Equatable, Identifiable, Sendable {
-        public let name: String
-        public let label: String
-        public let state: String
-        public let downloaded: Bool
-        public let sizeBytes: Int
-        public var id: String { name }
-
-        public init(name: String, label: String, state: String, downloaded: Bool, sizeBytes: Int = 0) {
-            self.name = name
-            self.label = label
-            self.state = state
-            self.downloaded = downloaded
-            self.sizeBytes = sizeBytes
-        }
-    }
-
-    public struct Download: Decodable, Equatable, Sendable {
-        public let state: String
-        public let model: String?
-        public let percent: Double?
-        public let error: String?
-        public let currentBytes: Int?
-        public let totalBytes: Int?
-
-        public init(state: String, model: String?, percent: Double? = nil, error: String? = nil,
-                    currentBytes: Int? = nil, totalBytes: Int? = nil) {
-            self.state = state
-            self.model = model
-            self.percent = percent
-            self.error = error
-            self.currentBytes = currentBytes
-            self.totalBytes = totalBytes
-        }
-    }
-
-    public let models: [Model]
-    public let download: Download
-}
-
 public struct CLIModel: Decodable, Identifiable, Sendable {
     public let slug: String
     public let displayName: String
@@ -137,18 +96,6 @@ public struct ServiceConnectionCheck: Decodable, Sendable {
     public let model: String?
 }
 
-public struct SpeakerProfile: Decodable, Identifiable, Sendable {
-    public let id: String
-    public let label: String
-    public let sampleAvailable: Bool
-    public let appearances: Int
-}
-
-public struct DiarizationStatus: Decodable, Sendable {
-    public let pyannoteAvailable: Bool
-    public let hasHfToken: Bool
-}
-
 extension SeamAPI {
     public func settings() async throws -> SettingsDocument {
         try await request(["api", "settings"])
@@ -156,20 +103,6 @@ extension SeamAPI {
 
     public func saveSettings(_ changes: SettingsDocument) async throws -> SettingsDocument {
         try await request(["api", "settings"], method: "PUT", body: JSONEncoder().encode(changes))
-    }
-
-    public func whisperModels() async throws -> WhisperModels {
-        try await request(["api", "models", "whisper"])
-    }
-
-    public func downloadWhisper(_ model: String) async throws -> WhisperModels.Download {
-        struct Started: Decodable { let download: WhisperModels.Download }
-        let result: Started = try await request(["api", "models", "whisper", model, "download"], method: "POST")
-        return result.download
-    }
-
-    public func removeWhisper(_ model: String) async throws {
-        let _: SettingsDocument = try await request(["api", "models", "whisper", model], method: "DELETE")
     }
 
     public func cliModels(for provider: String) async throws -> [CLIModel] {
@@ -213,46 +146,4 @@ extension SeamAPI {
                                timeout: 150)
     }
 
-    public func diarizationStatus() async throws -> DiarizationStatus {
-        try await request(["api", "speakers", "diarization", "status"])
-    }
-
-    public func setDiarizationToken(_ token: String) async throws {
-        struct Secret: Encodable { let token: String }
-        let _: SettingsDocument = try await write(["api", "speakers", "diarization", "token"], method: "PUT",
-                                                  body: Secret(token: token))
-    }
-
-    public func removeDiarizationToken() async throws {
-        let _: SettingsDocument = try await request(["api", "speakers", "diarization", "token"], method: "DELETE")
-    }
-
-    public func checkDiarization() async throws -> ServiceConnectionCheck {
-        try await request(["api", "speakers", "diarization", "test"], method: "POST")
-    }
-
-    public func speakers() async throws -> [SpeakerProfile] {
-        struct Result: Decodable { let speakers: [SpeakerProfile] }
-        let result: Result = try await request(["api", "speakers"])
-        return result.speakers
-    }
-
-    public func renameSpeaker(_ id: String, label: String) async throws {
-        struct Label: Encodable { let label: String }
-        let _: SettingsDocument = try await write(["api", "speakers", id], method: "PATCH", body: Label(label: label))
-    }
-
-    public func removeSpeaker(_ id: String) async throws {
-        let _: SettingsDocument = try await request(["api", "speakers", id], method: "DELETE")
-    }
-
-    public func mergeSpeakers(into primaryId: String, sourceIds: [String]) async throws {
-        struct Merge: Encodable { let primaryId: String; let sourceIds: [String] }
-        let _: SettingsDocument = try await write(["api", "speakers", "merge"], method: "POST",
-                                                  body: Merge(primaryId: primaryId, sourceIds: sourceIds))
-    }
-
-    public func speakerAudio(for id: String) throws -> URL {
-        try endpoint(["api", "speakers", id, "sample"])
-    }
 }

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// プロジェクト行の並べ替え。ドラッグ中は隣の行が空いた位置へ移動する。
 /// 行の高さは init の height、行間は spacing で調整する。
-public struct ProjectOrderList<Row: View>: View {
+public struct ProjectOrderList<Row: View, MenuItems: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private typealias Stored<Value> = SwiftUI.State<Value>
 
@@ -11,16 +11,19 @@ public struct ProjectOrderList<Row: View>: View {
     @Stored private var translation: CGFloat = 0
     @Stored private var destination: Int?
     private let row: (String) -> Row
+    private let menuItems: (String) -> MenuItems
     private let height: CGFloat
     private let animated: Bool
     private let spacing: CGFloat = 3
 
     public init(ids: Binding<[String]>, height: CGFloat = 33, animated: Bool = true,
-                @ViewBuilder row: @escaping (String) -> Row) {
+                @ViewBuilder row: @escaping (String) -> Row,
+                @ViewBuilder menuItems: @escaping (String) -> MenuItems) {
         _ids = ids
         self.height = height
         self.animated = animated
         self.row = row
+        self.menuItems = menuItems
     }
 
     public var body: some View {
@@ -38,12 +41,13 @@ public struct ProjectOrderList<Row: View>: View {
                     }
                     .offset(y: offset(for: id))
                     .zIndex(picked == id ? 1 : 0)
-                    .simultaneousGesture(
+                    .highPriorityGesture(
                         DragGesture(minimumDistance: 5, coordinateSpace: .global)
                             .onChanged { drag(id, distance: $0.translation.height) }
                             .onEnded { _ in finish(id) }
                     )
                     .contextMenu {
+                        menuItems(id)
                         Button("上に移動") { move(id, by: -1) }.disabled(ids.first == id)
                         Button("下に移動") { move(id, by: 1) }.disabled(ids.last == id)
                     }
@@ -108,5 +112,12 @@ public struct ProjectOrderList<Row: View>: View {
         picked = nil
         destination = nil
         translation = 0
+    }
+}
+
+public extension ProjectOrderList where MenuItems == EmptyView {
+    init(ids: Binding<[String]>, height: CGFloat = 33, animated: Bool = true,
+         @ViewBuilder row: @escaping (String) -> Row) {
+        self.init(ids: ids, height: height, animated: animated, row: row) { _ in EmptyView() }
     }
 }

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Tauri ビルド前に走らせる「Python バックエンドを .app に同梱する」スクリプト。
-# 出力先: gui/src-tauri/resources/
+# Native アプリへ Python バックエンドとネイティブ helper を同梱する。
+# 出力先: macos/.build/backend-resources/ (SEAM_BUNDLE_RESOURCES で上書き可)
 #   - uv                 : aarch64-apple-darwin の uv バイナリ
 #   - seam-backend.tar.gz: src/ + pyproject.toml + uv.lock を固めた tarball
 #   - audio-capture      : native audio sidecar (ScreenCaptureKit system audio + Core Audio microphone)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RES_DIR="${SEAM_BUNDLE_RESOURCES:-${REPO_ROOT}/gui/src-tauri/resources}"
+RES_DIR="${SEAM_BUNDLE_RESOURCES:-${REPO_ROOT}/macos/.build/backend-resources}"
 UV_TARGET="${RES_DIR}/uv"
 TAR_TARGET="${RES_DIR}/seam-backend.tar.gz"
 SIDECAR_TARGET="${RES_DIR}/audio-capture"
@@ -70,5 +70,17 @@ else
   chmod +x "${SIDECAR_TARGET}"
   echo "[bundle] audio-capture sidecar copied: ${SIDECAR_TARGET}"
 fi
+
+# ─── Native Apple Speech helper ──────────────────────────────
+if ! command -v swift >/dev/null 2>&1; then
+  echo "[bundle] error: Swift toolchain is required to build Apple Speech helper" >&2
+  exit 1
+fi
+swift build --package-path "${REPO_ROOT}/macos" --configuration release --product AppleSpeechTranscriber
+SWIFT_BIN="$(swift build --package-path "${REPO_ROOT}/macos" --configuration release --show-bin-path)"
+SPEECH_TARGET="${RES_DIR}/apple-speech-transcriber"
+cp "${SWIFT_BIN}/AppleSpeechTranscriber" "${SPEECH_TARGET}"
+chmod +x "${SPEECH_TARGET}"
+echo "[bundle] Apple Speech helper copied: ${SPEECH_TARGET}"
 
 echo "[bundle] OK"

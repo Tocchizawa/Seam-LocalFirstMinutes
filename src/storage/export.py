@@ -70,11 +70,7 @@ def to_markdown(minutes: dict, project_name: str | None = None) -> str:
             ts = _fmt_ts(float(seg.get("start", 0)))
             text = (seg.get("text") or "").strip()
             if text:
-                speaker = (seg.get("speaker_label") or "").strip()
-                prefix = f"[{ts}]"
-                if speaker:
-                    prefix = f"{prefix} ({speaker})"
-                lines.append(f"{prefix} {text}")
+                lines.append(f"[{ts}] {text}")
                 lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

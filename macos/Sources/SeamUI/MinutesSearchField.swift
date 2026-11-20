@@ -6,6 +6,7 @@ public struct MinutesSearchField: View {
     @FocusState private var focused: Bool
     @Binding private var expanded: Bool
     @Binding private var query: String
+    @State private var hidingCloseButton = false
 
     private let width: CGFloat
     private let animated: Bool
@@ -51,13 +52,17 @@ public struct MinutesSearchField: View {
                         onOpen()
                         expanded = true
                     }
-                } label: {
+                }
+                label: {
                     icon
                         .font(.system(size: 14, weight: .medium))
                         .frame(width: control, height: control)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
+                .opacity(hidingCloseButton ? 0 : 1)
+                .disabled(hidingCloseButton)
+                .accessibilityHidden(hidingCloseButton)
                 .accessibilityLabel(expanded ? "検索を閉じる" : "検索")
                 .help(expanded ? "検索を閉じる Esc" : "議事録を検索 ⌘F")
                 .keyboardShortcut(expanded ? nil : KeyboardShortcut("f", modifiers: .command))
@@ -66,6 +71,9 @@ public struct MinutesSearchField: View {
             .fixedSize()
         )
         .animation(motion, value: expanded)
+        .onChange(of: focused) { hasFocus in
+            if !hasFocus && expanded { closeSearch() }
+        }
         .task(id: expanded) {
             if expanded {
                 await Task.yield()
@@ -76,8 +84,18 @@ public struct MinutesSearchField: View {
 
     private func collapse() {
         focused = false
-        expanded = false
-        query = ""
+        closeSearch()
+    }
+
+    private func closeSearch() {
+        guard expanded, !hidingCloseButton else { return }
+        hidingCloseButton = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(70))
+            expanded = false
+            query = ""
+            hidingCloseButton = false
+        }
     }
 
     @ViewBuilder

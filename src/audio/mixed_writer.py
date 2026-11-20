@@ -16,7 +16,7 @@ SAMPLE_RATE = 16000
 
 
 class RealtimeMixedAudioWriter:
-    """Persist the exact mixed stream sent to Whisper."""
+    """Persist the exact mixed stream sent to Apple Speech."""
 
     def __init__(self, session_dir: Path, *, sample_rate: int = SAMPLE_RATE) -> None:
         self.session_dir = session_dir

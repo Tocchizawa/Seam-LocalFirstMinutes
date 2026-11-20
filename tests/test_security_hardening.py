@@ -35,7 +35,6 @@ def ok(name: str, cond: bool) -> None:
 print("\n[1] Origin validation")
 ok("localhost origin is allowed", is_allowed_request_origin("http://localhost:1420"))
 ok("127.0.0.1 origin is allowed", is_allowed_request_origin("http://127.0.0.1:3000"))
-ok("tauri origin is allowed", is_allowed_request_origin("tauri://localhost"))
 ok("remote origin is denied", not is_allowed_request_origin("https://evil.example.com"))
 ok("null origin is denied", not is_allowed_request_origin("null"))
 

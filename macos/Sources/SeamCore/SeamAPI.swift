@@ -54,6 +54,12 @@ public struct SeamAPI: Sendable {
         try await request(["api", "minutes", id])
     }
 
+    public func minutesCount(projectId: String) async throws -> Int {
+        struct MinutesCount: Decodable { let count: Int }
+        let result: MinutesCount = try await request(["api", "projects", projectId, "minutes", "count"])
+        return result.count
+    }
+
     public func search(_ text: String, projectId: String? = nil) async throws -> [Minutes] {
         var query = [URLQueryItem(name: "q", value: text)]
         if let projectId { query.append(URLQueryItem(name: "project", value: projectId)) }
@@ -94,12 +100,23 @@ public struct SeamAPI: Sendable {
         return result.muted
     }
 
-    public func segments(in sessionId: String) async throws -> [TranscriptSegment] {
-        try await request(["api", "recording", "sessions", sessionId, "segments"])
+    public func recordingMicrophones() async throws -> [RecordingMicrophone] {
+        struct Microphones: Decodable { let devices: [RecordingMicrophone] }
+        let result: Microphones = try await request(["api", "recording", "microphones"])
+        return result.devices
     }
 
-    public func liveAudioSource(for sessionId: String) async throws -> LiveAudioSource {
-        try await request(["api", "recording", "sessions", sessionId, "live-audio"])
+    public func switchMicrophone(sessionId: String, deviceUid: String?) async throws -> MicrophoneChange {
+        struct Selection: Encodable {
+            let sessionId: String
+            let deviceUid: String?
+        }
+        return try await write(["api", "recording", "microphone"], method: "PUT",
+                               body: Selection(sessionId: sessionId, deviceUid: deviceUid))
+    }
+
+    public func segments(in sessionId: String) async throws -> [TranscriptSegment] {
+        try await request(["api", "recording", "sessions", sessionId, "segments"])
     }
 
     public func pipelines() async throws -> [PipelineStatus] {

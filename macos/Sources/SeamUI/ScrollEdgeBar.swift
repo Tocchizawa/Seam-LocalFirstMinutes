@@ -5,6 +5,13 @@ public extension Color {
     static func seamPaper(for scheme: ColorScheme) -> Color {
         Color(white: scheme == .dark ? 0.087 : 0.991)
     }
+
+    /// ウインドウのヘッダーとサイドバーで使う背景色。
+    @available(macOS 26.0, *)
+    package static func seamPanel(for scheme: ColorScheme) -> Color {
+        let tint = Color(white: scheme == .dark ? 0.125 : 0.970)
+        return seamPaper(for: scheme).mix(with: tint, by: 0.5)
+    }
 }
 
 public extension View {

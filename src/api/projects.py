@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 from src.api.errors import bad_request, not_found
 from src.project.manager import project_manager
 from src.project.models import Project, ProjectCreate, ProjectOrder, ProjectUpdate
+from src.storage.db import db
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -33,6 +34,13 @@ async def get_project(project_id: str) -> Project:
     if p is None:
         raise not_found("PROJECT_NOT_FOUND", f"プロジェクト '{project_id}' が見つかりません")
     return p
+
+
+@router.get("/{project_id}/minutes/count")
+async def count_project_minutes(project_id: str) -> dict[str, int]:
+    if project_manager.get(project_id) is None:
+        raise not_found("PROJECT_NOT_FOUND", f"プロジェクト '{project_id}' が見つかりません")
+    return {"count": db.count_minutes(project_id)}
 
 
 @router.put("/{project_id}", response_model=Project)

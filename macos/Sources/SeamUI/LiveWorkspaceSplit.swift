@@ -5,6 +5,7 @@ import SwiftUI
 public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
     private let recording: Bool
     private let expanded: Bool
     private let animated: Bool
@@ -44,6 +45,14 @@ public struct LiveWorkspaceSplit<Archive: View, Transcript: View>: View {
                         .frame(width: full ? geometry.size.width : compactTrack, height: geometry.size.height)
                         .background(Color.seamPaper(for: colorScheme))
                         .clipped()
+                        .overlay(alignment: .leading) {
+                            Rectangle()
+                                .fill(Color(nsColor: .separatorColor))
+                                .frame(width: 1 / displayScale)
+                                .opacity(full ? 0 : 1)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
                         .transition(motion == nil ? .identity : .move(edge: .trailing))
                         .zIndex(1)
                 }

@@ -9,16 +9,13 @@ DEFAULT_LOCAL_ORIGINS: tuple[str, ...] = (
     "http://localhost",
     "http://127.0.0.1",
     "http://[::1]",
-    "http://tauri.localhost",
-    "https://tauri.localhost",
-    "tauri://localhost",
 )
 
-LOCAL_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\]|tauri\.localhost)(:\d+)?$"
+LOCAL_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
 
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "tauri.localhost"}
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 MUTATING_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -55,8 +52,6 @@ def is_allowed_request_origin(
 
     parsed = urlparse(origin_norm)
     host = (parsed.hostname or "").strip().lower()
-    if parsed.scheme == "tauri" and host == "localhost":
-        return True
     if parsed.scheme in {"http", "https"} and host in _LOCAL_HOSTS:
         return True
     return False

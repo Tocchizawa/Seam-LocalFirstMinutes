@@ -26,7 +26,6 @@ CREATE TABLE IF NOT EXISTS minutes (
     transcript_text TEXT NOT NULL DEFAULT '',
     summary         TEXT NOT NULL,
     context_snapshot TEXT,
-    whisper_model   TEXT,
     llm_model       TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -145,7 +144,7 @@ class Database:
     _LIST_COLUMNS: tuple[str, ...] = (
         "id", "session_id", "project_id", "title", "date", "started_at",
         "duration_sec", "summary", "created_at", "updated_at",
-        "whisper_model", "llm_model",
+        "llm_model",
     )
 
     @classmethod
@@ -190,13 +189,19 @@ class Database:
             out.append(d)
         return out
 
+    def count_minutes(self, project_id: str) -> int:
+        row = self._get_conn().execute(
+            "SELECT COUNT(*) FROM minutes WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return row[0]
+
     def update_transcript(
         self,
         minutes_id: str,
         transcript: list[dict],
         *,
         clear_summary: bool = False,
-        whisper_model: str | None = None,
     ) -> bool:
         conn = self._get_conn()
         transcript_text = build_transcript_text(transcript)
@@ -204,15 +209,14 @@ class Database:
         if clear_summary:
             result = conn.execute(
                 "UPDATE minutes SET transcript = ?, transcript_text = ?, summary = '', "
-                "llm_model = '', whisper_model = COALESCE(?, whisper_model), "
-                "updated_at = datetime('now') WHERE id = ?",
-                (transcript_json, transcript_text, whisper_model, minutes_id),
+                "llm_model = '', updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, minutes_id),
             )
         else:
             result = conn.execute(
                 "UPDATE minutes SET transcript = ?, transcript_text = ?, "
-                "whisper_model = COALESCE(?, whisper_model), updated_at = datetime('now') WHERE id = ?",
-                (transcript_json, transcript_text, whisper_model, minutes_id),
+                "updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, minutes_id),
             )
         conn.commit()
         return result.rowcount > 0
@@ -250,53 +254,6 @@ class Database:
         )
         conn.commit()
         return result.rowcount > 0
-
-    def reassign_speaker_id(
-        self,
-        source_id: str,
-        target_id: str | None,
-        target_label: str | None = None,
-    ) -> int:
-        """全議事録の transcript で speaker_id=source_id を target_id (or None) に書き換える。
-
-        target_id=None の場合は speaker_id/label/confidence を null にする (= "話者?")。
-        target_label を指定すると label も上書き。
-        戻り値は更新されたセグメント数。
-        """
-        conn = self._get_conn()
-        rows = conn.execute("SELECT id, transcript FROM minutes").fetchall()
-        updated_segs = 0
-        for row in rows:
-            try:
-                transcript = json.loads(row["transcript"])
-            except Exception:
-                continue
-            if not isinstance(transcript, list):
-                continue
-            changed = False
-            for seg in transcript:
-                if not isinstance(seg, dict):
-                    continue
-                if str(seg.get("speaker_id") or "") != source_id:
-                    continue
-                if target_id is None:
-                    seg["speaker_id"] = None
-                    seg["speaker_label"] = None
-                    seg["speaker_confidence"] = None
-                else:
-                    seg["speaker_id"] = target_id
-                    if target_label is not None:
-                        seg["speaker_label"] = target_label
-                changed = True
-                updated_segs += 1
-            if changed:
-                new_text = build_transcript_text(transcript)
-                conn.execute(
-                    "UPDATE minutes SET transcript = ?, transcript_text = ?, updated_at = datetime('now') WHERE id = ?",
-                    (json.dumps(transcript, ensure_ascii=False), new_text, row["id"]),
-                )
-        conn.commit()
-        return updated_segs
 
     def delete_minutes(self, minutes_id: str) -> bool:
         conn = self._get_conn()
@@ -391,6 +348,8 @@ class Database:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)
+        # Older databases may still have this column; keep its contents in SQLite but do not expose it.
+        d.pop("whisper_model", None)
         if "transcript" in d and isinstance(d["transcript"], str):
             try:
                 d["transcript"] = json.loads(d["transcript"])

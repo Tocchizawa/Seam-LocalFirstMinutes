@@ -173,15 +173,15 @@ print("[4] prompts.format_transcript_segments")
 print("=" * 60)
 
 segs = [
-    {"start": 0.0, "end": 5.0, "text": "おはようございます", "speaker_label": "田中"},
-    {"start": 65.5, "end": 70.0, "text": "今日のアジェンダは...", "speaker_label": "佐藤"},
-    {"start": 130.0, "end": 132.0, "text": "了解です"},  # speaker_label 無し
+    {"start": 0.0, "end": 5.0, "text": "おはようございます"},
+    {"start": 65.5, "end": 70.0, "text": "今日のアジェンダは..."},
+    {"start": 130.0, "end": 132.0, "text": "了解です"},
     {"start": 0, "end": 0, "text": ""},  # 空 → skip
 ]
 formatted = format_transcript_segments(segs)
-assert_true("[00:00] 形式 with speaker", "[00:00] (田中) おはよう" in formatted)
-assert_true("[01:05] 形式", "[01:05] (佐藤) 今日のアジェンダ" in formatted)
-assert_true("speaker 無しなら timestamp + text", "[02:10] 了解です" in formatted)
+assert_true("[00:00] 形式", "[00:00] おはよう" in formatted)
+assert_true("[01:05] 形式", "[01:05] 今日のアジェンダ" in formatted)
+assert_true("timestamp + text", "[02:10] 了解です" in formatted)
 assert_true("空 segment skip", formatted.count("\n") == 2)
 
 

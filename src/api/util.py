@@ -1,7 +1,5 @@
-"""フロント (Tauri webview) から呼ぶ OS 操作ユーティリティ。
+"""ネイティブ UI から呼ぶ OS 操作ユーティリティ。
 
-Tauri plugin (opener / clipboard-manager) は scope 設定や webview 制約で
-うまく動かないケースがあるため、確実に動くバックエンド経由ルートを提供する。
 macOS 専用の ``open`` / ``pbcopy`` を subprocess で呼ぶ。
 """
 from __future__ import annotations

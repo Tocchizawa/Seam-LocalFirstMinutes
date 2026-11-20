@@ -4,196 +4,76 @@
 
 # Seam - Local-First Minutes
 
-Seam は、**会議の録音・文字起こし・要約をローカル環境中心で完結**させる macOS 向けアプリです。  
-デスクトップUI（SwiftUI または Tauri + React）とバックエンドAPI（FastAPI）を分離している。
-
-<p align="center">
-  <img src="./docs/images/seam-main.png" alt="Seam main screen" width="100%">
-</p>
+Seam は、会議の録音、文字起こし、要約をローカル環境中心で扱う macOS アプリである。デスクトップ UI は SwiftUI、ローカル API と議事録処理は FastAPI、録音中の文字起こしは macOS の Apple Speech を使う。
 
 ## ダウンロード
 
-最新版の DMG は [Releases ページ](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases) からダウンロードできます。
-DMG を開いて `Seam.app` を `Applications` にドラッグするだけでインストール完了です（Apple Developer ID 署名 + 公証済み）。
-インストール後は設定画面から更新確認できます。起動時自動アップデートを有効にすると、次回起動時に更新を見つけた場合だけ自動で適用します。
+最新版の DMG は [GitHub Releases](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases) から取得できる。DMG を開いて `Seam.app` を Applications フォルダへ移す。
 
-ビルドはご自身でも可能です。手順は [ローカル実行（開発）](#ローカル実行開発) と [ビルド](#ビルド) を参照してください。
-
-### SwiftUI 版をローカルでビルドする
-
-Apple Silicon の Mac、macOS 26 以降、Xcode Command Line Tools、`uv` が必要。
-
-```bash
-pnpm build:native
-```
-
-`macos/.build/distribution/` の `Seam Native.app` を開くか、同じフォルダの DMG からインストールする。初回起動時は同梱の `uv` が Python と依存パッケージを準備する。既存版と同じ `~/.seam` を使うため、既存版を終了してから SwiftUI 版を開く。初めて収録する前に「設定 → 録音」で入力を選び、「設定 → 文字起こし」で Whisper モデルを取得できる。
-
-Codex を使う場合は、Codex CLI にログインしたうえで「設定 → 要約」で `Codex` を選ぶ。「接続をテスト」では選択中のモデルで短いテスト応答を確認できる。起動コマンドを変更した場合は先に設定を保存する。
-
-ローカルビルドの既定はアドホック署名。配布向けビルドでは `APPLE_SIGNING_IDENTITY` を指定できる。ネイティブ版の自動更新には、署名済みの更新を配信する仕組みが別途必要。
-
-## プロジェクトの狙い
-
-- ローカルで高速に議事録を作れること
-- 会議データの取り扱いをシンプルにできること
-- 1人開発でも保守しやすい構成にすること
+アプリの実行には Apple Silicon と macOS 26 以降が必要である。Apple Speech の言語リソースが未取得の場合、最初の文字起こし時に macOS が準備する。
 
 ## 主な機能
 
-### 1. 録音・リアルタイム文字起こし
+- マイクとシステム音声の録音
+- 録音中に進む Apple Speech の文字起こしと一時プレビュー
+- 録音、文字起こし、要約をまとめた議事録管理
+- 保存済み音声からの再文字起こし
+- SQLite 全文検索、Markdown エクスポート、プロジェクト管理
+- Ollama、Claude API、OpenAI API、Claude Code、Codex による要約
+- 用語集と誤転写補正ルールの管理
 
-- マイク録音 + システム音声録音（任意）を同時に実行
-- 録音中にリアルタイムで文字起こしを表示
-- VAD（`silero` / `energy`）で発話区間を分割して安定処理
-- 録音中のマイクソフトミュート切り替え
-- 録音停止忘れ通知（無音が続いた場合）
+文字起こしは話者を割り当てず、発話時刻と本文を保存する。従来版の議事録、音声、設定フォルダ `~/.seam` は引き続き利用する。以前の議事録に含まれる話者情報は保存データ内に残るが、現行 UI では利用しない。
 
-### 2. 議事録管理
+## 開発環境
 
-- 録音停止後に議事録を自動保存（SQLite）
-- 要約と全文書き起こしを同じ議事録で管理
-- タイトル編集・要約編集・削除・プロジェクト再割り当て
-- 議事録を Markdown でエクスポート（要約 + 全文）
-- 保存済み音声から文字起こしを再実行
-- 全文検索（SQLite FTS5 trigram）
+必要なもの:
 
-### 3. 話者管理
+- Apple Silicon Mac、macOS 26 以降
+- Xcode Command Line Tools
+- Python 3.11 以降、`uv`
+- Swift 6.2 以降
 
-- 話者分離方式の切り替え（`legacy` / `pyannote`）
-- 話者プロファイルの一覧・リネーム・統合・削除
-- 話者サンプル音声の再生
-- `pyannote` 用の HuggingFace トークン保存 / テスト
-
-### 4. 要約（複数プロバイダ）
-
-- Ollama（ローカル）
-- Claude API
-- OpenAI API
-- Claude Code CLI
-- Codex CLI
-- 録音停止時の自動要約、または議事録ごとの手動再要約
-- 要約後の辞書更新（用語集 / 誤転写補正）を自動化
-
-### 5. プロジェクト運用
-
-- プロジェクトの作成・更新・削除
-- プロジェクトごとの出力先ディレクトリ管理
-- コンテキスト参照用の `repo_path` / `doc_dirs` 設定
-- 用語集と誤転写補正ルール（`wrong` → `correct`）の管理
-- ドキュメント群からの用語集候補の自動抽出
-
-## 実装状況メモ
-
-- `Gemini` は設定UI/APIの枠はありますが、要約本体は未対応です
-- システム音声録音は macOS のシステム音声取得権限が必要です
-- ローカル完結運用が基本ですが、Claude/OpenAI などクラウド要約も選択可能です
-
-## 技術スタック
-
-- Desktop: Tauri + React + TypeScript
-- Backend: FastAPI (Python)
-- AI/ML: mlx-whisper / Silero VAD / pyannote / Ollama / 外部LLM
-- Storage: SQLite + YAML + Keyring
-- Build: pnpm / uv / Rust toolchain
-
-詳細は [docs/tech-stack.md](./docs/tech-stack.md) を参照してください。
-
-## ローカル実行（開発）
-
-前提:
-
-- macOS
-- Python 3.11+
-- Node.js 20+
-- `pnpm` 9+
-- Rust (stable)
-- `uv`
-- `ffmpeg`
+バックエンドを開発実行する:
 
 ```bash
 uv sync
-pnpm -C gui install
-pnpm dev
+uv run python -m src.main
 ```
 
-`pnpm dev` で Tauri 開発モードが起動し、バックエンドはアプリ側から起動します。
-
-## ビルド
+SwiftUI アプリと Apple Speech ヘルパーをビルドする:
 
 ```bash
-pnpm build
+swift build --package-path macos --product SeamApp
+swift build --package-path macos --product AppleSpeechTranscriber
 ```
 
-生成物:
+配布用アプリと DMG を作成する:
 
-- `gui/src-tauri/target/release/bundle/macos/Seam.app`
-- `gui/src-tauri/target/release/bundle/dmg/Seam_<version>_aarch64.dmg`
+```bash
+bash scripts/build-native.sh
+```
 
-## セキュリティ / プライバシー方針（要点）
+生成物は `macos/.build/distribution/` に置かれる。同梱バックエンドの作成には `uv` と Xcode Command Line Tools が必要である。配布署名を行う場合は `APPLE_SIGNING_IDENTITY` を指定する。
 
-- バックエンドは `127.0.0.1` バインドが既定
-- `/api/*` はローカル接続のみ許可（必要時のみ設定で緩和）
-- 更新系APIは Origin も検証
-- APIキーは macOS Keyring に保存
+## 設定とデータ
 
-詳細は [SECURITY.md](./SECURITY.md) を参照してください。
+- 設定と議事録データ: `~/.seam/`
+- OpenAI / Anthropic API キー: macOS Keychain または環境変数
+- `.env` は自動読込しない。必要な環境変数は起動前に `export` する。
+- 文字起こし言語はアプリの設定から指定する。
 
-## 設定の優先順（UIと環境変数）
+環境変数のひな型は [`.env.example`](./.env.example) を参照。
 
-1. 設定画面で保存した値
-2. Keyring に保存したトークン
-3. 環境変数
-
-保存先:
-
-- 一般設定: `~/.seam/config.yaml`
-- APIキー / HFトークン: macOS Keyring（`seam-app`）
-
-参照する主な環境変数:
-
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `HF_TOKEN`
-- `HUGGING_FACE_HUB_TOKEN`
-- `OLLAMA_HOST`
-
-`.env` は自動読込しません。必要時に `export` して使います。  
-ひな型: [`.env.example`](./.env.example)
-
-## ディレクトリ構成
+## ディレクトリ
 
 ```text
 .
-├── docs/
-├── gui/
-├── scripts/
-├── src/
-├── tests/
-└── sidecar/
+├── macos/       # SwiftUI アプリ、共通 Swift コード、Apple Speech ヘルパー
+├── sidecar/     # macOS 音声キャプチャ用バイナリのソース
+├── src/         # FastAPI バックエンド
+├── scripts/     # 開発・配布スクリプト
+├── tests/       # 既存機能の確認用コード
+└── docs/        # 設計・要件資料
 ```
 
-## 最低限の検証
-
-```bash
-./scripts/oss_preflight.sh
-```
-
-高速チェック（GUI build 省略）:
-
-```bash
-SKIP_GUI_BUILD=1 ./scripts/oss_preflight.sh
-```
-
-## ドキュメント
-
-- 要件: [docs/requirements.md](./docs/requirements.md)
-- 設計: [docs/architecture.md](./docs/architecture.md)
-- データモデル: [docs/data-model.md](./docs/data-model.md)
-- 要約設計: [docs/summarize-design.md](./docs/summarize-design.md)
-
-## 開発・運用
-
-- コントリビュート: [CONTRIBUTING.md](./CONTRIBUTING.md)
-- セキュリティ: [SECURITY.md](./SECURITY.md)
-- ライセンス: [Apache 2.0](./LICENSE)
+詳細は [アーキテクチャ](./docs/architecture.md)、[データモデル](./docs/data-model.md)、[技術スタック](./docs/tech-stack.md) を参照。

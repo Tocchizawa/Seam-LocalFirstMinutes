@@ -89,10 +89,7 @@ print("\n[2] Settings — デフォルト値")
 r = client.get("/api/settings")
 assert_status("GET /api/settings", 200, r)
 s = r.json()
-assert_json("whisper.model default", s, "whisper.model", "medium")
-assert_json("whisper.language default", s, "whisper.language", "ja")
-assert_json("whisper.device default", s, "whisper.device", "auto")
-assert_json("whisper.streaming_chunk_sec", s, "whisper.streaming_chunk_sec", 5)
+assert_json("speech.language default", s, "speech.language", "ja")
 assert_json("ollama.context_model", s, "ollama.context_model", "qwen3:8b")
 assert_json("ollama.minutes_model", s, "ollama.minutes_model", "qwen3:8b")
 assert_json("ollama.base_url", s, "ollama.base_url", "http://localhost:11434")
@@ -105,11 +102,10 @@ assert_json("logging.level", s, "logging.level", "INFO")
 assert_json("setup.completed", s, "setup.completed", False)
 
 print("\n[3] Settings — 更新")
-r = client.put("/api/settings", json={"whisper": {"model": "small"}})
+r = client.put("/api/settings", json={"speech": {"language": "en-US"}})
 assert_status("PUT /api/settings", 200, r)
 s = r.json()
-assert_json("updated whisper.model", s, "whisper.model", "small")
-assert_json("preserved whisper.language", s, "whisper.language", "ja")
+assert_json("updated speech.language", s, "speech.language", "en-US")
 assert_json("preserved ollama.context_model", s, "ollama.context_model", "qwen3:8b")
 assert_json("preserved server.port", s, "server.port", 18900)
 
@@ -119,11 +115,11 @@ assert_status("PUT nested update", 200, r)
 s = r.json()
 assert_json("updated ollama.context_model", s, "ollama.context_model", "qwen3:4b")
 assert_json("preserved ollama.base_url", s, "ollama.base_url", "http://localhost:11434")
-assert_json("still updated whisper.model", s, "whisper.model", "small")
+assert_json("preserved speech.language", s, "speech.language", "en-US")
 
 # Restore
 client.put("/api/settings", json={
-    "whisper": {"model": "medium"},
+    "speech": {"language": "ja"},
     "ollama": {"context_model": "qwen3:8b"},
 })
 
@@ -322,7 +318,6 @@ data = {
     "duration_sec": 3600,
     "transcript": transcript,
     "summary": "# 議事録\\n\\nタグ機能の進捗を確認した。",
-    "whisper_model": "medium",
     "llm_model": "qwen3:8b",
     "created_at": "2026-04-04T11:00:00",
     "updated_at": "2026-04-04T11:00:00",

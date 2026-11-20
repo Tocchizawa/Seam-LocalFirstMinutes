@@ -87,67 +87,7 @@ DEFAULTS: dict[str, Any] = {
             "extra_args": [],
         },
     },
-    "whisper": {
-        "model": "medium",
-        "language": "ja",
-        "device": "auto",
-        # 起動直後の常駐メモリ増加を避けるため、既定は遅延ロード。
-        "preload_on_startup": False,
-        "streaming": {
-            # VAD 種類: "silero" (推奨, ノイズ耐性高) or "energy" (フォールバック, 軽量)
-            "vad_provider": "silero",
-            "silero_threshold": 0.5,
-            "rms_threshold": 0.005,
-            "silence_duration_ms": 500,
-            "min_chunk_ms": 1000,
-            "max_chunk_ms": 12000,
-            # 0 は queue.Queue の無制限モード
-            "max_queue_chunks": 0,
-            "max_pending_audio_sec": 240.0,
-            "model_load_timeout_sec": 900.0,
-            "flush_join_timeout_sec": 120.0,
-        },
-        "hallucination_filter": {
-            "enabled": True,
-            "max_direct_match_len": 64,
-            "blocked_phrases": [],
-        },
-        # 文字起こしの計算資源の使い方。
-        #   full = 常に全力 / auto = システム高負荷時のみ抑制 / eco = 常に抑えめ
-        "performance": {
-            "mode": "auto",
-            # auto モードで抑制を始める CPU 使用率 (%)
-            "cpu_high_threshold": 75.0,
-            # auto モードで抑制を始めるシステムメモリ使用率 (%)
-            "memory_high_threshold": 85.0,
-            # 抑制時: チャンク処理時間 × この係数だけ休止を挿入 (大きいほど遅く・軽く)
-            "throttle_ratio": 0.5,
-            # 1チャンクあたりの休止上限 (秒)
-            "max_throttle_sec": 3.0,
-            # 文字起こしワーカースレッドの nice 値 (0-19, 大きいほど低優先)
-            "worker_nice": 3,
-            # MLX Metal のメモリ目安 (搭載RAM比, 0.2-0.8)。relaxed のためハード上限ではない。
-            "mlx_memory_ratio": 0.4,
-        },
-        # 話者記憶: 全プロジェクト共通で扱う。
-        "speaker_memory": {
-            # 話者分離そのものの ON/OFF (OFF なら話者ラベルを一切付与しない)
-            "diarization_enabled": True,
-            "enabled": True,
-            "match_threshold": 0.82,
-            "min_audio_sec": 1.0,
-            "sample_sec": 2.5,
-            "global_match_threshold": 0.992,
-            "rediarize_keep_ratio": 0.86,
-            # 話者分離プロバイダ: "legacy" (従来の手作り特徴量) or "pyannote"
-            "diarization_provider": "legacy",
-            "pyannote_model": "pyannote/speaker-diarization-3.1",
-            "pyannote_device": "auto",
-            "pyannote_min_speakers": None,
-            "pyannote_max_speakers": None,
-            "pyannote_match_threshold": 0.7,
-        },
-    },
+    "speech": {"language": "ja"},
     "recording": {
         "mic_device": None,
         "mic_capture": "coreaudio_sidecar",
@@ -227,10 +167,6 @@ DEFAULTS: dict[str, Any] = {
     },
     "setup": {
         "completed": False,
-    },
-    "app_update": {
-        "check_on_startup": True,
-        "auto_install_on_startup": False,
     },
     "debug": {
         "enabled": False,
@@ -377,6 +313,15 @@ class Config:
             ai["consent"] = consent
         for cloud in ("claude_api", "openai", "gemini"):
             consent[cloud] = bool(consent.get(cloud, False))
+
+        # Apple Speech は OS のオンデバイス音声認識を使う。旧 Whisper 設定は移行時に破棄する。
+        self._data.pop("whisper", None)
+        speech = self._data.setdefault("speech", {})
+        if not isinstance(speech, dict):
+            speech = {}
+            self._data["speech"] = speech
+        language = str(speech.get("language", "ja") or "ja").strip()
+        speech["language"] = language if language else "ja"
 
         # provider別サブセクションの正規化
         ai_ollama = ai.setdefault("ollama", {})
@@ -658,114 +603,6 @@ class Config:
             )
         except Exception:
             watchdog["max_silent_tail_sec"] = 60.0
-        whisper = self._data.setdefault("whisper", {})
-        if not isinstance(whisper, dict):
-            whisper = {}
-            self._data["whisper"] = whisper
-        performance = whisper.setdefault("performance", {})
-        if not isinstance(performance, dict):
-            performance = {}
-            whisper["performance"] = performance
-        perf_mode = str(performance.get("mode", "auto")).strip().lower()
-        performance["mode"] = perf_mode if perf_mode in {"full", "auto", "eco"} else "auto"
-        try:
-            performance["cpu_high_threshold"] = max(
-                30.0, min(95.0, float(performance.get("cpu_high_threshold", 75.0)))
-            )
-        except Exception:
-            performance["cpu_high_threshold"] = 75.0
-        try:
-            performance["memory_high_threshold"] = max(
-                50.0, min(98.0, float(performance.get("memory_high_threshold", 85.0)))
-            )
-        except Exception:
-            performance["memory_high_threshold"] = 85.0
-        try:
-            performance["throttle_ratio"] = max(
-                0.1, min(3.0, float(performance.get("throttle_ratio", 0.5)))
-            )
-        except Exception:
-            performance["throttle_ratio"] = 0.5
-        try:
-            performance["max_throttle_sec"] = max(
-                0.5, min(10.0, float(performance.get("max_throttle_sec", 3.0)))
-            )
-        except Exception:
-            performance["max_throttle_sec"] = 3.0
-        try:
-            performance["worker_nice"] = max(
-                0, min(19, int(performance.get("worker_nice", 3)))
-            )
-        except Exception:
-            performance["worker_nice"] = 3
-        try:
-            performance["mlx_memory_ratio"] = max(
-                0.2, min(0.8, float(performance.get("mlx_memory_ratio", 0.4)))
-            )
-        except Exception:
-            performance["mlx_memory_ratio"] = 0.4
-        speaker_memory = whisper.setdefault("speaker_memory", {})
-        if not isinstance(speaker_memory, dict):
-            speaker_memory = {}
-            whisper["speaker_memory"] = speaker_memory
-        speaker_memory["diarization_enabled"] = bool(
-            speaker_memory.get("diarization_enabled", True)
-        )
-        speaker_memory["enabled"] = bool(speaker_memory.get("enabled", True))
-        try:
-            speaker_memory["match_threshold"] = max(
-                0.0, min(0.99, float(speaker_memory.get("match_threshold", 0.82)))
-            )
-        except Exception:
-            speaker_memory["match_threshold"] = 0.82
-        try:
-            speaker_memory["min_audio_sec"] = max(
-                0.4, min(6.0, float(speaker_memory.get("min_audio_sec", 1.0)))
-            )
-        except Exception:
-            speaker_memory["min_audio_sec"] = 1.0
-        try:
-            speaker_memory["sample_sec"] = max(
-                0.8, min(8.0, float(speaker_memory.get("sample_sec", 2.5)))
-            )
-        except Exception:
-            speaker_memory["sample_sec"] = 2.5
-        try:
-            speaker_memory["global_match_threshold"] = max(
-                0.7, min(0.999, float(speaker_memory.get("global_match_threshold", 0.992)))
-            )
-        except Exception:
-            speaker_memory["global_match_threshold"] = 0.992
-        try:
-            speaker_memory["rediarize_keep_ratio"] = max(
-                0.6, min(0.99, float(speaker_memory.get("rediarize_keep_ratio", 0.86)))
-            )
-        except Exception:
-            speaker_memory["rediarize_keep_ratio"] = 0.86
-        provider = str(speaker_memory.get("diarization_provider", "legacy")).lower()
-        speaker_memory["diarization_provider"] = (
-            "pyannote" if provider == "pyannote" else "legacy"
-        )
-        speaker_memory.setdefault("pyannote_model", "pyannote/speaker-diarization-3.1")
-        device = str(speaker_memory.get("pyannote_device", "auto")).lower()
-        speaker_memory["pyannote_device"] = device if device in {"auto", "cpu", "mps"} else "auto"
-        for key in ("pyannote_min_speakers", "pyannote_max_speakers"):
-            v = speaker_memory.get(key)
-            if v is None or v == "":
-                speaker_memory[key] = None
-            else:
-                try:
-                    iv = int(v)
-                    speaker_memory[key] = max(1, min(20, iv))
-                except Exception:
-                    speaker_memory[key] = None
-        try:
-            speaker_memory["pyannote_match_threshold"] = max(
-                0.3, min(0.95, float(speaker_memory.get("pyannote_match_threshold", 0.7)))
-            )
-        except Exception:
-            speaker_memory["pyannote_match_threshold"] = 0.7
-
         server = self._data.setdefault("server", {})
         if not isinstance(server, dict):
             server = {}
@@ -781,16 +618,7 @@ class Config:
         server["allowed_origins"] = cleaned_origins
         server["allow_remote_clients"] = bool(server.get("allow_remote_clients", False))
 
-        app_update = self._data.setdefault("app_update", {})
-        if not isinstance(app_update, dict):
-            app_update = {}
-            self._data["app_update"] = app_update
-        app_update["auto_install_on_startup"] = bool(
-            app_update.get("auto_install_on_startup", False)
-        )
-        app_update["check_on_startup"] = bool(
-            app_update.get("check_on_startup", True)
-        ) or app_update["auto_install_on_startup"]
+        self._data.pop("app_update", None)
 
 
 config = Config()

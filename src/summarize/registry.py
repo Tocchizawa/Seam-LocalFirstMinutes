@@ -103,7 +103,7 @@ def _has_keyring_token(token_key: str) -> bool:
     try:
         import keyring
 
-        # seam-app は pyannote_runner と共用 (HF_TOKEN 等と同居)
+        # アプリ設定と認証情報を共有する。
         token = keyring.get_password("seam-app", token_key)
         return bool(token)
     except Exception as e:

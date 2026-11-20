@@ -13,6 +13,7 @@ public struct MinutesReader: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Stored private var summaryPosition: Int?
     @Stored private var transcriptPosition: Int?
+    @Stored private var copyFeedback: UUID?
 
     private let title: String
     private let date: String
@@ -25,13 +26,23 @@ public struct MinutesReader: View {
     private let animated: Bool
     private let expanded: Bool
     private let toggleExpanded: (() -> Void)?
+    private let backTitle: String?
+    private let goBack: (() -> Void)?
+    private let export: (() -> Void)?
+    private let exporting: Bool
     private let menu: AnyView?
+    private let activity: BackgroundActivity?
+    private let problem: String?
+    private let exportNotice: AnyView?
     @Binding private var showTranscript: Bool
 
     public init(
         title: String, date: String, summary: String, sections: [TranscriptSegment], untimedTranscript: String = "",
         query: String = "", playback: MinutesPlayback? = nil, compact: Bool = false, animated: Bool = true,
-        expanded: Bool = false, showTranscript: Binding<Bool>, toggleExpanded: (() -> Void)? = nil, menu: AnyView? = nil
+        expanded: Bool = false, showTranscript: Binding<Bool>, toggleExpanded: (() -> Void)? = nil,
+        backTitle: String? = nil, goBack: (() -> Void)? = nil,
+        export: (() -> Void)? = nil, exporting: Bool = false, menu: AnyView? = nil,
+        activity: BackgroundActivity? = nil, problem: String? = nil, exportNotice: AnyView? = nil
     ) {
         self.title = title
         self.date = date
@@ -45,7 +56,14 @@ public struct MinutesReader: View {
         self.expanded = expanded
         self._showTranscript = showTranscript
         self.toggleExpanded = toggleExpanded
+        self.backTitle = backTitle
+        self.goBack = goBack
+        self.export = export
+        self.exporting = exporting
         self.menu = menu
+        self.activity = activity
+        self.problem = problem
+        self.exportNotice = exportNotice
     }
 
     private var tint: Color {
@@ -53,9 +71,9 @@ public struct MinutesReader: View {
     }
     private var motion: Animation? { animated && !reduceMotion ? SeamMotion.update : nil }
     private var padding: CGFloat { compact ? 14 : 33 }
-    // タブの横幅。ラベルを変える場合は幅も合わせて確認する。
-    private let tabWidth: CGFloat = 78
-    private let tabSpacing: CGFloat = 2
+    private var canCopy: Bool {
+        showTranscript ? !sections.isEmpty || !untimedTranscript.isEmpty : !summary.isEmpty
+    }
 
     public var body: some View {
         // 議事録の読み取り画面。ヘッダー、要約/全文タブ、音声操作を組み合わせる。
@@ -67,6 +85,15 @@ public struct MinutesReader: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animatePageChange(for: showTranscript, enabled: animated && !reduceMotion)
         .scrollEdgeBar { header }
+        .overlay(alignment: .bottomTrailing) {
+            if let exportNotice {
+                exportNotice
+                    .padding(.trailing, padding)
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .offset(y: 4)))
+            }
+        }
+        .animation(motion, value: exportNotice != nil)
         .scrollEdgeBar(.bottom) {
             if let playback {
                 MinutesAudioBar(playback: playback, compact: compact, tint: tint, motion: motion)
@@ -76,6 +103,13 @@ public struct MinutesReader: View {
             }
         }
         .clipped()
+        .onChange(of: showTranscript) { _, _ in copyFeedback = nil }
+        .task(id: copyFeedback) {
+            guard copyFeedback != nil else { return }
+            try? await Task.sleep(for: .seconds(1.25))
+            guard !Task.isCancelled else { return }
+            copyFeedback = nil
+        }
     }
 
     @ViewBuilder
@@ -101,77 +135,153 @@ public struct MinutesReader: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(verbatim: title)
-                .font(.system(size: compact ? 24 : 33, weight: .semibold))
-                .lineLimit(compact ? 2 : 3)
-                .accessibilityAddTraits(.isHeader)
-                .padding(.bottom, 7)
-            Text(verbatim: date)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 2) {
-                tabs
-                Spacer(minLength: 0)
-                if let toggleExpanded {
-                    let label = expanded ? "通常表示に戻す" : (showTranscript ? "文字起こしを全体表示" : "議事録を全体表示")
-                    control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                            label: label, action: toggleExpanded)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                if let backTitle, let goBack {
+                    backButton(backTitle, action: goBack)
                 }
-                control("document.on.document", label: showTranscript ? "文字起こしをコピー" : "要約をコピー", action: copy)
-                    .disabled(showTranscript ? sections.isEmpty && untimedTranscript.isEmpty : summary.isEmpty)
-                if let menu { menu.frame(width: 33, height: 33) }
+                Spacer(minLength: 0)
+                glassSurface(toolButtons)
+                    .fixedSize()
             }
-            .padding(.top, compact ? 10 : 14)
-            .background(alignment: .bottom) {
-                Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(verbatim: date)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Text(verbatim: title)
+                    .font(.system(size: compact ? 24 : 33, weight: .semibold))
+                    .lineLimit(compact ? 2 : 3)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let activity {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        tabs
+                        activityStatus(activity)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        tabs
+                        activityStatus(activity)
+                    }
+                }
+            } else {
+                tabs
+            }
+
+            if let problem {
+                Label(problem, systemImage: "exclamationmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
         }
-        .padding(.top, compact ? 9 : 16)
+        .padding(.top, padding)
+        .padding(.bottom, 12)
         .padding(.horizontal, padding)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var tabs: some View {
-        HStack(spacing: tabSpacing) {
-            tab("要約", transcript: false)
-            tab("文字起こし", transcript: true)
+        Picker("議事録の表示", selection: $showTranscript) {
+            Text("要約").tag(false)
+            Text("文字起こし").tag(true)
         }
-        .overlay(alignment: .bottom) {
-            Capsule()
-                .fill(tint)
-                .frame(width: tabWidth, height: 2)
-                .frame(maxWidth: .infinity, alignment: showTranscript ? .trailing : .leading)
-                .animation(motion, value: showTranscript)
-                .allowsHitTesting(false)
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .controlSize(.regular)
+        .frame(width: 172)
+    }
+
+    private func activityStatus(_ activity: BackgroundActivity) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: activity.symbol)
                 .accessibilityHidden(true)
+            Text(verbatim: activity.name)
+                .lineLimit(1)
+            if let progress = activity.progress {
+                Text(progress, format: .percent.precision(.fractionLength(0)))
+                    .monospacedDigit()
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func backButton(_ title: String, action: @escaping () -> Void) -> some View {
+        let button = Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                    .accessibilityHidden(true)
+                Text(verbatim: title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(ReaderToolbarButtonStyle())
+        .accessibilityHint("議事録一覧に戻る")
+        .help("議事録一覧に戻る")
+
+        return glassSurface(button)
+    }
+
+    @ViewBuilder
+    private func glassSurface<Content: View>(_ content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: .capsule)
+        } else {
+            content.background(.regularMaterial, in: Capsule())
         }
     }
 
-    private func tab(_ label: String, transcript: Bool) -> some View {
-        let selected = showTranscript == transcript
-        return Button { showTranscript = transcript } label: {
-            Text(label)
-                .font(.system(size: 13, weight: selected ? .semibold : .medium))
-                .foregroundStyle(selected ? tint : Color.secondary)
-                .frame(width: tabWidth, height: 40)
-                .contentShape(Rectangle())
+    private var toolButtons: some View {
+        HStack(spacing: 2) {
+            control(copyFeedback == nil ? "document.on.document" : "checkmark",
+                    label: showTranscript ? "文字起こしをコピー" : "要約をコピー", action: copy)
+                .opacity(canCopy ? 1 : 0.40)
+                .disabled(!canCopy)
+                .accessibilityValue(copyFeedback == nil ? "" : "コピーしました")
+            if let export {
+                control("square.and.arrow.down", label: "ファイルに書き出す", action: export)
+                    .opacity(exporting ? 0.40 : 1)
+                    .disabled(exporting)
+            }
+            if let toggleExpanded {
+                control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                        label: expanded ? "通常表示に戻す" : "議事録を全体表示", action: toggleExpanded)
+            }
+            if let menu {
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 2)
+                    .accessibilityHidden(true)
+                menu.frame(width: 34, height: 34)
+            }
         }
-        .buttonStyle(ReaderHoverStyle(tint: tint, motion: motion))
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        .padding(3)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("議事録のツールバー")
     }
 
     private func control(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.primary)
                 .contentTransition(.opacity)
-                .frame(width: 33, height: 33)
-                .contentShape(Rectangle())
+                .frame(width: 34, height: 34)
+            .contentShape(Capsule())
         }
-        .buttonStyle(ReaderHoverStyle(tint: tint, motion: motion))
+        .buttonStyle(ReaderToolbarButtonStyle())
         .accessibilityLabel(label)
         .help(label)
     }
@@ -180,15 +290,32 @@ public struct MinutesReader: View {
         let text: String
         if showTranscript {
             text = sections.isEmpty ? untimedTranscript : sections.map { segment in
-                [minutesTime(segment.start), segment.speakerLabel, segment.text]
-                    .compactMap { $0 }
-                    .joined(separator: "  ")
+                [minutesTime(segment.start), segment.text].joined(separator: "  ")
             }.joined(separator: "\n")
         } else {
             text = summary
         }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        if NSPasteboard.general.setString(text, forType: .string) {
+            withAnimation(motion) { copyFeedback = UUID() }
+        }
+    }
+}
+
+private struct ReaderToolbarButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        let highlight = isEnabled ? (pressed ? 0.17 : hovered ? 0.075 : 0) : 0
+        configuration.label
+            .background(Color.primary.opacity(highlight), in: Capsule())
+            .scaleEffect(pressed && !reduceMotion ? 0.94 : 1)
+            .animation(reduceMotion ? nil : SeamMotion.feedback, value: pressed)
+            .animation(reduceMotion ? nil : SeamMotion.feedback, value: hovered)
+            .onHover { hovered = $0 }
     }
 }
 
@@ -222,9 +349,9 @@ public struct MinutesReader: View {
             date: "2026年11月19日 10:30",
             summary: "",
             sections: [
-                TranscriptSegment(start: 0, end: 8, text: "では、今週の進捗から確認していきましょう。", speakerLabel: "田中"),
-                TranscriptSegment(start: 8, end: 17, text: "検索画面は一覧と詳細の両方から使えるようにしました。", speakerLabel: "佐藤"),
-                TranscriptSegment(start: 17, end: 25, text: "いいですね。次のリリースに含める範囲を決めましょう。", speakerLabel: "田中")
+                TranscriptSegment(start: 0, end: 8, text: "では、今週の進捗から確認していきましょう。"),
+                TranscriptSegment(start: 8, end: 17, text: "検索画面は一覧と詳細の両方から使えるようにしました。"),
+                TranscriptSegment(start: 17, end: 25, text: "いいですね。次のリリースに含める範囲を決めましょう。")
             ],
             showTranscript: .constant(true)
         )
@@ -290,9 +417,7 @@ private struct MinutesTranscript: View {
                 }
                 ForEach(sections.indices, id: \.self) { index in
                     let line = sections[index]
-                    let startsTurn = index == 0 || sections[index - 1].speakerLabel != line.speakerLabel
-                        || line.start - sections[index - 1].end > 12
-                    segment(line, active: active == index, showSpeaker: startsTurn)
+                    segment(line, active: active == index)
                         .id(index)
                 }
             }
@@ -326,9 +451,9 @@ private struct MinutesTranscript: View {
     }
 
     @ViewBuilder
-    private func segment(_ line: TranscriptSegment, active: Bool, showSpeaker: Bool) -> some View {
+    private func segment(_ line: TranscriptSegment, active: Bool) -> some View {
         if let seek {
-            Button { seek(line.start) } label: { row(line, active: active, showSpeaker: showSpeaker) }
+            Button { seek(line.start) } label: { row(line, active: active) }
                 .buttonStyle(ReaderHoverStyle(tint: tint, motion: motion))
                 .accessibilityLabel(rowLabel(line))
                 .accessibilityHint("\(minutesTime(line.start)) から再生")
@@ -340,11 +465,11 @@ private struct MinutesTranscript: View {
                     }
                 }
         } else {
-            row(line, active: active, showSpeaker: showSpeaker).textSelection(.enabled)
+            row(line, active: active).textSelection(.enabled)
         }
     }
 
-    private func row(_ line: TranscriptSegment, active: Bool, showSpeaker: Bool) -> some View {
+    private func row(_ line: TranscriptSegment, active: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             HStack(spacing: 5) {
                 Text(minutesTime(line.start))
@@ -363,11 +488,6 @@ private struct MinutesTranscript: View {
             .padding(.top, 14)
 
             VStack(alignment: .leading, spacing: 5) {
-                if showSpeaker, let speaker = line.speakerLabel, !speaker.isEmpty {
-                    Text(verbatim: speaker)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(active ? tint : .secondary)
-                }
                 readerText(AttributedString(line.text), query: query, tint: tint)
                     .font(.system(size: compact ? 14 : 15.5))
                     .lineSpacing(compact ? 4 : 6)
@@ -393,9 +513,7 @@ private struct MinutesTranscript: View {
     }
 
     private func rowLabel(_ line: TranscriptSegment) -> String {
-        [minutesTime(line.start), line.speakerLabel, line.text]
-            .compactMap { $0 }
-            .joined(separator: "、")
+        [minutesTime(line.start), line.text].joined(separator: "、")
     }
 
 }

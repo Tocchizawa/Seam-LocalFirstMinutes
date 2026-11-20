@@ -179,6 +179,7 @@ static NSDictionary *FindInputDeviceInfo(NSString *requestedName, NSString *requ
                 return device;
             }
         }
+        return nil;
     }
 
     NSString *name = [requestedName stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
@@ -873,6 +874,19 @@ int main(int argc, const char *argv[]) {
         if (argc < 2) {
             fprintf(stderr, "Usage: audio-capture <output.raw> [--mode system|screencapturekit|microphone] [--meta-path capture.meta.json] [--sample-rate 16000] [--mic-device-name name]\n");
             return 2;
+        }
+
+        if (strcmp(argv[1], "--list-input-devices") == 0) {
+            NSString *defaultUID = InputDeviceInfo(GetDefaultInputDeviceID())[@"uid"];
+            NSData *json = [NSJSONSerialization dataWithJSONObject:@{
+                @"devices": InputDeviceInfos(),
+                @"default_uid": defaultUID ?: [NSNull null],
+            } options:0 error:NULL];
+            if (json == nil || fwrite(json.bytes, 1, json.length, stdout) != json.length) {
+                return 1;
+            }
+            fputc('\n', stdout);
+            return 0;
         }
 
         NSString *outputPath = [NSString stringWithUTF8String:argv[1]];

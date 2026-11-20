@@ -7,12 +7,15 @@ import os
 import socket
 from pathlib import Path
 
-import uvicorn
-
-from src.config import APP_DIR, config
+from src.startup_progress import emit
 
 
 def main() -> None:
+    emit("init", "設定と作業環境を読み込み中", 0.60)
+    import uvicorn
+
+    from src.config import APP_DIR, config
+
     status = Path(os.environ["SEAM_DESKTOP_STATUS"])
 
     def publish(**fields: object) -> None:

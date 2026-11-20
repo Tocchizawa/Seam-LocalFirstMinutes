@@ -96,7 +96,6 @@ def _find_audio_capture_sidecar() -> Path | None:
     candidates.extend([
         repo_root / "sidecar" / "audio-capture" / ".build" / "release" / "audio-capture",
         repo_root / "sidecar" / "audio-capture" / ".build" / "debug" / "audio-capture",
-        repo_root / "gui" / "src-tauri" / "resources" / "audio-capture",
     ])
     for path in candidates:
         if path.exists() and os.access(path, os.X_OK) and not _is_placeholder_sidecar(path):

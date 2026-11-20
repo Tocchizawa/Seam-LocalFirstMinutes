@@ -96,6 +96,7 @@ public struct ProjectEditor: View {
             footer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .interactiveDismissDisabled(saving)
         .task { nameFocused = true }
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.folder], allowsMultipleSelection: folder == .documents) {
             handleFolderSelection($0)
@@ -147,7 +148,7 @@ public struct ProjectEditor: View {
     }
 
     private var referencesSection: some View {
-        DisclosureGroup("参照資料と用語集", isExpanded: $referencesExpanded) {
+        DisclosureGroup(project == nil ? "参照資料" : "参照資料と用語集", isExpanded: $referencesExpanded) {
             referenceFields.padding(.top, 12)
         }
         .font(.system(size: 13, weight: .medium))
@@ -157,8 +158,10 @@ public struct ProjectEditor: View {
         VStack(alignment: .leading, spacing: 16) {
             repositoryField
             documentsField
-            glossaryField
-            if project != nil { correctionsField }
+            if project != nil {
+                glossaryField
+                correctionsField
+            }
         }
     }
 

@@ -16,50 +16,17 @@ _GIB = 1024 ** 3
 _MIB = 1024 ** 2
 
 
-class ResourceBusyError(RuntimeError):
-    """ローカルの重いモデルを別処理が使用中。"""
-
-
 class ModelResourceGate:
-    """Whisper と LLM を同時に動かさないためのプロセス内ゲート。
-
-    Whisper は録音中に複数セッションから共有され得るため複数取得を許可し、
-    LLM は Whisper がすべて解放されるまで待機する。ゲートはモデルの使用権を
-    管理し、録音音声の保存はその使用権と独立して行う。
-    """
+    """ローカル要約モデルの同時実行を抑える。"""
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self._whisper_users = 0
         self._llm_waiters = 0
         self._llm_active = False
 
-    def try_acquire_whisper(self) -> bool:
-        """Whisper の使用権を即時取得する。LLM 実行中/待機中は False。"""
-        with self._condition:
-            if self._llm_active or self._llm_waiters:
-                return False
-            self._whisper_users += 1
-            return True
-
-    def can_acquire_whisper(self) -> bool:
-        """重い録音セッション初期化の前に、LLM の待機状況を確認する。"""
-        with self._condition:
-            return not self._llm_active and self._llm_waiters == 0
-
-    def release_whisper(self, before_release: Callable[[], None] | None = None) -> None:
-        with self._condition:
-            if self._whisper_users == 1 and before_release is not None:
-                try:
-                    before_release()
-                except Exception as exc:
-                    logger.warning("Whisper cleanup before lease release failed: %s", exc)
-            self._whisper_users = max(0, self._whisper_users - 1)
-            self._condition.notify_all()
-
     def try_acquire_llm(self) -> bool:
         with self._condition:
-            if self._llm_active or self._whisper_users:
+            if self._llm_active or self._llm_waiters:
                 return False
             self._llm_active = True
             return True
@@ -72,8 +39,10 @@ class ModelResourceGate:
             while True:
                 if cancelled is not None and cancelled():
                     return False
-                if self.try_acquire_llm():
-                    return True
+                with self._condition:
+                    if not self._llm_active:
+                        self._llm_active = True
+                        return True
                 await asyncio.sleep(0.25)
         finally:
             with self._condition:
@@ -86,11 +55,7 @@ class ModelResourceGate:
 
     def snapshot(self) -> dict:
         with self._condition:
-            return {
-                "whisper_users": self._whisper_users,
-                "llm_waiters": self._llm_waiters,
-                "llm_active": self._llm_active,
-            }
+            return {"llm_waiters": self._llm_waiters, "llm_active": self._llm_active}
 
 
 model_resource_gate = ModelResourceGate()
@@ -201,7 +166,7 @@ class ResourceMonitor:
         """Seam バックエンドの優先度を設定する。
 
         macOS の Python ではスレッド単位の nice 設定ができないため、これは
-        Whisper 専用ではなくバックエンドプロセス全体に適用する。OS が
+        特定モデル専用ではなくバックエンドプロセス全体に適用する。OS が
         優先度変更を拒否しても、文字起こし自体は継続する。
         """
         try:

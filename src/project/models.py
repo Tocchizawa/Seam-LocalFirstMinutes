@@ -12,12 +12,12 @@ class Member(BaseModel):
 
 
 class CorrectionPair(BaseModel):
-    """Whisper 誤転写 → 正式表記 のマッピング。
+    """音声認識の誤転写 → 正式表記 のマッピング。
 
     要約完了後の LLM 補正で発見した wrong→correct ペアをここに蓄積し、
-    将来の Whisper 出力には post-process 置換で適用する。
+    今後の文字起こしに post-process 置換として適用する。
     """
-    wrong: str       # Whisper が出力しがちな誤転写
+    wrong: str       # 音声認識で出力されがちな誤転写
     correct: str     # 正式表記
 
 

@@ -528,11 +528,43 @@ class SummaryRunner:
             キャンセル可能だった場合 True
         """
         job = self._jobs.get(minutes_id)
-        if job is None:
+        phase_b = self._phase_b_tasks.get(minutes_id)
+        if phase_b is not None and phase_b.done():
+            phase_b = None
+        if phase_b is None and job is None:
             return False
+
+        pending = self._durable_jobs
+        if phase_b is not None:
+            pending = self._durable_phase_b
+            # A draft left by recovery would otherwise enqueue dictionary work again.
+            (DRAFTS_DIR / f"{minutes_id}.md").unlink(missing_ok=True)
+        if minutes_id in pending:
+            provider_name = pending.pop(minutes_id)
+            if not self._persist_pending_jobs():
+                pending[minutes_id] = provider_name
+                raise OSError("summary cancellation could not be persisted")
+
+        if phase_b is not None:
+            phase_b.cancel()
+            await asyncio.gather(phase_b, return_exceptions=True)
+            await self._broadcast({
+                "type": "dictionary_update_finished",
+                "data": {"minutes_id": minutes_id},
+            })
+            return True
+
+        assert job is not None
         job.cancel_event.set()
-        self._durable_jobs.pop(minutes_id, None)
-        self._persist_pending_jobs()
+        if job.status.state == "queued":
+            self._jobs.pop(minutes_id, None)
+            job.status.state = "cancelled"
+            job.status.finished_at = time.time()
+            self._remember_status(job.status)
+            await self._broadcast({
+                "type": "summary_cancelled",
+                "data": {"minutes_id": minutes_id},
+            })
         # 進行中ジョブだったら provider 側もcancel
         if self._current is job:
             if self._current_provider is not None:
@@ -586,13 +618,6 @@ class SummaryRunner:
                                 "data": {"minutes_id": job.minutes_id},
                             })
                         continue
-                    # CA-09: LLM を起動する前に Whisper の MLX モデルを解放する。
-                    try:
-                        from src.transcribe.streaming import unload_model
-
-                        unload_model()
-                    except Exception as exc:
-                        logger.warning("Whisper unload before local LLM failed: %s", exc)
                 if self._jobs.get(job.minutes_id) is job and not job.cancel_event.is_set():
                     await self._process_job(job)
                 elif self._jobs.get(job.minutes_id) is job:

@@ -54,25 +54,36 @@ public struct AudioDevices: Decodable, Sendable {
     public let screenCaptureAvailable: Bool
 }
 
+public struct RecordingMicrophone: Decodable, Identifiable, Sendable {
+    public let uid: String
+    public let name: String
+    public var id: String { uid }
+}
+
+public struct MicrophoneChange: Decodable, Sendable {
+    public let micDeviceUid: String?
+    public let micDeviceName: String?
+}
+
 public struct RecordingStatus: Decodable, Sendable {
     public let recording: Bool
     public let elapsedSec: Double
     public let sessionId: String?
     public let micMuted: Bool?
+    public let micDeviceName: String?
+    public let micDeviceUid: String?
+    public let micCanSwitch: Bool?
     public let paused: Bool?
     public let stopping: Bool?
     public let transcriptionDeferred: Bool?
 }
 
-public struct LiveAudioSource: Decodable, Sendable {
-    public let path: String
-    public let sampleRate: Int
-    public let language: String
-}
-
 public struct RecordingStart: Decodable, Sendable {
     public let sessionId: String
     public let hasSystemAudio: Bool
+    public let micDeviceName: String?
+    public let micDeviceUid: String?
+    public let micCanSwitch: Bool?
     public let transcriptionDeferred: Bool?
 }
 
@@ -107,19 +118,14 @@ public struct TranscriptSegment: Decodable, Equatable, Identifiable, Sendable {
     public let start: Double
     public let end: Double
     public let text: String
-    public let speakerId: String?
-    public let speakerLabel: String?
     public let sessionId: String?
 
     public var id: Double { start }
 
-    public init(start: Double, end: Double, text: String, speakerId: String? = nil,
-                speakerLabel: String? = nil, sessionId: String? = nil) {
+    public init(start: Double, end: Double, text: String, sessionId: String? = nil) {
         self.start = start
         self.end = end
         self.text = text
-        self.speakerId = speakerId
-        self.speakerLabel = speakerLabel
         self.sessionId = sessionId
     }
 }
@@ -130,6 +136,11 @@ public struct TranscriptDraft: Decodable, Equatable, Sendable {
     public let end: Double?
     public let text: String
     public let segments: [TranscriptSegment]?
+}
+
+public struct TranscriptionError: Decodable, Sendable {
+    public let sessionId: String?
+    public let message: String
 }
 
 public struct PipelineStatus: Decodable, Sendable {
@@ -175,6 +186,7 @@ public enum BackendEvent: Decodable, Sendable {
     case level(AudioLevel)
     case draft(TranscriptDraft)
     case segment(TranscriptSegment)
+    case transcriptionError(TranscriptionError)
     case pipeline(PipelineStatus)
     case other(String)
 
@@ -196,6 +208,8 @@ public enum BackendEvent: Decodable, Sendable {
             self = .draft(try container.decode(TranscriptDraft.self, forKey: .data))
         case "transcript_chunk":
             self = .segment(try container.decode(TranscriptSegment.self, forKey: .data))
+        case "transcription_error":
+            self = .transcriptionError(try container.decode(TranscriptionError.self, forKey: .data))
         case "pipeline_progress":
             self = .pipeline(try container.decode(PipelineStatus.self, forKey: .data))
         default:

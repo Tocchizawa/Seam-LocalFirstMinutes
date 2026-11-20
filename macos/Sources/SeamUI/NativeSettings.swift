@@ -54,7 +54,7 @@ private final class SettingsEditor: ObservableObject {
 }
 
 public enum NativeSettingsPage: String, CaseIterable, Identifiable {
-    case input = "録音", transcription = "文字起こし", summary = "要約", speakers = "話者", appearance = "外観", advanced = "詳細"
+    case input = "録音", transcription = "文字起こし", summary = "要約", appearance = "外観", advanced = "詳細"
     public var id: Self { self }
 }
 
@@ -96,7 +96,6 @@ public struct NativeSettings<Appearance: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var editor: SettingsEditor
-    @ObservedObject private var downloads: WhisperDownloads
     @Binding private var page: NativeSettingsPage
     @Stored private var devices: [AudioDevice] = []
     @Stored private var cliOptions: [CLIModel] = []
@@ -104,27 +103,12 @@ public struct NativeSettings<Appearance: View>: View {
     @Stored private var checkingProvider = false
     @Stored private var connectionResult: ServiceConnectionCheck?
     @Stored private var connectionError: String?
-    @Stored private var hasDiarizationToken = false
     @Stored private var key = ""
-    @Stored private var diarizationToken = ""
-    @Stored private var profiles: [SpeakerProfile] = []
-    @Stored private var profileNames: [String: String] = [:]
-    @Stored private var profilesToMerge: Set<String> = []
-    @Stored private var confirmation: Removal?
     @Stored private var confirmingCloud = false
     @Stored private var busy = false
-    @StateObject private var speakerAudio = MinutesPlayback()
-    @Stored private var speakerPlaying: String?
 
     private let appearance: () -> Appearance
     private let compact: Bool
-
-    private struct Removal: Identifiable {
-        enum Target { case model, speaker }
-        let target: Target
-        let id: String
-        let label: String
-    }
 
     private struct ConnectionTarget: Equatable {
         let provider: SummaryProvider
@@ -132,10 +116,9 @@ public struct NativeSettings<Appearance: View>: View {
         let effort: String?
     }
 
-    public init(api: SeamAPI?, downloads: WhisperDownloads, page: Binding<NativeSettingsPage>, compact: Bool = false,
+    public init(api: SeamAPI?, page: Binding<NativeSettingsPage>, compact: Bool = false,
                 @ViewBuilder appearance: @escaping () -> Appearance) {
         _editor = StateObject(wrappedValue: SettingsEditor(api: api))
-        self.downloads = downloads
         self._page = page
         self.compact = compact
         self.appearance = appearance
@@ -177,12 +160,6 @@ public struct NativeSettings<Appearance: View>: View {
         .onChange(of: connectionTarget) { _, _ in
             connectionResult = nil
             connectionError = nil
-        }
-        .onDisappear { speakerAudio.clear() }
-        .alert(item: $confirmation) { item in
-            Alert(title: Text("\(item.label)を削除しますか"),
-                  primaryButton: .destructive(Text("削除")) { remove(item) },
-                  secondaryButton: .cancel(Text("キャンセル")))
         }
         .alert("クラウドで要約しますか", isPresented: $confirmingCloud) {
             Button("許可する") {
@@ -261,7 +238,6 @@ public struct NativeSettings<Appearance: View>: View {
         case .input: inputSettings
         case .transcription: transcriptionSettings
         case .summary: summarySettings
-        case .speakers: speakerSettings
         case .appearance: appearance()
         case .advanced: advancedSettings
         }
@@ -344,36 +320,15 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     @ViewBuilder
-    // Whisperモデルと言語、認識、パフォーマンスの設定項目。
     private var transcriptionSettings: some View {
-        Section("Whisperモデル") {
-            WhisperModelRows(downloads: downloads, selection: text("whisper.model", fallback: "medium"),
-                             compact: compact, tint: accent) { model in
-                confirmation = .init(target: .model, id: model.name, label: model.label)
+        Section("Apple Speech") {
+            SettingsRow {
+                Text("macOS のオンデバイス音声認識を使い、録音中から文字起こしを表示します。")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            if let failure = downloads.failure {
-                SettingsRow { Text(failure).font(.callout).foregroundStyle(.secondary) }
-            }
-        }
-        Section("認識") {
-            choose("言語", "whisper.language", fallback: "ja",
-                   options: [("ja", "日本語"), ("auto", "自動"), ("en", "英語"), ("zh", "中国語"), ("ko", "韓国語")])
-            choose("発話の検出", "whisper.streaming.vad_provider", fallback: "silero",
-                   options: [("silero", "Silero"), ("energy", "音量")])
-        }
-        Section("パフォーマンス") {
-            choose("動作モード", "whisper.performance.mode", fallback: "auto",
-                   options: [("auto", "自動"), ("full", "速度優先"), ("eco", "省電力")])
-            if text("whisper.performance.mode", fallback: "auto").wrappedValue == "auto" {
-                numeric("CPU使用率（%）", "whisper.performance.cpu_high_threshold", fallback: 75)
-                numeric("メモリ使用率（%）", "whisper.performance.memory_high_threshold", fallback: 85)
-            }
-            SettingsDisclosure(title: "詳細設定") {
-                numeric("抑制の強さ", "whisper.performance.throttle_ratio", fallback: 0.5)
-                numeric("休止の上限（秒）", "whisper.performance.max_throttle_sec", fallback: 3)
-                numeric("処理の優先度", "whisper.performance.worker_nice", fallback: 3)
-                numeric("Metalメモリの比率", "whisper.performance.mlx_memory_ratio", fallback: 0.4)
-            }
+            choose("言語", "speech.language", fallback: "ja",
+                   options: [("ja", "日本語"), ("en", "英語"), ("zh-Hans", "中国語"), ("ko", "韓国語"), ("auto", "システム設定")])
         }
     }
 
@@ -495,124 +450,6 @@ public struct NativeSettings<Appearance: View>: View {
     }
 
     @ViewBuilder
-    // 話者分離と話者プロファイルの設定項目。
-    private var speakerSettings: some View {
-        let prefix = "whisper.speaker_memory."
-        Section("話者分離") {
-            flag("話者分離を有効にする", prefix + "diarization_enabled", fallback: true)
-            choose("話者分離エンジン", prefix + "diarization_provider", fallback: "legacy",
-                   options: [("legacy", "標準"), ("pyannote", "pyannote")])
-            if text(prefix + "diarization_provider", fallback: "legacy").wrappedValue == "pyannote" {
-                optionalNumber("最少話者数", prefix + "pyannote_min_speakers")
-                optionalNumber("最大話者数", prefix + "pyannote_max_speakers")
-                choose("デバイス", prefix + "pyannote_device", fallback: "auto",
-                       options: [("auto", "自動"), ("cpu", "CPU"), ("mps", "Apple GPU")])
-                if editor.api != nil {
-                    SettingsRow("Hugging Faceトークン") {
-                        SecureField(hasDiarizationToken ? "保存済みのトークンを更新" : "Hugging Faceトークン", text: $diarizationToken)
-                            .textFieldStyle(.roundedBorder)
-                            .controlSize(.large)
-                            .frame(maxWidth: 245)
-                    }
-                    SettingsRow {
-                        actionsLayout {
-                            Button("トークンを保存") {
-                                let value = diarizationToken
-                                act { api in
-                                    try await api.setDiarizationToken(value)
-                                    hasDiarizationToken = true
-                                    diarizationToken = ""
-                                }
-                            }
-                            .disabled(diarizationToken.isEmpty)
-                            if hasDiarizationToken {
-                                Button("トークンを削除", role: .destructive) {
-                                    act { api in try await api.removeDiarizationToken(); hasDiarizationToken = false }
-                                }
-                            }
-                            Button("接続をテスト") {
-                                act { api in editor.feedback = try await api.checkDiarization().message }
-                            }
-                        }
-                        .buttonStyle(SettingsActionStyle())
-                    }
-                }
-            }
-            flag("話者の名前を記憶", prefix + "enabled", fallback: true)
-            numeric("照合のしきい値", prefix + "match_threshold", fallback: 0.82)
-            numeric("検出する最小秒数", prefix + "min_audio_sec", fallback: 1)
-        }
-        if let api = editor.api {
-            Section("話者一覧") {
-                if profiles.isEmpty {
-                    SettingsRow { Text("登録済みの話者はありません").foregroundStyle(.secondary) }
-                }
-                ForEach(profiles) { profile in
-                    SettingsRow {
-                        actionsLayout {
-                            HStack(spacing: 8) {
-                                Toggle("統合する話者を選択", isOn: Binding(
-                                    get: { profilesToMerge.contains(profile.id) },
-                                    set: { selected in
-                                        if selected { profilesToMerge.insert(profile.id) }
-                                        else { profilesToMerge.remove(profile.id) }
-                                    }
-                                ))
-                                .toggleStyle(.checkbox)
-                                .labelsHidden()
-
-                                textInput("話者名", Binding(get: { profileNames[profile.id] ?? profile.label },
-                                                           set: { profileNames[profile.id] = $0 }))
-                            }
-                            HStack(spacing: 8) {
-                                if profileNames[profile.id] != profile.label {
-                                    Button("変更") {
-                                        let label = profileNames[profile.id] ?? profile.label
-                                        act { _ in
-                                            try await api.renameSpeaker(profile.id, label: label)
-                                            try await loadProfiles(api)
-                                        }
-                                    }
-                                }
-                                if profile.sampleAvailable {
-                                    Button(speakerPlaying == profile.id && speakerAudio.isPlaying ? "停止" : "サンプル再生") {
-                                        if let url = try? api.speakerAudio(for: profile.id) {
-                                            speakerPlaying = profile.id
-                                            speakerAudio.load(id: profile.id, url: url)
-                                            speakerAudio.toggle()
-                                        }
-                                    }
-                                }
-                                Button("削除", role: .destructive) {
-                                    confirmation = .init(target: .speaker, id: profile.id, label: profile.label)
-                                }
-                            }
-                            .buttonStyle(SettingsActionStyle())
-                        }
-                    }
-                }
-                if profilesToMerge.count > 1 {
-                    SettingsRow {
-                        Menu("選択した話者を統合") {
-                            ForEach(profiles.filter { profilesToMerge.contains($0.id) }) { first in
-                                Button(first.label + "に統合") {
-                                    let sources = Array(profilesToMerge.subtracting([first.id]))
-                                    act { _ in
-                                        try await api.mergeSpeakers(into: first.id, sourceIds: sources)
-                                        profilesToMerge = []
-                                        try await loadProfiles(api)
-                                    }
-                                }
-                            }
-                        }
-                        .controlSize(.large)
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
     private var advancedSettings: some View {
         Section("デバッグ") {
             flag("デバッグモード", "debug.enabled", fallback: false)
@@ -659,17 +496,6 @@ public struct NativeSettings<Appearance: View>: View {
         }
     }
 
-    private func optionalNumber(_ label: String, _ key: String) -> some View {
-        SettingsRow(label) {
-            textInput(label, Binding(
-                get: { editor.document[key]?.number.map { String(Int($0)) } ?? "" },
-                set: { editor.set(key, Double($0).map(SettingValue.number) ?? .null) }
-            ), width: 78)
-            .multilineTextAlignment(.trailing)
-            .monospacedDigit()
-        }
-    }
-
     private func textInput(_ label: String, _ value: Binding<String>, width: CGFloat = 245) -> some View {
         TextField(label, text: value)
             .labelsHidden()
@@ -697,15 +523,7 @@ public struct NativeSettings<Appearance: View>: View {
     private func refreshPage() async {
         guard let api = editor.api else { return }
         do {
-            switch page {
-            case .input: devices = try await api.devices().devices
-            case .transcription: await downloads.refresh()
-            case .speakers:
-                hasDiarizationToken = try await api.diarizationStatus().hasHfToken
-                try await loadProfiles(api)
-            default:
-                speakerAudio.clear()
-            }
+            if page == .input { devices = try await api.devices().devices }
         } catch is CancellationError {} catch {
             editor.feedback = error.localizedDescription
         }
@@ -750,23 +568,4 @@ public struct NativeSettings<Appearance: View>: View {
         }
     }
 
-    @MainActor private func loadProfiles(_ api: SeamAPI) async throws {
-        profiles = try await api.speakers()
-        profileNames = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0.label) })
-    }
-
-    private func remove(_ entry: Removal) {
-        switch entry.target {
-        case .model:
-            Task {
-                do { try await downloads.remove(entry.id) }
-                catch { editor.feedback = error.localizedDescription }
-            }
-        case .speaker:
-            act { api in
-                try await api.removeSpeaker(entry.id)
-                try await loadProfiles(api)
-            }
-        }
-    }
 }
