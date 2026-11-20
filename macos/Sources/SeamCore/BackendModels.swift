@@ -187,6 +187,7 @@ public enum BackendEvent: Decodable, Sendable {
     case draft(TranscriptDraft)
     case segment(TranscriptSegment)
     case transcriptionError(TranscriptionError)
+    case pipelineError(TranscriptionError)
     case pipeline(PipelineStatus)
     case other(String)
 
@@ -210,6 +211,8 @@ public enum BackendEvent: Decodable, Sendable {
             self = .segment(try container.decode(TranscriptSegment.self, forKey: .data))
         case "transcription_error":
             self = .transcriptionError(try container.decode(TranscriptionError.self, forKey: .data))
+        case "pipeline_error":
+            self = .pipelineError(try container.decode(TranscriptionError.self, forKey: .data))
         case "pipeline_progress":
             self = .pipeline(try container.decode(PipelineStatus.self, forKey: .data))
         default:

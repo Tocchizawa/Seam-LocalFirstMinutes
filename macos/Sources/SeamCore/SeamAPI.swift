@@ -50,8 +50,15 @@ public struct SeamAPI: Sendable {
         return try await request(["api", "minutes"], query: query)
     }
 
-    public func minutes(id: String) async throws -> Minutes {
-        try await request(["api", "minutes", id])
+    public func minutes(id: String, includeTranscript: Bool = true) async throws -> Minutes {
+        let query = includeTranscript ? [] : [URLQueryItem(name: "include_transcript", value: "false")]
+        return try await request(["api", "minutes", id], query: query)
+    }
+
+    public func transcript(id: String) async throws -> [TranscriptSegment] {
+        struct Payload: Decodable { let transcript: [TranscriptSegment] }
+        let payload: Payload = try await request(["api", "minutes", id, "transcript"])
+        return payload.transcript
     }
 
     public func minutesCount(projectId: String) async throws -> Int {
@@ -81,11 +88,11 @@ public struct SeamAPI: Sendable {
     }
 
     public func stop() async throws -> RecordingEnd {
-        try await request(["api", "recording", "stop"], method: "POST")
+        try await request(["api", "recording", "stop"], method: "POST", timeout: 8)
     }
 
-    public func recordingStatus() async throws -> RecordingStatus {
-        try await request(["api", "recording", "status"])
+    public func recordingStatus(timeout: TimeInterval? = nil) async throws -> RecordingStatus {
+        try await request(["api", "recording", "status"], timeout: timeout)
     }
 
     public func setPaused(_ paused: Bool) async throws -> Bool {

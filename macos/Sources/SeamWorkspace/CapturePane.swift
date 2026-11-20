@@ -47,7 +47,7 @@ struct CapturePane: View {
                     .scrollEdgeBar { header(capture) }
 
                 ZStack(alignment: .bottom) {
-                    CaptureWaveform(levels: session.levels, tint: red, running: capture.phase == .running)
+                    CaptureWaveform(meter: session.audioMeter, tint: red, running: capture.phase == .running)
                         .frame(height: expanded ? 100 : 82)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
@@ -156,7 +156,8 @@ struct CapturePane: View {
                     Task { await session.stop() }
                 }
             }
-            .disabled(capture.phase == .starting || capture.phase == .stopping)
+            .disabled(capture.phase == .starting || capture.phase == .stopping
+                      || session.isChanging || session.switchingMicrophone)
             .animation(transition, value: capture.muted)
             .animation(transition, value: capture.phase)
         }
@@ -197,7 +198,7 @@ private struct MicrophoneInputSettings: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .disabled(session.switchingMicrophone || capture.phase == .stopping)
+                .disabled(session.switchingMicrophone || session.isChanging || capture.phase == .stopping)
                 if session.switchingMicrophone {
                     Text("マイクを切り替え中…").font(.caption).foregroundStyle(.secondary)
                 }
@@ -346,11 +347,12 @@ private struct CaptureTranscript: View {
 }
 
 private struct CaptureWaveform: View {
-    let levels: [Double]
+    @ObservedObject var meter: AudioLevelMeter
     let tint: Color
     let running: Bool
 
     var body: some View {
+        let levels = meter.samples
         // 波形の密度や振れ幅は step と barHeight の計算で調整する。
         Canvas { context, geometry in
             let step = 5.2

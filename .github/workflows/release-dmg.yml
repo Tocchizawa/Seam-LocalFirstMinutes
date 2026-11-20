@@ -32,6 +32,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           missing=0
           for key in \
@@ -41,7 +43,9 @@ jobs:
             APPLE_SIGNING_IDENTITY \
             APPLE_ID \
             APPLE_APP_PASSWORD \
-            APPLE_TEAM_ID; do
+            APPLE_TEAM_ID \
+            SPARKLE_PUBLIC_KEY \
+            SPARKLE_PRIVATE_KEY; do
             if [ -z "${!key}" ]; then
               echo "::error::Missing required release signing secret: ${key}"
               missing=1
@@ -69,6 +73,7 @@ jobs:
       - name: Build Native app and DMG
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
         run: bash scripts/build-native.sh
 
       - name: Notarize app and DMG
@@ -84,9 +89,25 @@ jobs:
           xcrun notarytool submit "$RUNNER_TEMP/Seam.app.zip" \
             --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple "$APP_PATH"
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$APP_PATH"
           xcrun stapler validate "$DMG_PATH"
+
+      - name: Sign updater feed
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          test "$GITHUB_REF_NAME" = "v$(tr -d '\n' < macos/VERSION)"
+          SPARKLE_TOOLS="macos/.build/artifacts/macos/Sparkle/bin"
+          printf '%s\n' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_TOOLS/generate_appcast" \
+            --ed-key-file - --maximum-deltas 0 \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+            macos/.build/distribution
+          grep -q 'sparkle:edSignature=' macos/.build/distribution/appcast.xml
+          grep -q 'sparkle-signatures:' macos/.build/distribution/appcast.xml
 
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4
@@ -99,5 +120,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: macos/.build/distribution/*.dmg
+          files: |
+            macos/.build/distribution/*.dmg
+            macos/.build/distribution/appcast.xml
           prerelease: ${{ contains(github.ref_name, '-') }}

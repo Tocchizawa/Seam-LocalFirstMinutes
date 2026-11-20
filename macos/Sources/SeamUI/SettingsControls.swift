@@ -126,15 +126,21 @@ struct SettingsActionStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
-        configuration.label
+        let label = configuration.label
             .font(.system(size: 12, weight: .medium))
-            .padding(.horizontal, 10)
-            .frame(minWidth: 36, minHeight: 36)
-            .background((tint ?? .primary).opacity(pressed ? 0.14 : 0.06), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 12)
+            .frame(minWidth: 36, minHeight: 34)
             .foregroundStyle(tint ?? .primary)
             .opacity(enabled ? 1 : 0.48)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
-            .animation(reduceMotion ? nil : SeamMotion.feedback, value: pressed)
+            .contentShape(Capsule())
+        Group {
+            if #available(macOS 26.0, *) {
+                label.glassEffect(.regular.interactive(enabled), in: .capsule)
+            } else {
+                label.background((tint ?? .primary).opacity(pressed ? 0.14 : 0.06), in: Capsule())
+            }
+        }
+        .scaleEffect(pressed && !reduceMotion ? 0.96 : 1)
+        .animation(reduceMotion ? nil : SeamMotion.feedback, value: pressed)
     }
 }

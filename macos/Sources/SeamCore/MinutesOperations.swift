@@ -25,6 +25,7 @@ public struct ProjectDraft: Encodable, Sendable {
 
 public struct SummaryJob: Decodable, Sendable {
     public let state: String
+    public let stage: String?
     public let stageLabel: String?
     public let errorMessage: String?
 
@@ -38,6 +39,8 @@ public struct ActiveSummary: Decodable, Equatable, Sendable {
     public let projectId: String?
     public let title: String?
     public let state: String?
+    public let stage: String?
+    public let stageLabel: String?
 }
 
 extension SeamAPI {

@@ -41,7 +41,6 @@ public struct Workspace: View {
     @Stored private var deletingProject: Project?
     @Stored private var importProject: Project?
     @Stored private var choosingAudio = false
-    @Stored private var importingAudio = false
     @Stored private var recoveringSession: String?
 
     public init(api: SeamAPI) {
@@ -154,7 +153,7 @@ public struct Workspace: View {
         .task(id: projectScope) { await loadMinutesCount(projectScope) }
         .workspaceTitleBar(title: projectName, subtitle: projectSubtitle, sidebarVisible: showsSidebar,
                            recording: session.capture != nil, toggleSidebar: toggleSidebar) {
-            ActivityControl(activities: backgroundWork) { activity, dismiss in
+            ActivityControl(activities: session.backgroundActivities) { activity, dismiss in
                 if let job = session.summaries.first(where: { activity.id == "summary-\($0.minutesId)" }) {
                     summaryMenu(job, dismiss: dismiss)
                 }
@@ -392,7 +391,15 @@ public struct Workspace: View {
 
     // 議事録一覧。行の見た目は pendingRecording とこの下の行構成を参照する。
     private func list(compact: Bool) -> some View {
-        SeamScrollView {
+        let workBySession = session.work.reduce(into: [String: PipelineStatus]()) { result, job in
+            if let sessionId = job.sessionId { result[sessionId] = job }
+        }
+        let summariesByMinutes = session.summaries.reduce(into: [String: ActiveSummary]()) { result, summary in
+            result[summary.minutesId] = summary
+        }
+        let pending = pendingRecordings
+
+        return SeamScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if session.recovery?.state == "running" {
                     HStack(spacing: 8) {
@@ -403,7 +410,7 @@ public struct Workspace: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 10)
                 }
-                ForEach(pendingRecordings, id: \.sessionId) { job in
+                ForEach(pending, id: \.sessionId) { job in
                     pendingRecording(job)
                 }
 
@@ -413,16 +420,16 @@ public struct Workspace: View {
                     Text("新規プロジェクトを作成すると、ここに議事録が表示されます。")
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 12)
-                } else if loadedMinutesScope == scope && minutes.isEmpty && pendingRecordings.isEmpty {
+                } else if loadedMinutesScope == scope && minutes.isEmpty && pending.isEmpty {
                     Text(scope.term.isEmpty ? "議事録がありません" : "一致する議事録がありません")
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 12)
                 }
 
                 ForEach(minutes) { note in
-                    let job = session.work.first { $0.sessionId == note.sessionId }
-                    let summary = session.summaries.first { $0.minutesId == note.id }
-                    let activity = job.map(recordingActivity) ?? summary.map(summaryActivity)
+                    let job = workBySession[note.sessionId]
+                    let summary = summariesByMinutes[note.id]
+                    let activity = job.map { $0.activity(title: note.title) } ?? summary?.activity
                     let failed = job?.state == "error"
                     Button(action: { open(note) }) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -487,7 +494,7 @@ public struct Workspace: View {
     }
 
     private func pendingRecording(_ job: PipelineStatus) -> some View {
-        let activity = recordingActivity(job)
+        let activity = job.activity()
         return HStack(spacing: 10) {
             rowTitle(Text("新しい録音"), activity: activity, failure: job.error)
                 .accessibilityElement(children: .combine)
@@ -532,31 +539,9 @@ public struct Workspace: View {
     }
 
     private func statusText(_ activity: BackgroundActivity) -> String {
-        guard let progress = activity.progress else { return activity.name }
-        return activity.name + " " + progress.formatted(.percent.precision(.fractionLength(0)))
-    }
-
-    private func recordingActivity(_ job: PipelineStatus) -> BackgroundActivity {
-        let title = job.minutesTitle ?? minutes.first { $0.sessionId == job.sessionId }?.title
-        let detail = title ?? projects.first { $0.id == job.projectId }?.name
-        let label: String
-        switch job.state {
-        case "error": label = "文字起こしに失敗"
-        case "stopping": label = "録音を保存中"
-        default: label = job.stageLabel ?? "文字起こし中"
-        }
-        return .init(id: "transcribe-\(job.sessionId ?? "")", name: label, detail: detail,
-                     symbol: job.state == "error" ? "exclamationmark.circle" : "waveform", progress: job.progress)
-    }
-
-    private func summaryActivity(_ job: ActiveSummary) -> BackgroundActivity {
-        let label = switch job.state {
-        case "queued": "要約を待機中"
-        case "dictionary_update": "用語辞書を整理中"
-        default: "要約中"
-        }
-        let detail = minutes.first { $0.id == job.minutesId }?.title ?? job.title ?? projects.first { $0.id == job.projectId }?.name
-        return .init(id: "summary-\(job.minutesId)", name: label, detail: detail, symbol: "doc.text")
+        let label = activity.stage ?? activity.name
+        guard let progress = activity.progress else { return label }
+        return label + " " + progress.formatted(.percent.precision(.fractionLength(0)))
     }
 
     @ViewBuilder
@@ -564,7 +549,7 @@ public struct Workspace: View {
         Button("議事録を開く", systemImage: "doc.text") {
             dismiss()
             performSummaryAction {
-                let note = try await session.api.minutes(id: job.minutesId)
+                let note = try await session.api.minutes(id: job.minutesId, includeTranscript: false)
                 if note.projectId != projectID, projects.contains(where: { $0.id == note.projectId }) {
                     select(note.projectId)
                 }
@@ -590,19 +575,6 @@ public struct Workspace: View {
             do { try await operation() }
             catch { session.error = error.localizedDescription }
         }
-    }
-
-    private var backgroundWork: [BackgroundActivity] {
-        var active: [BackgroundActivity] = []
-        if importingAudio {
-            active.append(.init(id: "import", name: "音声を取り込み中", symbol: "waveform"))
-        }
-        if session.recovery?.state == "running" {
-            active.append(.init(id: "restore", name: "録音を復元中", detail: session.recovery?.item?.date, symbol: "arrow.trianglehead.clockwise"))
-        }
-        active += session.work.filter { $0.sessionId != nil && $0.state != "error" }.map(recordingActivity)
-        active += session.summaries.map(summaryActivity)
-        return active
     }
 
     private func resultText(_ value: String) -> Text {
@@ -652,7 +624,10 @@ public struct Workspace: View {
             guard scope == requested else { return }
             withAnimation(motion) {
                 if offset == 0 { minutes = result }
-                else { minutes.append(contentsOf: result.filter { note in !minutes.contains { $0.id == note.id } }) }
+                else {
+                    let existingIDs = Set(minutes.map(\.id))
+                    minutes.append(contentsOf: result.filter { !existingIDs.contains($0.id) })
+                }
                 loadedMinutesScope = requested
                 pageFull = result.count == pageSize
             }
@@ -749,7 +724,7 @@ public struct Workspace: View {
             importProject = project
             choosingAudio = true
         }
-        .disabled(importingAudio)
+        .disabled(session.importingAudioName != nil)
         Button("書き出し先を開く") { NSWorkspace.shared.open(URL(fileURLWithPath: project.outputDir)) }
         Divider()
         Button("プロジェクトを削除…", role: .destructive) { deletingProject = project }
@@ -767,13 +742,13 @@ public struct Workspace: View {
     }
 
     private func importAudio(_ url: URL, into project: Project) {
-        guard !importingAudio else { return }
-        importingAudio = true
+        guard session.importingAudioName == nil else { return }
+        session.importingAudioName = url.lastPathComponent
         Task {
             let accessed = url.startAccessingSecurityScopedResource()
             defer {
                 if accessed { url.stopAccessingSecurityScopedResource() }
-                importingAudio = false
+                session.importingAudioName = nil
             }
             do {
                 let note = try await session.api.importAudio(at: url, projectId: project.id)

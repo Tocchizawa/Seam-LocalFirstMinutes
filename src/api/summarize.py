@@ -91,12 +91,14 @@ async def trigger_summarize(
 async def summarize_status(minutes_id: str) -> dict:
     runner = get_runner()
     status = runner.get_status(minutes_id)
-    if runner.is_phase_b_busy(minutes_id):
+    dictionary_stage = runner.dictionary_stage(minutes_id)
+    if dictionary_stage is not None:
+        stage, label = dictionary_stage
         payload = status.to_dict() if status is not None else {"minutes_id": minutes_id}
         payload.update({
             "state": "dictionary_update",
-            "stage": "dictionary_update",
-            "stage_label": "用語辞書を整理中",
+            "stage": stage,
+            "stage_label": label,
         })
         return payload
     if status is None:
@@ -124,18 +126,26 @@ async def summarize_active() -> list[dict]:
     """
     runner = get_runner()
     out: list[dict] = []
-    phase_b = set(runner.list_active_phase_b())
-    for mid in dict.fromkeys([*runner.list_active(), *phase_b]):
+    for mid in dict.fromkeys([*runner.list_active(), *runner.list_active_phase_b()]):
         m = db.get_minutes(mid)
         if m is None:
             continue
         status = runner.get_status(mid)
+        dictionary_stage = runner.dictionary_stage(mid)
+        if dictionary_stage is None and (status is None or status.state not in ("queued", "running")):
+            continue
         out.append({
             "minutes_id": mid,
             "project_id": m.get("project_id"),
             "title": m.get("title"),
-            "state": "dictionary_update" if mid in phase_b else (
+            "state": "dictionary_update" if dictionary_stage is not None else (
                 status.state if status is not None else None
+            ),
+            "stage": dictionary_stage[0] if dictionary_stage is not None else (
+                status.stage if status is not None else None
+            ),
+            "stage_label": dictionary_stage[1] if dictionary_stage is not None else (
+                status.stage_label if status is not None else None
             ),
         })
     return out

@@ -1,14 +1,30 @@
 import AppKit
 import SeamCore
+import SeamUI
 import SwiftUI
 import UserNotifications
+
+@MainActor
+package final class AudioLevelMeter: ObservableObject {
+    @Published package private(set) var samples: [Double] = []
+
+    package var level: Double { samples.last ?? 0 }
+
+    package func append(_ level: Double) {
+        samples = Array(samples.suffix(63)) + [level]
+    }
+
+    package func reset() {
+        samples = []
+    }
+}
 
 @MainActor
 package final class WorkspaceSession: ObservableObject {
     package struct Capture {
         package enum Phase { case starting, running, paused, stopping }
 
-        var id: String?
+        package private(set) var id: String?
         package var phase: Phase
         package var elapsed = 0.0
         package var muted = false
@@ -19,26 +35,50 @@ package final class WorkspaceSession: ObservableObject {
     }
 
     let api: SeamAPI
-    @Published private(set) var connected = false
+    @Published package private(set) var connected = false
     @Published package private(set) var capture: Capture?
     @Published private(set) var switchingMicrophone = false
+    @Published package private(set) var isChanging = false
     @Published private(set) var transcript = LiveTranscript()
-    @Published private(set) var levels: [Double] = []
     @Published private(set) var work: [PipelineStatus] = []
     @Published private(set) var summaries: [ActiveSummary] = []
     @Published private(set) var recovery: RecoveryStatus?
+    @Published var importingAudioName: String?
     @Published private(set) var archiveRevision = 0
     @Published var idleReminder: RecordingIdleReminder?
     @Published package var error: String?
 
-    package var audioLevel: Double { levels.last ?? 0 }
+    package let audioMeter = AudioLevelMeter()
+    package var isBusy: Bool { isChanging || switchingMicrophone }
 
-    private var changing = false
+    package var backgroundActivities: [BackgroundActivity] {
+        var activities: [BackgroundActivity] = []
+        if let importingAudioName {
+            activities.append(.init(id: "import", name: "音声を取り込み中",
+                                    detail: importingAudioName, symbol: "waveform"))
+        }
+        if let recovery, recovery.state == "running" {
+            let count = recovery.total > 0 ? "\(min(recovery.current, recovery.total))/\(recovery.total)件" : nil
+            activities.append(.init(id: "restore", name: "録音を復元中", detail: recovery.item?.date,
+                                    symbol: "arrow.trianglehead.clockwise", stage: count))
+        }
+        activities += work.filter { $0.sessionId != nil && $0.state != "error" }.map { $0.activity() }
+        activities += summaries.map(\.activity)
+        return activities.filter(\.isRunning) + activities.filter { !$0.isRunning }
+    }
+
     private var captureRevision = 0
     private var requestedNotifications = false
     private var needsSummaryRefresh = false
+    private var hasWorkSnapshot = false
 
     package init(api: SeamAPI) { self.api = api }
+
+    package var canRestartForUpdate: Bool {
+        hasWorkSnapshot && connected && capture == nil && backgroundActivities.isEmpty
+    }
+
+    package func legacyUpdateSettings() async -> SettingsDocument? { try? await api.settings() }
 
     package func run() async {
         async let snapshots: Void = poll()
@@ -47,11 +87,11 @@ package final class WorkspaceSession: ObservableObject {
     }
 
     func start(in projectId: String) async {
-        guard capture == nil, !changing else { return }
-        changing = true
+        guard capture == nil, !isChanging else { return }
+        isChanging = true
         captureRevision += 1
         capture = Capture(phase: .starting)
-        defer { changing = false }
+        defer { isChanging = false }
 
         do {
             let settings = try await api.settings()
@@ -76,10 +116,10 @@ package final class WorkspaceSession: ObservableObject {
     }
 
     package func setPaused() async {
-        guard let initial = capture, let id = initial.id, initial.phase != .stopping, !changing else { return }
-        changing = true
+        guard let initial = capture, let id = initial.id, initial.phase != .stopping, !isChanging else { return }
+        isChanging = true
         captureRevision += 1
-        defer { changing = false }
+        defer { isChanging = false }
         do {
             let paused = try await api.setPaused(initial.phase != .paused)
             if capture?.id == id { capture?.phase = paused ? .paused : .running }
@@ -87,10 +127,10 @@ package final class WorkspaceSession: ObservableObject {
     }
 
     func toggleMicrophone() async {
-        guard let current = capture, let id = current.id, current.phase != .stopping, !changing else { return }
-        changing = true
+        guard let current = capture, let id = current.id, current.phase != .stopping, !isChanging else { return }
+        isChanging = true
         captureRevision += 1
-        defer { changing = false }
+        defer { isChanging = false }
         do {
             let muted = try await api.setMicMuted(!current.muted)
             if capture?.id == id { capture?.muted = muted }
@@ -99,7 +139,7 @@ package final class WorkspaceSession: ObservableObject {
 
     func switchMicrophone(_ deviceUID: String?) async throws {
         guard let current = capture, let id = current.id, current.phase != .stopping,
-              current.canSwitchMicrophone, !switchingMicrophone else { return }
+              current.canSwitchMicrophone, !switchingMicrophone, !isChanging else { return }
         switchingMicrophone = true
         defer { switchingMicrophone = false }
         let result = try await api.switchMicrophone(sessionId: id, deviceUid: deviceUID)
@@ -110,16 +150,40 @@ package final class WorkspaceSession: ObservableObject {
     }
 
     package func stop() async {
-        guard let current = capture, let id = current.id, current.phase != .stopping, !changing else { return }
-        changing = true
+        guard let current = capture, let id = current.id, current.phase != .stopping,
+              !isChanging, !switchingMicrophone else { return }
+        isChanging = true
         captureRevision += 1
         capture?.phase = .stopping
-        defer { changing = false }
+        defer { isChanging = false }
         do {
-            _ = try await api.stop()
+            let result = try await api.stop()
+            guard capture?.id == id else { return }
+            guard result.sessionId == id, result.status == "stopping" else {
+                if await stopNeedsAttention(for: id) {
+                    error = "録音停止後の状態を確認できませんでした。"
+                }
+                return
+            }
         } catch {
-            if capture?.id == id { capture?.phase = current.phase }
-            self.error = error.localizedDescription
+            guard capture?.id == id else { return }
+            if await stopNeedsAttention(for: id) {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    /// A stop request may reach the backend even when its response is lost. Re-read
+    /// server state before restoring the UI so it never claims to be recording by assumption.
+    private func stopNeedsAttention(for sessionId: String) async -> Bool {
+        guard capture?.id == sessionId else { return false }
+        do {
+            let status = try await api.recordingStatus(timeout: 4)
+            guard capture?.id == sessionId else { return false }
+            install(restoredCapture(status))
+            return status.sessionId == sessionId && status.recording && status.stopping != true
+        } catch {
+            return capture?.id == sessionId
         }
     }
 
@@ -141,7 +205,7 @@ package final class WorkspaceSession: ObservableObject {
                 try Task.checkCancellation()
                 if !connected { archiveChanged() }
                 connected = true
-                if !changing && revision == captureRevision {
+                if !isChanging && revision == captureRevision {
                     install(restoredCapture(status))
                 }
                 if cycle % 4 == 0 { await refreshWork() }
@@ -178,7 +242,7 @@ package final class WorkspaceSession: ObservableObject {
         }
         captureRevision += 1
         transcript.activate(next?.id)
-        levels = []
+        audioMeter.reset()
         if let id = next?.id {
             Task { await restoreTranscript(for: id) }
         }
@@ -224,6 +288,7 @@ package final class WorkspaceSession: ObservableObject {
         }
         recovery = try? await restoring
         await summaryRefresh
+        hasWorkSnapshot = true
     }
 
     private func refreshSummaries() async {
@@ -272,28 +337,67 @@ package final class WorkspaceSession: ObservableObject {
             remindWhileRecording(reminder)
         case .level(let reading):
             guard capture?.id == reading.sessionId else { return }
-            levels = Array(levels.suffix(63)) + [reading.combinedLevel]
+            audioMeter.append(reading.combinedLevel)
         case .segment(let row):
             transcript.receive(row)
         case .draft(let draft):
             transcript.receive(draft)
         case .transcriptionError(let failure):
             error = failure.message
+        case .pipelineError(let failure):
+            if let id = failure.sessionId, capture?.id == id { install(nil) }
+            error = failure.message
         case .pipeline(let progress):
             guard let id = progress.sessionId else { return }
-            work.removeAll { $0.sessionId == id }
-            if progress.showsInArchive { work.insert(progress, at: 0) }
+            if let index = work.firstIndex(where: { $0.sessionId == id }) {
+                if progress.showsInArchive { work[index] = progress }
+                else { work.remove(at: index) }
+            } else if progress.showsInArchive {
+                work.insert(progress, at: 0)
+            }
             if progress.state == "transcribing", capture?.id == id, capture?.phase == .stopping {
                 install(nil)
+            } else if progress.state == "error", capture?.id == id {
+                install(nil)
+                if let message = progress.error { error = message }
             }
         case .other(let type):
             if ["summary_stage", "summary_done", "summary_failed", "summary_cancelled", "summary_skipped",
-                "dictionary_update_started", "dictionary_update_finished"].contains(type) {
+                "dictionary_update_started", "dictionary_update_stage", "dictionary_update_finished"].contains(type) {
                 needsSummaryRefresh = true
             }
-            if ["minutes_saved", "minutes_title_updated", "summary_done", "summary_failed", "pipeline_done", "session_recovery_finished"].contains(type) {
+            if ["minutes_saved", "minutes_title_updated", "summary_done", "summary_failed", "pipeline_done",
+                "session_recovery_finished", "transcript_corrected"].contains(type) {
                 archiveChanged()
             }
         }
+    }
+}
+
+extension PipelineStatus {
+    func activity(title: String? = nil) -> BackgroundActivity {
+        let failed = state == "error"
+        let name = failed ? "文字起こしに失敗" : (state == "stopping" ? "録音を保存中" : "文字起こし中")
+        let detail = title ?? minutesTitle ?? startedAt.flatMap(formattedRecordingDate)
+        return .init(id: "transcribe-\(sessionId ?? "")", name: name, detail: detail,
+                     symbol: failed ? "exclamationmark.circle" : "waveform",
+                     progress: progress, stage: failed ? nil : stageLabel ?? message, isRunning: !failed)
+    }
+}
+
+func summaryActivity(id: String, state: String?, stage: String?, label: String?, title: String? = nil) -> BackgroundActivity {
+    let waiting = state == "queued" || stage == "dictionary_waiting"
+    let (name, symbol) = switch state {
+    case "queued": ("要約を待機中", "clock")
+    case "dictionary_update": (waiting ? "用語辞書の更新を待機中" : "用語辞書を更新中", "text.book.closed")
+    default: ("要約中", "doc.text")
+    }
+    return .init(id: "summary-\(id)", name: name, detail: title, symbol: symbol,
+                 stage: waiting ? nil : label, isRunning: !waiting)
+}
+
+extension ActiveSummary {
+    var activity: BackgroundActivity {
+        summaryActivity(id: minutesId, state: state, stage: stage, label: stageLabel, title: title)
     }
 }

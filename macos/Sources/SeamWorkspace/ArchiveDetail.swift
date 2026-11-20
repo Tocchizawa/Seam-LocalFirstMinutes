@@ -12,6 +12,8 @@ struct ArchiveDetail: View {
     @ObservedObject var session: WorkspaceSession
     @StateObject private var playback = MinutesPlayback()
     @Stored private var current: Minutes?
+    @Stored private var transcript: [TranscriptSegment]?
+    @Stored private var transcriptLoading = false
     @Stored private var hasAudio = false
     @Stored private var summaryJob: SummaryJob?
     @Stored private var exportNotice: ExportNotice?
@@ -50,12 +52,13 @@ struct ArchiveDetail: View {
     private var note: Minutes { current ?? item }
     private var pipeline: PipelineStatus? { session.work.first { $0.sessionId == note.sessionId } }
     private var transcribing: Bool { pipeline?.state == "transcribing" }
-    private var summarizing: Bool { summaryJob?.active == true }
+    private var activeSummary: ActiveSummary? { session.summaries.first { $0.minutesId == item.id } }
+    private var summarizing: Bool { activeSummary != nil || summaryJob?.active == true }
 
     var body: some View {
         // 本文、進行状況、操作メニューを組み合わせて詳細画面を作る。
         MinutesReader(title: note.title, date: formattedDate(note), summary: note.summary ?? "",
-                      sections: note.transcript ?? [], query: query,
+                      sections: transcript ?? [], transcriptLoading: transcriptLoading, query: query,
                       playback: hasAudio ? playback : nil, compact: compact, expanded: expanded,
                       showTranscript: $showTranscript,
                       toggleExpanded: compact ? nil : {
@@ -74,6 +77,20 @@ struct ArchiveDetail: View {
         }
         .task(id: session.archiveRevision) {
             await refresh()
+        }
+        .task(id: "\(item.id):\(showTranscript):\(session.archiveRevision)") {
+            guard showTranscript, transcript == nil else { return }
+            transcriptLoading = true
+            do {
+                let loaded = try await session.api.transcript(id: item.id)
+                guard !Task.isCancelled else { return }
+                transcript = loaded
+                transcriptLoading = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                transcriptLoading = false
+                problem = error.localizedDescription
+            }
         }
         .task { await watchSummary() }
         .onDisappear { playback.pause() }
@@ -95,6 +112,7 @@ struct ArchiveDetail: View {
                 Button("再実行") {
                     perform {
                         playback.pause()
+                        transcript = nil
                         try await session.api.retranscribe(id: item.id)
                         session.archiveChanged()
                     }
@@ -105,17 +123,11 @@ struct ArchiveDetail: View {
 
     private var currentActivity: BackgroundActivity? {
         if transcribing, let pipeline {
-            let label = pipeline.stageLabel ?? pipeline.message
-            return .init(id: "transcription", name: label.isEmpty ? "文字起こし中" : label,
-                         symbol: "waveform", progress: pipeline.progress)
+            return pipeline.activity(title: note.title)
         }
+        if let activeSummary { return activeSummary.activity }
         guard let summaryJob, summaryJob.active else { return nil }
-        let (label, symbol) = switch summaryJob.state {
-        case "queued": ("要約を待機中", "clock")
-        case "dictionary_update": ("用語辞書を整理中", "text.book.closed")
-        default: (summaryJob.stageLabel ?? "要約中", "doc.text")
-        }
-        return .init(id: "summary", name: label, symbol: symbol)
+        return summaryActivity(id: item.id, state: summaryJob.state, stage: summaryJob.stage, label: summaryJob.stageLabel)
     }
 
     // タイトル/要約の編集、再処理、削除などの詳細画面操作。
@@ -146,7 +158,7 @@ struct ArchiveDetail: View {
             }
             Divider()
             if summarizing {
-                Button(summaryJob?.state == "dictionary_update" ? "用語辞書の整理を中止" : "要約を中止",
+                Button((activeSummary?.state ?? summaryJob?.state) == "dictionary_update" ? "用語辞書の整理を中止" : "要約を中止",
                        systemImage: "stop.circle") {
                     perform {
                         try await session.cancelSummary(id: item.id)
@@ -267,7 +279,7 @@ struct ArchiveDetail: View {
 
     private func refresh() async {
         do {
-            let loaded = try await session.api.minutes(id: item.id)
+            let loaded = try await session.api.minutes(id: item.id, includeTranscript: false)
             try Task.checkCancellation()
             current = loaded
             let audio = try await session.api.audioAvailable(in: loaded.sessionId)

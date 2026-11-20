@@ -19,6 +19,7 @@ public struct MinutesReader: View {
     private let date: String
     private let summary: String
     private let sections: [TranscriptSegment]
+    private let transcriptLoading: Bool
     private let untimedTranscript: String
     private let query: String
     private let playback: MinutesPlayback?
@@ -37,7 +38,8 @@ public struct MinutesReader: View {
     @Binding private var showTranscript: Bool
 
     public init(
-        title: String, date: String, summary: String, sections: [TranscriptSegment], untimedTranscript: String = "",
+        title: String, date: String, summary: String, sections: [TranscriptSegment], transcriptLoading: Bool = false,
+        untimedTranscript: String = "",
         query: String = "", playback: MinutesPlayback? = nil, compact: Bool = false, animated: Bool = true,
         expanded: Bool = false, showTranscript: Binding<Bool>, toggleExpanded: (() -> Void)? = nil,
         backTitle: String? = nil, goBack: (() -> Void)? = nil,
@@ -48,6 +50,7 @@ public struct MinutesReader: View {
         self.date = date
         self.summary = summary
         self.sections = sections
+        self.transcriptLoading = transcriptLoading
         self.untimedTranscript = untimedTranscript
         self.query = query
         self.playback = playback
@@ -116,7 +119,12 @@ public struct MinutesReader: View {
     // 選択中タブの内容。要約と全文のレイアウトは専用ビューに分けている。
     private var activeTab: some View {
         if showTranscript {
-            transcript
+            if transcriptLoading {
+                ProgressView("文字起こしを読み込み中…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                transcript
+            }
         } else {
             MinutesSummary(markdown: summary, query: query, compact: compact, tint: tint, motion: motion,
                            position: $summaryPosition)
@@ -169,6 +177,7 @@ public struct MinutesReader: View {
                         activityStatus(activity)
                     }
                 }
+                .transition(.opacity.combined(with: .offset(y: -4)))
             } else {
                 tabs
             }
@@ -184,6 +193,7 @@ public struct MinutesReader: View {
         .padding(.bottom, 12)
         .padding(.horizontal, padding)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(motion, value: activity)
     }
 
     private var tabs: some View {
@@ -198,18 +208,24 @@ public struct MinutesReader: View {
     }
 
     private func activityStatus(_ activity: BackgroundActivity) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
             Image(systemName: activity.symbol)
+                .symbolEffect(.pulse, options: .repeating, isActive: activity.isRunning && !reduceMotion)
                 .accessibilityHidden(true)
-            Text(verbatim: activity.name)
+            Text(verbatim: activity.stage ?? activity.name)
                 .lineLimit(1)
+                .contentTransition(.opacity)
             if let progress = activity.progress {
                 Text(progress, format: .percent.precision(.fractionLength(0)))
                     .monospacedDigit()
+                    .contentTransition(reduceMotion ? .identity : .numericText())
             }
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(activity.isRunning ? tint : Color.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background((activity.isRunning ? tint : Color.primary).opacity(0.12), in: Capsule())
         .accessibilityElement(children: .combine)
     }
 
@@ -372,12 +388,30 @@ private struct PlayingMinutesTranscript: View {
     let motion: Animation?
     @Binding var position: Int?
 
+    private var activeSegment: Int? {
+        guard playback.hasPosition else { return nil }
+
+        // Transcript segments are stored chronologically. Find the latest segment
+        // that has started instead of scanning the full transcript on every player tick.
+        var lower = 0
+        var upper = sections.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if sections[middle].start <= playback.elapsed {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+
+        guard lower > 0 else { return nil }
+        let index = lower - 1
+        return playback.elapsed < sections[index].end ? index : nil
+    }
+
     var body: some View {
-        let active = playback.hasPosition ? sections.lastIndex {
-            playback.elapsed >= $0.start && playback.elapsed < $0.end
-        } : nil
         MinutesTranscript(sections: sections, untimed: untimed, query: query, compact: compact,
-                          tint: tint, motion: motion, position: $position, active: active, playing: playback.isPlaying) { time in
+                          tint: tint, motion: motion, position: $position, active: activeSegment, playing: playback.isPlaying) { time in
             playback.seek(to: time, play: true)
         }
     }
@@ -397,7 +431,7 @@ private struct MinutesTranscript: View {
     var active: Int?
     var playing = false
     var seek: ((Double) -> Void)?
-    @Stored private var visible = Set<Int>()
+    @Stored private var visibleRange: ClosedRange<Int>?
 
     private var timeWidth: CGFloat {
         (sections.last?.start ?? 0) >= 3600 ? 76 : (compact ? 54 : 61)
@@ -426,9 +460,15 @@ private struct MinutesTranscript: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollPosition(id: $position, anchor: .top)
-        .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.30) { visible = Set($0) }
+        .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.30) { ids in
+            guard let first = ids.min(), let last = ids.max() else {
+                visibleRange = nil
+                return
+            }
+            visibleRange = first...last
+        }
         .overlay(alignment: .bottomTrailing) {
-            if let active, playing && !visible.isEmpty && !visible.contains(active) {
+            if let active, let visibleRange, playing && !visibleRange.contains(active) {
                 Button {
                     withAnimation(motion) { position = active }
                 } label: {
@@ -509,7 +549,6 @@ private struct MinutesTranscript: View {
         .contentShape(Rectangle())
         .background(tint.opacity(active ? 0.075 : 0), in: RoundedRectangle(cornerRadius: 8))
         .animation(motion, value: active)
-        .animation(motion, value: playing)
     }
 
     private func rowLabel(_ line: TranscriptSegment) -> String {

@@ -56,6 +56,16 @@ private final class SettingsEditor: ObservableObject {
 public enum NativeSettingsPage: String, CaseIterable, Identifiable {
     case input = "録音", transcription = "文字起こし", summary = "要約", appearance = "外観", advanced = "詳細"
     public var id: Self { self }
+
+    fileprivate var symbol: String {
+        switch self {
+        case .input: "mic"
+        case .transcription: "waveform"
+        case .summary: "doc.text"
+        case .appearance: "circle.lefthalf.filled"
+        case .advanced: "slider.horizontal.3"
+        }
+    }
 }
 
 private enum SummaryProvider: String, CaseIterable, Identifiable {
@@ -91,10 +101,12 @@ private enum SummaryProvider: String, CaseIterable, Identifiable {
 /// アプリ内の設定画面。保存時は変更した項目だけをバックエンドへ送る。
 @available(macOS 15.0, *)
 public struct NativeSettings<Appearance: View>: View {
+    @Environment(\.appUpdateControls) private var updates
     private typealias Stored<Value> = SwiftUI.State<Value>
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var selectedCategory
     @StateObject private var editor: SettingsEditor
     @Binding private var page: NativeSettingsPage
     @Stored private var devices: [AudioDevice] = []
@@ -124,7 +136,6 @@ public struct NativeSettings<Appearance: View>: View {
         self.appearance = appearance
     }
 
-    private var motion: Animation? { reduceMotion ? nil : SeamMotion.feedback }
     private var accent: Color {
         colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
     }
@@ -152,6 +163,7 @@ public struct NativeSettings<Appearance: View>: View {
         }
         .animatePageChange(for: page, enabled: !reduceMotion)
         .scrollEdgeBar { settingsHeader }
+        .scrollEdgeBar(.bottom, blur: false) { settingsFooter }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .tint(.primary)
         .task { await editor.load() }
@@ -175,61 +187,117 @@ public struct NativeSettings<Appearance: View>: View {
     // 現在選択中の設定ページの内容をスクロール表示する。
     private var settingsContent: some View {
         SeamScrollView {
-            Group(sections: fields) { sections in
-                VStack(alignment: .leading, spacing: 24) {
-                    ForEach(sections) { section in
-                        VStack(alignment: .leading, spacing: 8) {
-                            section.header
-                                .font(.system(size: 14, weight: .semibold))
-                                .accessibilityAddTraits(.isHeader)
-                            SettingsRows { section.content }
-                                .background(alignment: .top) {
-                                    Rectangle()
-                                        .fill(Color.primary.opacity(0.09))
-                                        .frame(height: 1)
-                                        .allowsHitTesting(false)
-                                }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .center, spacing: 16) {
+                    Text(page.rawValue)
+                        .font(.system(size: compact ? 24 : 30, weight: .semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
+                    if !editor.changes.isEmpty || editor.saving {
+                        saveButton
+                            .transition(reduceMotion ? .identity : .move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .padding(.top, 16)
-                .padding(.bottom, 24)
-                .padding(.horizontal, gutter)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(reduceMotion ? nil : SeamMotion.reposition,
+                           value: !editor.changes.isEmpty || editor.saving)
+
+                if editor.loading {
+                    ProgressView("設定を読み込み中")
+                        .controlSize(.small)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Group(sections: fields) { sections in
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 8) {
+                                section.header
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .accessibilityAddTraits(.isHeader)
+                                    .padding(.horizontal, 4)
+                                SettingsRows { section.content }
+                                    .background(Color.primary.opacity(colorScheme == .dark ? 0.045 : 0.028),
+                                                in: RoundedRectangle(cornerRadius: 16))
+                                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 16)
+                                            .strokeBorder(Color.primary.opacity(0.08))
+                                            .allowsHitTesting(false)
+                                    }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 20)
+            .padding(.horizontal, gutter)
         }
         .disabled(editor.loading || editor.saving || busy)
     }
 
     private var settingsHeader: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 Text("設定")
-                    .font(.system(size: compact ? 23 : 27, weight: .medium))
+                    .font(.system(size: 15, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 4)
-                if !editor.changes.isEmpty || editor.saving {
-                    Button(editor.saving ? "保存中" : "変更を保存") {
-                        Task { await editor.save() }
+                categoryTabs
+            }
+            HStack(spacing: 12) {
+                Text("設定")
+                    .font(.system(size: 15, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 4)
+                settingsGlass {
+                    Menu {
+                        ForEach(NativeSettingsPage.allCases) { item in
+                            Button(item.rawValue, systemImage: page == item ? "checkmark" : item.symbol) {
+                                page = item
+                            }
+                        }
+                    } label: {
+                        Label(page.rawValue, systemImage: page.symbol)
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .frame(height: 36)
                     }
-                    .keyboardShortcut("s")
-                    .buttonStyle(SettingsActionStyle(tint: accent))
-                    .disabled(editor.loading || editor.saving || busy)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .accessibilityLabel("設定カテゴリ")
                 }
             }
-            .frame(minHeight: 44)
-            tabs
-            if let feedback = editor.feedback {
+        }
+        .padding(.horizontal, gutter)
+        .padding(.top, gutter)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var settingsFooter: some View {
+        if let feedback = editor.feedback {
+            HStack {
                 Text(feedback)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .accessibilityLabel("設定の状態 \(feedback)")
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, gutter)
+            .padding(.vertical, 8)
+            .background(Color.seamPaper(for: colorScheme))
         }
-        .padding(.horizontal, gutter)
-        .padding(.top, compact ? 16 : 20)
-        .padding(.bottom, 8)
+    }
+
+    private var saveButton: some View {
+        Button(editor.saving ? "保存中" : "変更を保存", systemImage: "checkmark") {
+            Task { await editor.save() }
+        }
+        .keyboardShortcut("s")
+        .buttonStyle(SettingsActionStyle(tint: accent))
+        .disabled(editor.loading || editor.saving || busy)
     }
 
     @ViewBuilder
@@ -243,53 +311,44 @@ public struct NativeSettings<Appearance: View>: View {
         }
     }
 
-    // 設定カテゴリの切り替え。ラベルと順番は NativeSettingsPage を編集する。
-    private var tabs: some View {
-        let pages = NativeSettingsPage.allCases
-        return ViewThatFits(in: .horizontal) {
-            tabRow(pages)
-            VStack(spacing: 4) {
-                tabRow(Array(pages.prefix(3)))
-                tabRow(Array(pages.suffix(3)))
+    private var categoryTabs: some View {
+        settingsGlass {
+            HStack(spacing: 2) {
+                ForEach(NativeSettingsPage.allCases) { item in
+                    let active = page == item
+                    Button {
+                        page = item
+                    } label: {
+                        Label(item.rawValue, systemImage: item.symbol)
+                            .font(.system(size: 12, weight: active ? .semibold : .medium))
+                            .foregroundStyle(active ? Color.primary : Color.secondary)
+                            .padding(.horizontal, 9)
+                            .frame(height: 34)
+                            .background {
+                                if active {
+                                    Capsule()
+                                        .fill(Color.primary.opacity(0.11))
+                                        .matchedGeometryEffect(id: "category", in: selectedCategory)
+                                }
+                            }
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(active ? .isSelected : [])
+                }
             }
-        }
-        .frame(maxWidth: .infinity)
-        .background(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.12))
-                .frame(height: 1)
-                .allowsHitTesting(false)
+            .padding(3)
+            .fixedSize()
+            .animation(reduceMotion ? nil : SeamMotion.reposition, value: page)
         }
     }
 
-    private func tabRow(_ pages: [NativeSettingsPage]) -> some View {
-        HStack(spacing: 4) {
-            ForEach(pages) { item in
-                let active = page == item
-                Button {
-                    page = item
-                } label: {
-                    Text(item.rawValue)
-                        .font(.system(size: 13, weight: active ? .semibold : .medium))
-                        .foregroundStyle(active ? accent : .secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 8)
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .contentShape(Rectangle())
-                        .overlay(alignment: .bottom) {
-                            if active {
-                                Capsule()
-                                    .fill(accent)
-                                    .frame(maxWidth: 72)
-                                    .frame(height: 2)
-                                    .padding(.horizontal, 8)
-                                    .allowsHitTesting(false)
-                            }
-                        }
-                }
-                .buttonStyle(ReaderHoverStyle(tint: .primary, motion: motion))
-                .accessibilityAddTraits(active ? .isSelected : [])
-            }
+    @ViewBuilder
+    private func settingsGlass<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content().glassEffect(.regular, in: .capsule)
+        } else {
+            content().background(.regularMaterial, in: Capsule())
         }
     }
 
@@ -372,10 +431,10 @@ public struct NativeSettings<Appearance: View>: View {
             }
             if provider.requiresKey, editor.api != nil {
                 SettingsRow("APIキー") {
-                    SecureField(hasProviderKey ? "保存済みのAPIキーを更新" : "APIキー", text: $key)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.large)
-                        .frame(maxWidth: 245)
+                    fieldSurface {
+                        SecureField(hasProviderKey ? "保存済みのAPIキーを更新" : "APIキー", text: $key)
+                    }
+                    .frame(maxWidth: 245)
                 }
                 SettingsRow {
                     actionsLayout {
@@ -439,6 +498,9 @@ public struct NativeSettings<Appearance: View>: View {
                         .font(.system(size: 13))
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 112)
+                        .padding(8)
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.vertical, 8)
                         .accessibilityLabel("要約プロンプト")
                 }
                 SettingsRow {
@@ -451,6 +513,29 @@ public struct NativeSettings<Appearance: View>: View {
 
     @ViewBuilder
     private var advancedSettings: some View {
+        Section("Seam") {
+            SettingsRow("バージョン") {
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if let updates {
+                SettingsRow("ソフトウェアアップデート") {
+                    Button("今すぐ確認", action: updates.check)
+                        .buttonStyle(SettingsActionStyle())
+                        .disabled(!updates.canCheck)
+                }
+                SettingsToggleRow("アップデートを自動で確認", isOn: updates.automaticallyChecks)
+                SettingsToggleRow("アップデートを自動でインストール", isOn: updates.automaticallyInstalls)
+                    .disabled(!updates.automaticallyChecks.wrappedValue)
+            } else if let url = URL(string: "https://github.com/Tocchizawa/Seam-LocalFirstMinutes/releases") {
+                SettingsRow("ソフトウェアアップデート") {
+                    Link("リリースを表示", destination: url)
+                        .buttonStyle(SettingsActionStyle())
+                }
+            }
+        }
         Section("デバッグ") {
             flag("デバッグモード", "debug.enabled", fallback: false)
             choose("ログレベル", "logging.level", fallback: "INFO",
@@ -485,23 +570,33 @@ public struct NativeSettings<Appearance: View>: View {
 
     private func numeric(_ label: String, _ key: String, fallback: Double) -> some View {
         SettingsRow(label) {
-            TextField(label, value: Binding(get: { editor.document[key]?.number ?? fallback },
-                                           set: { editor.set(key, .number($0)) }), format: .number)
-                .labelsHidden()
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.large)
-                .multilineTextAlignment(.trailing)
-                .monospacedDigit()
-                .frame(width: 78)
+            fieldSurface {
+                TextField(label, value: Binding(get: { editor.document[key]?.number ?? fallback },
+                                               set: { editor.set(key, .number($0)) }), format: .number)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+            }
+            .frame(width: 88)
         }
     }
 
     private func textInput(_ label: String, _ value: Binding<String>, width: CGFloat = 245) -> some View {
-        TextField(label, text: value)
-            .labelsHidden()
-            .textFieldStyle(.roundedBorder)
-            .controlSize(.large)
+        fieldSurface { TextField(label, text: value) }
             .frame(maxWidth: width)
+    }
+
+    private func fieldSurface<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .labelsHidden()
+            .textFieldStyle(.plain)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.primary.opacity(0.08))
+                    .allowsHitTesting(false)
+            }
     }
 
     private func flag(_ label: String, _ key: String, fallback: Bool) -> some View {

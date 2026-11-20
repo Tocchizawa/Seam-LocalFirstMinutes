@@ -64,8 +64,8 @@ async def search_minutes(
 
 
 @router.get("/{minutes_id}")
-async def get_minutes(minutes_id: str) -> dict:
-    m = db.get_minutes(minutes_id)
+async def get_minutes(minutes_id: str, include_transcript: bool = True) -> dict:
+    m = db.get_minutes(minutes_id) if include_transcript else db.get_minutes(minutes_id, include_transcript=False)
     if m is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
     return m
@@ -73,10 +73,10 @@ async def get_minutes(minutes_id: str) -> dict:
 
 @router.get("/{minutes_id}/transcript")
 async def get_transcript(minutes_id: str) -> dict:
-    m = db.get_minutes(minutes_id)
-    if m is None:
+    transcript = db.get_transcript(minutes_id)
+    if transcript is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    return {"transcript": m.get("transcript", [])}
+    return {"transcript": transcript}
 
 
 @router.get("/{minutes_id}/markdown")

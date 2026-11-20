@@ -41,6 +41,13 @@ DRAFTS_DIR = APP_DIR / "summary_drafts"
 SUMMARY_QUEUE_PATH = APP_DIR / "summary_queue.json"
 CODEX_USAGE_PATH = APP_DIR / "codex_usage.jsonl"
 MAX_RETAINED_SUMMARY_STATUSES = 100
+DICTIONARY_UPDATE_TIMEOUT = 180
+DICTIONARY_STAGE_LABELS = {
+    "dictionary_waiting": "用語辞書の更新を待機中",
+    "dictionary_reading": "参照資料を確認中",
+    "dictionary_extracting": "用語・補正候補を抽出中",
+    "dictionary_saving": "用語辞書を保存中",
+}
 
 _USAGE_KEYS = (
     "input_tokens",
@@ -186,6 +193,7 @@ class SummaryRunner:
         self._current: _Job | None = None
         self._current_provider: SummarizerProvider | None = None
         self._phase_b_tasks: dict[str, asyncio.Task] = {}
+        self._dictionary_stages: dict[str, str] = {}
         self._worker_task: asyncio.Task | None = None
         self._broadcaster = broadcaster
         self._shutdown = False
@@ -513,6 +521,10 @@ class SummaryRunner:
             if not task.done()
         ]
 
+    def dictionary_stage(self, minutes_id: str) -> tuple[str, str] | None:
+        stage = self._dictionary_stages.get(minutes_id)
+        return (stage, DICTIONARY_STAGE_LABELS[stage]) if stage is not None else None
+
     def list_active(self) -> list[str]:
         """進行中 (queued / running) の minutes_id 一覧を返す。"""
         active: list[str] = []
@@ -598,6 +610,8 @@ class SummaryRunner:
 
             self._current = job
             local_model_lease = False
+            dequeued_at = time.monotonic()
+            queue_wait = max(0, time.time() - job.enqueued_at)
             try:
                 provider_name = job.provider_name or str(
                     (config.get("minutes_ai") or {}).get("provider", "ollama")
@@ -619,6 +633,11 @@ class SummaryRunner:
                             })
                         continue
                 if self._jobs.get(job.minutes_id) is job and not job.cancel_event.is_set():
+                    logger.info(
+                        "[summary] start %s provider=%s queue_wait=%.1fs resource_wait=%.1fs",
+                        job.minutes_id, provider_name, queue_wait,
+                        time.monotonic() - dequeued_at,
+                    )
                     await self._process_job(job)
                 elif self._jobs.get(job.minutes_id) is job:
                     job.status.state = "cancelled"
@@ -1105,42 +1124,60 @@ class SummaryRunner:
             self._run_durable_phase_b(minutes_id, provider_name),
             name=f"summary-phase-b-{minutes_id}",
         )
+        self._dictionary_stages[minutes_id] = "dictionary_waiting"
         self._phase_b_tasks[minutes_id] = task
-        task.add_done_callback(
-            lambda done, mid=minutes_id: (
-                self._phase_b_tasks.pop(mid, None)
-                if self._phase_b_tasks.get(mid) is done else None
-            )
-        )
+
+        def clear_finished_task(done: asyncio.Task) -> None:
+            if self._phase_b_tasks.get(minutes_id) is done:
+                self._phase_b_tasks.pop(minutes_id, None)
+                self._dictionary_stages.pop(minutes_id, None)
+
+        task.add_done_callback(clear_finished_task)
+
+    async def _set_dictionary_stage(self, minutes_id: str, stage: str) -> None:
+        if minutes_id not in self._dictionary_stages:
+            return
+        self._dictionary_stages[minutes_id] = stage
+        await self._broadcast({
+            "type": "dictionary_update_stage",
+            "data": {"minutes_id": minutes_id, "stage": stage, "stage_label": DICTIONARY_STAGE_LABELS[stage]},
+        })
 
     async def _run_durable_phase_b(
         self,
         minutes_id: str,
         provider_name: str | None,
     ) -> None:
+        started = time.monotonic()
         await self._broadcast({
             "type": "dictionary_update_started",
             "data": {
                 "minutes_id": minutes_id,
-                "stage_label": "用語辞書を整理中",
+                "stage_label": DICTIONARY_STAGE_LABELS["dictionary_waiting"],
             },
         })
-        completed = False
+        discard_draft = True
         try:
             await self._run_phase_b(minutes_id, provider_name)
-            completed = True
         except asyncio.CancelledError:
             # Shutdown cancellation keeps the durable entry for the next launch.
+            logger.info("[phase-b] cancelled %s elapsed=%.1fs", minutes_id, time.monotonic() - started)
             raise
+        except (TimeoutError, SummaryError) as exc:
+            code = exc.code.value if isinstance(exc, SummaryError) else SummaryErrorCode.TIMEOUT.value
+            logger.warning("[phase-b] failed %s code=%s elapsed=%.1fs", minutes_id, code, time.monotonic() - started)
         except Exception:
+            discard_draft = False
             logger.exception("[phase-b] unexpected failure (%s)", minutes_id)
         self._durable_phase_b.pop(minutes_id, None)
+        self._dictionary_stages.pop(minutes_id, None)
         self._persist_pending_jobs()
-        if completed:
+        if discard_draft:
             try:
                 (DRAFTS_DIR / f"{minutes_id}.md").unlink(missing_ok=True)
             except Exception:
                 pass
+        logger.info("[phase-b] finished %s elapsed=%.1fs", minutes_id, time.monotonic() - started)
         await self._broadcast({
             "type": "dictionary_update_finished",
             "data": {"minutes_id": minutes_id},
@@ -1157,21 +1194,24 @@ class SummaryRunner:
 
         provider_name = str(provider_name or ai_cfg.get("provider") or "ollama")
         local_model_lease = provider_name in {"ollama", "claude_code", "codex"}
+        queued_at = time.monotonic()
         if local_model_lease:
             from src.audio.resource_monitor import model_resource_gate
 
             await model_resource_gate.acquire_llm_async()
         try:
-            await self._apply_dictionary_corrections(minutes_id)
-        except Exception as e:
-            logger.warning("[phase-b] correction step failed (%s): %s", minutes_id, e)
+            logger.info(
+                "[phase-b] start %s provider=%s resource_wait=%.1fs timeout=%ss",
+                minutes_id, provider_name, time.monotonic() - queued_at, DICTIONARY_UPDATE_TIMEOUT,
+            )
+            await self._apply_dictionary_corrections(minutes_id, provider_name, ai_cfg)
         finally:
             if local_model_lease:
                 from src.audio.resource_monitor import model_resource_gate
 
                 model_resource_gate.release_llm()
 
-    async def _apply_dictionary_corrections(self, minutes_id: str) -> int:
+    async def _apply_dictionary_corrections(self, minutes_id: str, provider_name: str, ai_cfg: dict) -> int:
         """Phase B: 要約完了直後に呼ばれる辞書整理。
 
         - transcript + docs + 既存辞書を LLM に渡し、new_glossary と new_corrections を取得
@@ -1183,11 +1223,9 @@ class SummaryRunner:
         """
         from src.storage.db import db
         from src.project.manager import project_manager
-        from src.config import config as _cfg
         from src.dictionary.corrector import update_dictionary_from_meeting
         from src.dictionary.replacer import apply_corrections
 
-        ai_cfg = _cfg.get("minutes_ai") or {}
         record = db.get_minutes(minutes_id)
         if record is None or not record.get("project_id"):
             return 0
@@ -1216,23 +1254,36 @@ class SummaryRunner:
             for c in (project.corrections or [])
         ]
 
-        provider_name = str(ai_cfg.get("provider") or "ollama")
         threshold = float(ai_cfg.get("correction_confidence", 0.85))
 
-        result = await update_dictionary_from_meeting(
-            transcript_text,
-            existing_glossary=glossary_terms,
-            existing_corrections=existing_corrections,
-            project_name=project.name,
-            doc_dirs=list(project.doc_dirs),
-            repo_path=project.repo_path,
-            provider_name=provider_name,
-            ai_cfg=ai_cfg,
-            timeout_sec=180,
-            confidence_threshold=threshold,
-        )
+        await self._set_dictionary_stage(minutes_id, "dictionary_reading")
+        started = time.monotonic()
+        extraction_error = None
+        try:
+            result = await update_dictionary_from_meeting(
+                transcript_text,
+                existing_glossary=glossary_terms,
+                existing_corrections=existing_corrections,
+                project_name=project.name,
+                doc_dirs=list(project.doc_dirs),
+                repo_path=project.repo_path,
+                provider_name=provider_name,
+                ai_cfg=ai_cfg,
+                timeout_sec=DICTIONARY_UPDATE_TIMEOUT,
+                confidence_threshold=threshold,
+                on_extracting=lambda: self._set_dictionary_stage(minutes_id, "dictionary_extracting"),
+            )
+        except (SummaryError, TimeoutError) as exc:
+            # 保存済み辞書による補正は、新しい候補を取得できなかった場合も行う。
+            extraction_error = exc
+            result = {"new_glossary": [], "new_corrections": []}
         new_glossary = result["new_glossary"]
         new_pairs = result["new_corrections"]
+        logger.info(
+            "[phase-b] candidates %s elapsed=%.1fs terms=%d corrections=%d",
+            minutes_id, time.monotonic() - started, len(new_glossary), len(new_pairs),
+        )
+        await self._set_dictionary_stage(minutes_id, "dictionary_saving")
 
         # LLM の待機中に再文字起こしや辞書編集が行われた場合は最新値を使う。
         latest_record = db.get_minutes(minutes_id)
@@ -1333,6 +1384,8 @@ class SummaryRunner:
                 "[phase-b] applied %d replacement(s) on minutes %s",
                 replaced_count, minutes_id,
             )
+        if extraction_error is not None:
+            raise extraction_error
         return replaced_count
 
     def _build_project_context(

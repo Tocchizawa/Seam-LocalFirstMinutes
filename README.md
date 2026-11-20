@@ -12,6 +12,8 @@ Seam は、会議の録音、文字起こし、要約をローカル環境中心
 
 アプリの実行には Apple Silicon と macOS 26 以降が必要である。Apple Speech の言語リソースが未取得の場合、最初の文字起こし時に macOS が準備する。
 
+「設定 → 詳細」でバージョンを確認できる。署名済みの配布版では、同じ画面でアップデートを手動で確認し、自動確認と自動インストールを設定できる。
+
 ## 主な機能
 
 - マイクとシステム音声の録音
@@ -54,6 +56,8 @@ bash scripts/build-native.sh
 ```
 
 生成物は `macos/.build/distribution/` に置かれる。同梱バックエンドの作成には `uv` と Xcode Command Line Tools が必要である。配布署名を行う場合は `APPLE_SIGNING_IDENTITY` を指定する。
+
+タグで安定版を配布する際は、Sparkle の公開鍵を GitHub Actions の変数 `SPARKLE_PUBLIC_KEY` に、対応する秘密鍵をシークレット `SPARKLE_PRIVATE_KEY` に設定する。リリースワークフローが公証済み DMG と署名済みの `appcast.xml` を公開する。更新機能を含まない既存版からは、その初回の配布版を DMG でインストールする。
 
 ## 設定とデータ
 

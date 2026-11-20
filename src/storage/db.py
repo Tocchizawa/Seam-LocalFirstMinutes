@@ -112,14 +112,30 @@ class Database:
         conn.execute(f"INSERT INTO minutes ({cols}) VALUES ({placeholders})", data)
         conn.commit()
 
-    def get_minutes(self, minutes_id: str) -> dict | None:
+    def get_minutes(self, minutes_id: str, *, include_transcript: bool = True) -> dict | None:
         conn = self._get_conn()
+        columns = "*" if include_transcript else (
+            "id, session_id, project_id, title, date, started_at, duration_sec, summary, "
+            "created_at, updated_at"
+        )
         row = conn.execute(
-            "SELECT * FROM minutes WHERE id = ?", (minutes_id,)
+            f"SELECT {columns} FROM minutes WHERE id = ?", (minutes_id,)
         ).fetchone()
         if row is None:
             return None
         return self._row_to_dict(row)
+
+    def get_transcript(self, minutes_id: str) -> list[dict] | None:
+        row = self._get_conn().execute(
+            "SELECT transcript FROM minutes WHERE id = ?", (minutes_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            transcript = json.loads(row["transcript"])
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return transcript if isinstance(transcript, list) else []
 
     def has_minutes_for_session(self, session_id: str) -> bool:
         conn = self._get_conn()
