@@ -1,9 +1,4 @@
-"""corrections list を文字起こしセグメントに単純文字列置換で適用する。
-
-- LLM 不要 (高速・予測可能)
-- transcript の text フィールドだけを書き換える
-- Whisper への initial_prompt にも正式表記を入れることでさらに精度上昇
-"""
+"""corrections list を文字起こしセグメントに単純文字列置換で適用する。"""
 from __future__ import annotations
 
 
@@ -57,29 +52,3 @@ def apply_corrections(
         else:
             out.append(seg)
     return out, total
-
-
-def build_initial_prompt_with_corrections(
-    glossary: list[str], corrections: list[dict],
-) -> str:
-    """Whisper への initial_prompt を組み立てる。
-
-    glossary に正式表記を追加することで、Whisper が誤転写しがちな部分を予防する。
-    corrections の "correct" 側も含めて、正式表記をすべて Whisper に提示。
-    """
-    terms: set[str] = set()
-    for g in glossary:
-        if not g:
-            continue
-        # "用語: 説明" 形式の場合は用語部分のみ
-        head = g.split(":", 1)[0].split("：", 1)[0].strip()
-        if head:
-            terms.add(head)
-    for p in corrections:
-        c = (p.get("correct") or "").strip()
-        if c:
-            terms.add(c)
-    if not terms:
-        return ""
-    # 句読点で区切って一文にする
-    return "、".join(sorted(terms))

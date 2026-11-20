@@ -2,7 +2,7 @@
 
 - mic: Core Audio sidecar → WAV 直接書き込み
 - system: ScreenCaptureKit sidecar → WAV 直接書き込み
-- combined.flac は Whisper に渡した realtime mixed stream から API 層で生成
+- combined.flac は Apple Speech に渡した realtime mixed stream から API 層で生成
 """
 from __future__ import annotations
 
@@ -104,11 +104,13 @@ class Recorder:
         self._mic_thread: threading.Thread | None = None
         self._mic_capture = None
         self._mic_backend: str | None = None
+        self._mic_operation_lock = threading.Lock()
         self._sys_capture = None
         self._start_time: float = 0
         self._session_dir: Path | None = None
         self._session_id: str = ""
         self._mic_device: int | None = None
+        self._mic_name: str | None = None
         self._mic_wav: Path | None = None
         self._sys_wav: Path | None = None
         self._level_callback: AudioCallback | None = None
@@ -131,6 +133,24 @@ class Recorder:
     def set_mic_muted(self, muted: bool) -> None:
         self._mic_muted = bool(muted)
         logger.info("Mic muted = %s", self._mic_muted)
+
+    def switch_microphone(self, session_id: str, device_uid: str | None) -> dict:
+        with self._mic_operation_lock:
+            if not self._recording or self._session_id != session_id:
+                raise RuntimeError("対象の録音は終了しています")
+            if self._mic_capture is None:
+                raise RuntimeError("録音中のマイク切り替えにはCore Audioが必要です")
+            self._mic_capture.switch_device(device_uid)
+            return self._microphone_status()
+
+    def _microphone_status(self) -> dict:
+        capture = self._mic_capture
+        device_name, device_uid = capture.device_info if capture else (self._mic_name, None)
+        return {
+            "mic_device_name": device_name if self._recording else None,
+            "mic_device_uid": device_uid if self._recording else None,
+            "mic_can_switch": self._recording and capture is not None,
+        }
 
     @property
     def error(self) -> str | None:
@@ -508,6 +528,7 @@ class Recorder:
         self._error = None
         self._mic_capture = None
         self._mic_backend = None
+        self._mic_name = None
         self._sys_capture = None
         self._mic_reopen_total = 0
         self._last_overflow_log_at = 0.0
@@ -554,6 +575,7 @@ class Recorder:
                 raise
         else:
             self._mic_backend = "sounddevice"
+            self._mic_name = self._mic_device_name(self._mic_device)
             self._mic_thread = threading.Thread(target=self._record_mic, daemon=True)
             self._mic_thread.start()
 
@@ -563,6 +585,7 @@ class Recorder:
         return {
             "session_id": self._session_id,
             "mic_device": self._mic_device,
+            **self._microphone_status(),
             "mic_backend": self._mic_backend,
             "has_system_audio": has_system,
             "system_error": sys_error,
@@ -827,23 +850,24 @@ class Recorder:
                     pass
 
     def stop(self) -> dict:
-        if not self._recording:
-            raise RuntimeError("Not recording")
+        with self._mic_operation_lock:
+            if not self._recording:
+                raise RuntimeError("Not recording")
 
-        elapsed = self.elapsed_sec
-        system_backend = self._sys_capture.backend if self._sys_capture else None
-        self._recording = False
+            elapsed = self.elapsed_sec
+            system_backend = self._sys_capture.backend if self._sys_capture else None
+            self._recording = False
 
-        if self._mic_capture:
-            try:
-                self._mic_capture.stop()
-                if self._mic_capture.error:
-                    mic_error = self._mic_capture.error
-                    self._error = f"{self._error}; {mic_error}" if self._error else mic_error
-            except Exception as e:
-                logger.warning("Mic capture stop error: %s", e)
-                self._error = f"{self._error}; {e}" if self._error else str(e)
-            self._mic_capture = None
+            if self._mic_capture:
+                try:
+                    self._mic_capture.stop()
+                    if self._mic_capture.error:
+                        mic_error = self._mic_capture.error
+                        self._error = f"{self._error}; {mic_error}" if self._error else mic_error
+                except Exception as e:
+                    logger.warning("Mic capture stop error: %s", e)
+                    self._error = f"{self._error}; {e}" if self._error else str(e)
+                self._mic_capture = None
 
         # Wait for mic thread
         if self._mic_thread:
@@ -1043,6 +1067,7 @@ class Recorder:
             "mic_stream_alive": self.mic_stream_alive,
             "mic_backend": self._mic_backend,
             "mic_muted": self._mic_muted,
+            **self._microphone_status(),
             "system_capture": system_diagnostics,
             "error": self._error,
         }

@@ -6,7 +6,7 @@ import logging
 import re
 import shutil
 import subprocess
-import threading
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,10 +14,9 @@ from pathlib import Path
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from src.api.errors import bad_request, conflict, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.project.manager import project_manager
 from src.security import is_safe_session_id, resolve_existing_absolute_path
-from src.speakers import speaker_memory
 from src.storage.db import db
 from src.storage.export import export_to_dir, to_markdown
 from src.config import APP_DIR, config
@@ -25,14 +24,6 @@ from src.config import APP_DIR, config
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/minutes", tags=["minutes"])
-
-
-def _apply_latest_speaker_labels(minutes_data: dict) -> dict:
-    transcript = minutes_data.get("transcript")
-    if isinstance(transcript, list):
-        minutes_data = dict(minutes_data)
-        minutes_data["transcript"] = speaker_memory.apply_latest_labels(transcript)
-    return minutes_data
 
 
 def _delete_session_dir(session_id: str) -> tuple[bool, str | None]:
@@ -73,21 +64,18 @@ async def search_minutes(
 
 
 @router.get("/{minutes_id}")
-async def get_minutes(minutes_id: str) -> dict:
-    m = db.get_minutes(minutes_id)
+async def get_minutes(minutes_id: str, include_transcript: bool = True) -> dict:
+    m = db.get_minutes(minutes_id) if include_transcript else db.get_minutes(minutes_id, include_transcript=False)
     if m is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    return _apply_latest_speaker_labels(m)
+    return m
 
 
 @router.get("/{minutes_id}/transcript")
 async def get_transcript(minutes_id: str) -> dict:
-    m = db.get_minutes(minutes_id)
-    if m is None:
+    transcript = db.get_transcript(minutes_id)
+    if transcript is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    transcript = m.get("transcript", [])
-    if isinstance(transcript, list):
-        transcript = speaker_memory.apply_latest_labels(transcript)
     return {"transcript": transcript}
 
 
@@ -96,7 +84,6 @@ async def get_markdown(minutes_id: str) -> dict:
     m = db.get_minutes(minutes_id)
     if m is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    m = _apply_latest_speaker_labels(m)
     project = project_manager.get(m["project_id"])
     project_name = project.name if project else None
     return {"content": to_markdown(m, project_name)}
@@ -107,7 +94,6 @@ async def export_minutes(minutes_id: str) -> dict:
     m = db.get_minutes(minutes_id)
     if m is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    m = _apply_latest_speaker_labels(m)
     project = project_manager.get(m["project_id"])
     if project is None:
         raise not_found("PROJECT_NOT_FOUND",
@@ -133,7 +119,7 @@ async def update_minutes(minutes_id: str, body: MinutesUpdateRequest) -> dict:
     updated = db.get_minutes(minutes_id)
     if updated is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    return _apply_latest_speaker_labels(updated)
+    return updated
 
 
 class SummaryUpdateRequest(BaseModel):
@@ -215,7 +201,14 @@ def _load_import_transcript(path: Path) -> list[dict]:
                 continue
             item = json.loads(line)
             if isinstance(item, dict) and item.get("text"):
-                segments.append(item)
+                segment = {
+                    "start": float(item.get("start") or 0),
+                    "end": float(item.get("end") or 0),
+                    "text": str(item["text"]).strip(),
+                }
+                if item.get("session_id"):
+                    segment["session_id"] = str(item["session_id"])
+                segments.append(segment)
     except Exception as e:
         logger.warning("failed to read import transcript %s: %s", transcript_path, e)
         return []
@@ -263,8 +256,7 @@ def _enqueue_summary_if_empty(minutes_id: str) -> bool:
         return False
     from src.summarize.runner import get_runner
 
-    get_runner().enqueue(minutes_id)
-    return True
+    return get_runner().ensure_queued(minutes_id)
 
 
 @router.post("/import-audio")
@@ -289,11 +281,22 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
 
     try:
         stored_audio = _prepare_import_audio(source_audio, session_dir)
+        from src.api import recording as rec_mod
+
+        if not rec_mod._write_session_meta(
+            session_id,
+            project_id=body.project_id,
+            started_at=started_at,
+            state="importing",
+        ):
+            raise internal_error(
+                "RECOVERY_STATE_WRITE_FAILED",
+                "音声取り込みの復元情報を保存できなかったため、処理を開始できません",
+            )
         initial_transcript = _load_import_transcript(source_path)
 
         duration_sec = 0
         try:
-            from src.api import recording as rec_mod
             duration_sec = int(rec_mod._audio_duration_sec(stored_audio))
         except Exception:
             duration_sec = 0
@@ -315,7 +318,6 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
             "duration_sec": int(duration_sec),
             "transcript": initial_transcript,
             "summary": "",
-            "whisper_model": config.get("whisper", "model", default="medium"),
             "llm_model": "",
             "created_at": now,
             "updated_at": now,
@@ -342,12 +344,21 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
             summary_enqueued = _enqueue_summary_if_empty(minutes_id)
             if summary_enqueued:
                 logger.info("[import] auto-summary enqueued: %s", minutes_id)
+                rec_mod._delete_session_meta(session_id)
+            elif not bool(config.get("minutes_ai", "auto_generate", default=True)):
+                rec_mod._delete_session_meta(session_id)
+            else:
+                logger.warning(
+                    "[import] retaining recovery metadata until auto-summary "
+                    "is durably queued: %s",
+                    minutes_id,
+                )
         except Exception as e:
             logger.warning("[import] failed to enqueue auto-summary for %s: %s", minutes_id, e)
 
     return {
         "status": "started",
-        "minutes": _apply_latest_speaker_labels(minutes),
+        "minutes": minutes,
         "session_id": session_id,
         "audio_path": str(stored_audio),
         "source_path": str(source_path),
@@ -361,17 +372,36 @@ async def import_audio_minutes(body: ImportAudioRequest) -> dict:
 @router.patch("/{minutes_id}/summary")
 async def update_summary(minutes_id: str, body: SummaryUpdateRequest) -> dict:
     """ユーザーによる要約手動編集。LLM モデル列は更新しない(provenance を保持)。"""
+    current = db.get_minutes(minutes_id)
+    if current is None:
+        raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
+    session_id = str(current.get("session_id") or "")
+    if session_id:
+        from src.api import recording as rec_mod
+
+        pipeline = rec_mod._pipelines.get(session_id)
+        if pipeline and pipeline.get("state") in ("recording", "stopping", "transcribing"):
+            raise conflict("MINUTES_BUSY", "文字起こし中は要約を編集できません")
+    from src.summarize.runner import get_runner
+    status = get_runner().get_status(minutes_id)
+    if status is not None and status.state in ("queued", "running"):
+        raise conflict("MINUTES_BUSY", "要約生成中は要約を編集できません")
+
     ok = db.update_summary(minutes_id, body.summary)
     if not ok:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
     updated = db.get_minutes(minutes_id)
     if updated is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-    return _apply_latest_speaker_labels(updated)
+    return updated
 
 
 @router.put("/{minutes_id}/project")
 async def reassign_project(minutes_id: str, body: dict) -> dict:
+    from src.summarize.runner import get_runner
+
+    if get_runner().is_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "処理中の議事録はプロジェクトを移動できません")
     project_id = body.get("project_id")
     if not project_id:
         from fastapi import HTTPException
@@ -393,6 +423,10 @@ async def delete_minutes(minutes_id: str) -> dict:
         existing = rec_mod._pipelines.get(session_id)
         if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
             raise conflict("SESSION_ACTIVE", "この議事録のセッションは現在処理中のため削除できません")
+
+    from src.summarize.runner import get_runner
+    if get_runner().is_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "この議事録は要約または後処理中のため削除できません")
 
     ok = db.delete_minutes(minutes_id)
     if not ok:
@@ -421,72 +455,7 @@ async def _start_retranscribe_minutes(
     *,
     enqueue_summary_on_complete: bool = False,
 ) -> dict:
-    """既存セッションの音声を使って文字起こしを再実行する。
-    バックグラウンドで走り、進捗は _pipelines 経由で WS broadcast される。
-    """
-    m = db.get_minutes(minutes_id)
-    if m is None:
-        raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
-
-    session_id = m.get("session_id", "")
-    if not session_id:
-        raise not_found("SESSION_NOT_FOUND", "セッションIDが見つかりません")
-
-    # 音声ファイルを探す
-    session_dir = APP_DIR / "sessions" / session_id
-    wav_path: Path | None = None
-    for name in ("combined.flac", "combined.wav", "system.wav", "mic.wav"):
-        cand = session_dir / name
-        if cand.exists() and cand.stat().st_size > 44:
-            wav_path = cand
-            break
-    if wav_path is None:
-        raise not_found("AUDIO_NOT_FOUND",
-                        "音声ファイルが見つかりません(セッションが既に削除されている可能性)")
-
-    # 同じ session_id で何かが走っていれば拒否(再実行は1セッションにつき1度ずつ)
-    from src.api import recording as rec_mod
-    existing = rec_mod._pipelines.get(session_id)
-    if existing and existing.get("state") in ("recording", "stopping", "transcribing"):
-        raise conflict("ALREADY_RUNNING", "このセッションは現在処理中です")
-
-    cancel_event = threading.Event()
-    _retranscribe_cancel_events[session_id] = cancel_event
-
-    task = asyncio.create_task(
-        _run_retranscribe(
-            minutes_id,
-            session_id,
-            str(wav_path),
-            m.get("project_id", ""),
-            cancel_event,
-            enqueue_summary_on_complete=enqueue_summary_on_complete,
-        )
-    )
-    _retranscribe_tasks[session_id] = task
-
-    def _cleanup_task(done: asyncio.Task) -> None:
-        current = _retranscribe_tasks.get(session_id)
-        if current is done:
-            _retranscribe_tasks.pop(session_id, None)
-
-    task.add_done_callback(_cleanup_task)
-    return {"status": "started", "session_id": session_id}
-
-
-# 再文字起こしの逐次実行ロック(同時1件まで)
-_retranscribe_sem = asyncio.Semaphore(1)
-_retranscribe_tasks: dict[str, asyncio.Task] = {}
-_retranscribe_cancel_events: dict[str, threading.Event] = {}
-
-
-class RetranscribeCancelledError(RuntimeError):
-    """再文字起こしの協調キャンセル通知。"""
-
-
-@router.post("/{minutes_id}/retranscribe/cancel")
-async def cancel_retranscribe_minutes(minutes_id: str) -> dict:
-    """進行中の再文字起こし停止を要求する。"""
+    """既存音声を Apple Speech で再認識するバックグラウンド処理を開始する。"""
     m = db.get_minutes(minutes_id)
     if m is None:
         raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
@@ -495,122 +464,130 @@ async def cancel_retranscribe_minutes(minutes_id: str) -> dict:
     if not session_id:
         raise not_found("SESSION_NOT_FOUND", "セッションIDが見つかりません")
 
+    from src.summarize.runner import get_runner
+    if get_runner().is_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "この議事録は要約または後処理中のため再文字起こしできません")
+
     from src.api import recording as rec_mod
+    session_dir = APP_DIR / "sessions" / session_id
+    wav_path = next((session_dir / name for name in rec_mod.AUDIO_FILE_PRIORITY
+                     if (session_dir / name).is_file() and (session_dir / name).stat().st_size > 44), None)
+    if wav_path is None:
+        raise not_found("AUDIO_NOT_FOUND", "音声ファイルが見つかりません")
+
     existing = rec_mod._pipelines.get(session_id)
+    if session_id in _retranscribe_tasks or (
+        existing and existing.get("state") in ("recording", "stopping", "transcribing")
+    ):
+        raise conflict("ALREADY_RUNNING", "このセッションは現在処理中です")
+
+    if not rec_mod._write_session_meta(
+        session_id,
+        project_id=str(m.get("project_id") or ""),
+        state="retranscribing",
+        retry_minutes_id=minutes_id,
+    ):
+        raise internal_error("RECOVERY_STATE_WRITE_FAILED", "再文字起こしの復元情報を保存できませんでした")
+
+    cancel_event = asyncio.Event()
+    _retranscribe_cancel_events[session_id] = cancel_event
+    task = asyncio.create_task(
+        _run_retranscribe(
+            minutes_id,
+            session_id,
+            wav_path,
+            str(m.get("project_id") or ""),
+            cancel_event,
+            clear_summary=bool(str(m.get("summary") or "").strip()),
+            minutes_title=m.get("title"),
+            enqueue_summary_on_complete=enqueue_summary_on_complete or bool(
+                config.get("minutes_ai", "auto_generate", default=True)
+            ),
+        )
+    )
+    _retranscribe_tasks[session_id] = task
+    task.add_done_callback(lambda done, sid=session_id: _retranscribe_tasks.pop(sid, None))
+    return {"status": "started", "session_id": session_id}
+
+
+_retranscribe_sem = asyncio.Semaphore(1)
+_retranscribe_tasks: dict[str, asyncio.Task] = {}
+_retranscribe_processes: dict[str, object] = {}
+_retranscribe_cancel_events: dict[str, asyncio.Event] = {}
+
+
+@router.post("/{minutes_id}/retranscribe/cancel")
+async def cancel_retranscribe_minutes(minutes_id: str) -> dict:
+    m = db.get_minutes(minutes_id)
+    if m is None:
+        raise not_found("MINUTES_NOT_FOUND", f"議事録 '{minutes_id}' が見つかりません")
+    session_id = str(m.get("session_id") or "").strip()
+    if not session_id:
+        raise not_found("SESSION_NOT_FOUND", "セッションIDが見つかりません")
+
     cancel_event = _retranscribe_cancel_events.get(session_id)
-    running_task = _retranscribe_tasks.get(session_id)
-
-    if not existing or existing.get("state") not in ("transcribing", "stopping"):
-        if running_task and not running_task.done():
-            if cancel_event is None:
-                cancel_event = threading.Event()
-                _retranscribe_cancel_events[session_id] = cancel_event
-            cancel_event.set()
-            return {"status": "cancelling", "session_id": session_id}
+    task = _retranscribe_tasks.get(session_id)
+    if cancel_event is None or task is None or task.done():
         return {"status": "not_running", "session_id": session_id}
-
-    if cancel_event is None:
-        cancel_event = threading.Event()
-        _retranscribe_cancel_events[session_id] = cancel_event
     cancel_event.set()
-
-    from src.pipeline.state import Stage, STAGE_LABELS
-    existing.update({
-        "state": "stopping",
-        "stage": Stage.CANCELLED.value,
-        "stage_label": STAGE_LABELS[Stage.CANCELLED],
-        "message": "停止要求を受け付けました...",
-    })
+    process = _retranscribe_processes.get(session_id)
+    if process is not None:
+        await process.cancel()
+    from src.api import recording as rec_mod
     await rec_mod._broadcast_pipeline(session_id)
     return {"status": "cancelling", "session_id": session_id}
 
 
-def _load_wav_16k_mono_f32(path: str):
-    """音声ファイルを 16kHz mono float32 numpy 配列で読み込む。
-
-    WAV は wave で直接読み、それ以外 (FLAC など) は ffmpeg で f32le mono にデコードする。
-    """
-    import numpy as np
-    from pathlib import Path as _Path
-
-    ext = _Path(path).suffix.lower()
-    if ext == ".wav":
-        import wave
-        from math import gcd
-        with wave.open(path, "rb") as wf:
-            sr = wf.getframerate()
-            nchannels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            nframes = wf.getnframes()
-            frames = wf.readframes(nframes)
-
-        if sampwidth == 2:
-            audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-        elif sampwidth == 4:
-            audio = np.frombuffer(frames, dtype=np.float32)
-        elif sampwidth == 1:
-            audio = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128) / 128.0
-        else:
-            raise ValueError(f"Unsupported sample width: {sampwidth}")
-
-        if nchannels > 1:
-            audio = audio.reshape(-1, nchannels).mean(axis=1).astype(np.float32)
-
-        if sr != 16000:
-            from scipy.signal import resample_poly
-            g = gcd(16000, sr)
-            audio = resample_poly(audio, 16000 // g, sr // g).astype(np.float32)
-        return audio
-
-    # FLAC など: ffmpeg で 16kHz mono f32le に直接デコード
-    import subprocess
+def _normalize_audio_for_speech(source: Path, destination: Path) -> None:
     from src.audio.recorder import FFMPEG
     proc = subprocess.run(
-        [FFMPEG, "-loglevel", "error", "-i", path,
-         "-f", "f32le", "-ac", "1", "-ar", "16000", "-"],
-        capture_output=True, timeout=600,
+        [FFMPEG, "-y", "-loglevel", "error", "-i", str(source),
+         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(destination)],
+        capture_output=True,
+        timeout=900,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg decode failed: {proc.stderr[-500:]!r}")
-    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+    if proc.returncode != 0 or not destination.is_file() or destination.stat().st_size <= 44:
+        detail = (proc.stderr or b"")[-500:].decode("utf-8", errors="replace")
+        raise RuntimeError(f"音声を Apple Speech 用に変換できませんでした: {detail}")
 
 
-async def _run_retranscribe(minutes_id: str, session_id: str,
-                            wav_path: str, project_id: str,
-                            cancel_event: threading.Event,
-                            *,
-                            enqueue_summary_on_complete: bool = False) -> None:
-    """再文字起こし処理。
-    - 同時実行は 1 件のみ(_retranscribe_sem)。複数キューイング時は FIFO 待ち
-    - 録音中は待機して、新録音とそのストリーミング文字起こしを最優先
-    - 安定性向上のため、streaming と同じ VADChunker でチャンク化してから個別に transcribe
-    """
+async def _run_retranscribe(
+    minutes_id: str,
+    session_id: str,
+    audio_path: Path,
+    project_id: str,
+    cancel_event: asyncio.Event,
+    *,
+    clear_summary: bool,
+    minutes_title: str | None = None,
+    enqueue_summary_on_complete: bool = False,
+) -> None:
     from src.api import recording as rec_mod
     from src.api.ws import ws_manager
-
     from src.pipeline.state import Stage, STAGE_LABELS, RETRANSCRIBE_PIPELINE
+    from src.transcribe.apple_speech import start_file_transcription
 
-    # pipeline 登録(キュー待ち)
+    previous = rec_mod._pipelines.get(session_id) or {}
     rec_mod._pipelines[session_id] = {
         "session_id": session_id,
+        "minutes_id": minutes_id,
+        "minutes_title": minutes_title,
         "project_id": project_id,
         "state": "transcribing",
         "stage": Stage.QUEUED.value,
         "stage_label": STAGE_LABELS[Stage.QUEUED],
         "stage_step": 1,
         "stage_total": len(RETRANSCRIBE_PIPELINE),
-        "message": "キューで待機中...",
-        "result": None,
+        "message": "文字起こしを準備中...",
+        "result": previous.get("result"),
         "transcript": None,
         "error": None,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": previous.get("started_at") or datetime.now(timezone.utc).isoformat(),
     }
     rec_mod._evict_completed_pipelines()
     await rec_mod._broadcast_pipeline(session_id)
 
-    def _set_retry_stage(stage: Stage, message: str | None = None) -> None:
-        """再文字起こし pipeline 内の stage 更新ヘルパー (worker thread から
-        呼ぶ場合は run_coroutine_threadsafe で _broadcast_pipeline を投げる)。"""
+    def set_stage(stage: Stage, message: str | None = None) -> None:
         idx = RETRANSCRIBE_PIPELINE.index(stage) if stage in RETRANSCRIBE_PIPELINE else 0
         rec_mod._pipelines[session_id].update({
             "stage": stage.value,
@@ -620,429 +597,116 @@ async def _run_retranscribe(minutes_id: str, session_id: str,
             "message": message or STAGE_LABELS[stage],
         })
 
-    def _assert_not_cancelled() -> None:
-        if cancel_event.is_set():
-            raise RetranscribeCancelledError("ユーザーにより停止されました")
-
-    # 同時1件 FIFO
-    async with _retranscribe_sem:
-        _assert_not_cancelled()
-        # 録音中なら録音終了まで待機
-        while rec_mod._active_session_id is not None:
-            _assert_not_cancelled()
-            _set_retry_stage(Stage.QUEUED, "録音中のため待機中...")
-            await rec_mod._broadcast_pipeline(session_id)
-            await asyncio.sleep(2)
-
-        _assert_not_cancelled()
-        _set_retry_stage(Stage.WHISPER_LOAD, "Whisperモデル準備中... (初回はダウンロードに数分)")
-        rec_mod._pipelines[session_id]["progress"] = 0.0
-        await rec_mod._broadcast_pipeline(session_id)
-
-        from src.audio.resource_monitor import model_resource_gate
-
-        while not model_resource_gate.try_acquire_whisper():
-            _assert_not_cancelled()
-            _set_retry_stage(Stage.QUEUED, "別のローカルAI処理が終わるまで待機中...")
-            await rec_mod._broadcast_pipeline(session_id)
-            await asyncio.sleep(1)
-        whisper_lease = True
-
-        loop = asyncio.get_event_loop()
-
-        def do_transcribe() -> list[dict]:
-            from src.audio.resource_monitor import ResourceMonitor
-
-            try:
-                ResourceMonitor().apply_process_priority(
-                    int(config.get("whisper", "performance", "worker_nice", default=3))
-                )
-            except (OSError, AttributeError, TypeError, ValueError):
-                pass
-
-            def _assert_not_cancelled_sync() -> None:
+    segments: list[dict] = []
+    process = None
+    try:
+        async with _retranscribe_sem:
+            while rec_mod._active_session_id is not None:
                 if cancel_event.is_set():
-                    raise RetranscribeCancelledError("ユーザーにより停止されました")
+                    raise asyncio.CancelledError
+                set_stage(Stage.QUEUED, "録音が終わるまで待機中...")
+                await rec_mod._broadcast_pipeline(session_id)
+                await asyncio.sleep(1)
 
-            import mlx_whisper
-            import numpy as np
-            from src.transcribe.hallucination_filter import HallucinationFilter
-            from src.transcribe.streaming import (
-                _resolve_repo, get_or_load_model, VADChunker, SileroVADChunker,
-                SAMPLE_RATE, build_initial_prompt, PROMPT_RECENT_CHARS,
-                compute_chunk_start_offset,
-            )
-
-            model_name = config.get("whisper", "model", default="medium")
-            repo = _resolve_repo(model_name)
-            # モデル読込中の進捗表示 (worker thread → loop に投げる)
-            def _emit_stage(stage: Stage, message: str | None = None) -> None:
-                try:
-                    _set_retry_stage(stage, message)
-                    asyncio.run_coroutine_threadsafe(
-                        rec_mod._broadcast_pipeline(session_id), loop,
-                    )
-                except Exception:
-                    pass
-            _assert_not_cancelled_sync()
-            _emit_stage(Stage.WHISPER_LOAD, f"Whisper モデル読込中 ({model_name})")
-            get_or_load_model(model_name)
-            _assert_not_cancelled_sync()
-            _emit_stage(Stage.AUDIO_ANALYZE, "音声を発話単位に分割中...")
-
-            audio = _load_wav_16k_mono_f32(wav_path)
-            _assert_not_cancelled_sync()
-            language = config.get("whisper", "language", default="ja")
-
-            # プロジェクトの用語集 + corrections の正式表記を initial_prompt として使う
-            project = project_manager.get(project_id)
-            glossary = list(project.glossary) if project else []
-            corrections_pairs: list[tuple[str, str]] = []
-            if project and project.corrections:
-                for _c in project.corrections:
-                    if _c.correct and _c.correct not in glossary:
-                        glossary.append(_c.correct)
-                    if _c.wrong and _c.correct and _c.wrong != _c.correct:
-                        corrections_pairs.append((_c.wrong, _c.correct))
-            # 長いキーから順に置換 (短いキーが部分一致して長いキーを破壊しないように)
-            corrections_pairs.sort(key=lambda x: len(x[0]), reverse=True)
-
-            hall_filter = HallucinationFilter.from_config(
-                config.get("whisper", "hallucination_filter", default={}) or {}
-            )
-
-            # streaming と同じ VAD で発話単位に分割 → 各チャンクを個別 transcribe
-            streaming_cfg = config.get("whisper", "streaming", default={}) or {}
-            vad_provider = str(streaming_cfg.get("vad_provider", "silero")).lower()
-            silence_ms = int(streaming_cfg.get("silence_duration_ms", 500))
-            min_ms = int(streaming_cfg.get("min_chunk_ms", 1000))
-            max_ms = int(streaming_cfg.get("max_chunk_ms", 12000))
-            chunker: object
-            if vad_provider == "silero":
-                try:
-                    chunker = SileroVADChunker(
-                        threshold=float(streaming_cfg.get("silero_threshold", 0.5)),
-                        silence_duration_ms=silence_ms,
-                        min_chunk_ms=min_ms,
-                        max_chunk_ms=max_ms,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[retry] Silero VAD init failed (%s), falling back to energy", e,
-                    )
-                    chunker = VADChunker(
-                        rms_threshold=float(streaming_cfg.get("rms_threshold", 0.005)),
-                        silence_duration_ms=silence_ms,
-                        min_chunk_ms=min_ms,
-                        max_chunk_ms=max_ms,
-                    )
-            else:
-                chunker = VADChunker(
-                    rms_threshold=float(streaming_cfg.get("rms_threshold", 0.005)),
-                    silence_duration_ms=silence_ms,
-                    min_chunk_ms=min_ms,
-                    max_chunk_ms=max_ms,
-                )
-            BLOCK = SAMPLE_RATE // 10  # 100ms
-
-            jobs: list[tuple] = []  # (chunk_audio, start_offset_sec)
-            elapsed = 0.0
-
-            def _append_job(chunk_audio: object) -> None:
-                start = compute_chunk_start_offset(
-                    total_audio_sec=elapsed,
-                    chunk_samples=len(chunk_audio),
-                    chunker=chunker,
-                    sample_rate=SAMPLE_RATE,
-                )
-                jobs.append((chunk_audio, start))
-
-            for i in range(0, len(audio), BLOCK):
-                _assert_not_cancelled_sync()
-                block = audio[i:i + BLOCK]
-                if len(block) == 0:
-                    break
-                elapsed += len(block) / SAMPLE_RATE
-                ch = chunker.feed(block)
-                while ch is not None:
-                    _append_job(ch)
-                    # SileroVADChunker は 1 feed で複数 chunk を内部キューできるため、
-                    # 空 feed で pending を取り切る。
-                    ch = chunker.feed(np.zeros(0, dtype=np.float32))
-            while True:
-                final = chunker.flush()
-                if final is None:
-                    break
-                _append_job(final)
-
-            segments: list[dict] = []
-            filtered_count = 0
-            recent_tail = ""
-            total_jobs = max(1, len(jobs))
-            last_progress_emit = 0.0
-            # 文字起こしフェーズへ移行
-            _emit_stage(Stage.TRANSCRIBE)
-
-            def _emit_progress(done_idx: int, message: str | None = None) -> None:
-                """worker スレッドから loop に WS broadcast をスケジュール (throttled)。"""
-                nonlocal last_progress_emit
-                progress = min(1.0, done_idx / total_jobs)
-                rec_mod._pipelines[session_id]["progress"] = round(progress, 3)
-                if message is not None:
-                    rec_mod._pipelines[session_id]["message"] = message
-                else:
-                    pct = int(progress * 100)
-                    rec_mod._pipelines[session_id]["message"] = (
-                        f"再文字起こし中... {done_idx}/{total_jobs} ({pct}%)"
-                    )
-                try:
-                    import time as _t
-                    now_t = _t.monotonic()
-                    if now_t - last_progress_emit < 0.4 and done_idx < total_jobs:
-                        return
-                    last_progress_emit = now_t
-                    asyncio.run_coroutine_threadsafe(
-                        rec_mod._broadcast_pipeline(session_id), loop,
-                    )
-                except Exception as e:
-                    logger.debug("progress emit failed: %s", e)
-
-            _emit_progress(0, message=f"再文字起こし中... 0/{total_jobs} (0%)")
-            for idx, (chunk_audio, start_offset) in enumerate(jobs):
-                _assert_not_cancelled_sync()
-                initial_prompt = build_initial_prompt(glossary, recent_tail)
-                kwargs: dict = {
-                    "path_or_hf_repo": repo,
-                    "language": language,
-                    # word-level タイムスタンプを有効化 (話者ターン境界での再分割に使う)
-                    "word_timestamps": True,
-                    "verbose": False,
-                    # チャンク内の複数 segment をデコードする際、前の segment 出力を
-                    # 文脈として活用 (表記揺れを抑える)。
-                    "condition_on_previous_text": True,
-                    # 単一温度 (フォールバック無効化で高速化)。streaming と同じ挙動。
-                    # ハルシネーションは別途 HallucinationFilter で除去。
-                    "temperature": 0.0,
-                    "compression_ratio_threshold": 2.4,
-                    "logprob_threshold": -1.0,
-                    "no_speech_threshold": 0.6,
-                    # 無音区間でのハルシネーション抑制
-                    "hallucination_silence_threshold": 2.0,
-                }
-                if initial_prompt:
-                    kwargs["initial_prompt"] = initial_prompt
-                try:
-                    result = mlx_whisper.transcribe(
-                        chunk_audio.astype("float32"),
-                        **kwargs,
-                    )
-                except Exception as e:
-                    logger.warning("retry chunk %d failed: %s", idx, e)
-                    continue
-                chunk_texts: list[str] = []
-                for seg in result.get("segments", []):
-                    text = (seg.get("text") or "").strip()
-                    if not text:
-                        continue
-                    if hall_filter.is_hallucination(text):
-                        filtered_count += 1
-                        logger.info("[retry] Filtered hallucination: %s", text[:80])
-                        continue
-                    # corrections (wrong→correct) を適用
-                    if corrections_pairs:
-                        for wrong, correct in corrections_pairs:
-                            if wrong in text:
-                                text = text.replace(wrong, correct)
-                    # words: グローバルタイムスタンプに変換して保持
-                    words_raw = seg.get("words") or []
-                    words: list[dict] = []
-                    for w in words_raw:
-                        wt = (w.get("word") or "").strip()
-                        if not wt:
-                            continue
-                        try:
-                            ws = float(w.get("start", 0))
-                            we = float(w.get("end", 0))
-                        except Exception:
-                            continue
-                        words.append({
-                            "start": round(start_offset + ws, 3),
-                            "end": round(start_offset + we, 3),
-                            "word": wt,
-                        })
-                    segments.append({
-                        "start": round(start_offset + float(seg.get("start", 0)), 2),
-                        "end": round(start_offset + float(seg.get("end", 0)), 2),
-                        "text": text,
-                        "words": words,
-                    })
-                    chunk_texts.append(text)
-                if chunk_texts:
-                    merged = (recent_tail + " " + " ".join(chunk_texts)).strip()
-                    recent_tail = merged[-PROMPT_RECENT_CHARS:]
-                _emit_progress(idx + 1)
-            _assert_not_cancelled_sync()
-            if filtered_count:
-                logger.info(
-                    "[retry] Hallucination filter dropped %d segments", filtered_count,
-                )
-            return segments
-
-        import time as _time
-        async def _publish_cancelled(message: str = "再文字起こしを停止しました") -> None:
-            _set_retry_stage(Stage.CANCELLED, message)
-            rec_mod._pipelines[session_id].update({
-                "state": "done",
-                "message": message,
-                "error": None,
-                "progress": 0.0,
-            })
-            rec_mod._evict_completed_pipelines()
-            await ws_manager.broadcast({
-                "type": "pipeline_done",
-                "data": {
-                    "session_id": session_id,
-                    "minutes_id": minutes_id,
-                    "retranscribe": True,
-                    "cancelled": True,
-                },
-            })
-            await rec_mod._broadcast_pipeline(session_id)
-
-        try:
-            _assert_not_cancelled()
-            t0 = _time.perf_counter()
-            try:
-                segments = await loop.run_in_executor(None, do_transcribe)
-            finally:
-                if whisper_lease:
-                    try:
-                        from src.transcribe.streaming import unload_model
-
-                        unload_model()
-                    finally:
-                        model_resource_gate.release_whisper()
-                    whisper_lease = False
-            t1 = _time.perf_counter()
-            _assert_not_cancelled()
-            logger.info(
-                "[retry] transcribe done in %.1fs (%d segments)",
-                t1 - t0, len(segments),
-            )
-
-            _set_retry_stage(Stage.DIARIZE_EXTRACT)
+            if cancel_event.is_set():
+                raise asyncio.CancelledError
+            set_stage(Stage.APPLE_SPEECH, "音声を Apple Speech 用に準備中...")
             rec_mod._pipelines[session_id]["progress"] = 0.0
             await rec_mod._broadcast_pipeline(session_id)
 
-            _last_diarize_emit = 0.0
+            with tempfile.TemporaryDirectory(prefix="seam-apple-speech-") as temp_dir:
+                normalized = Path(temp_dir) / "audio.wav"
+                await asyncio.to_thread(_normalize_audio_for_speech, audio_path, normalized)
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
 
-            def _on_diarize_progress(stage_key: str, prog: float, message: str | None) -> None:
-                nonlocal _last_diarize_emit
-                stage_enum = {
-                    "extract": Stage.DIARIZE_EXTRACT,
-                    "cluster": Stage.DIARIZE_CLUSTER,
-                    "assign": Stage.DIARIZE_CLUSTER,
-                }.get(stage_key, Stage.DIARIZE_EXTRACT)
-                _set_retry_stage(stage_enum, message)
-                rec_mod._pipelines[session_id]["progress"] = round(prog, 3)
-                now_t = _time.monotonic()
-                if prog < 1.0 and (now_t - _last_diarize_emit) < 0.2:
-                    return
-                _last_diarize_emit = now_t
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        rec_mod._broadcast_pipeline(session_id), loop,
-                    )
-                except Exception:
-                    pass
-
-            _assert_not_cancelled()
-            t2 = _time.perf_counter()
-            diarization_lease = False
-            if config.get(
-                "whisper", "speaker_memory", "diarization_provider", default="legacy"
-            ) == "pyannote":
-                await model_resource_gate.acquire_llm_async()
-                diarization_lease = True
-            try:
-                segments = await loop.run_in_executor(
-                    None,
-                    lambda: speaker_memory.rediarize_segments(
-                        segments,
-                        wav_path=wav_path,
-                        session_id=session_id,
-                        on_progress=_on_diarize_progress,
-                    ),
+                emit_speech_event = rec_mod._make_emit_speech_event(
+                    session_id, persist=False, broadcast_errors=False,
                 )
-            finally:
-                if diarization_lease:
-                    model_resource_gate.release_llm()
-            t3 = _time.perf_counter()
-            _assert_not_cancelled()
-            logger.info(
-                "[retry] diarization done in %.1fs (%d segments after split)",
-                t3 - t2, len(segments),
-            )
 
-            _set_retry_stage(Stage.SAVING)
+                async def on_event(event: dict) -> None:
+                    if event.get("type") == "transcript_chunk":
+                        data = event.get("data") or {}
+                        text = str(data.get("text") or "").strip()
+                        if text:
+                            segments.append({
+                                "start": float(data.get("start") or 0),
+                                "end": float(data.get("end") or 0),
+                                "text": text,
+                                "session_id": session_id,
+                            })
+                    await emit_speech_event(event)
+
+                language = str(config.get("speech", "language", default="ja") or "ja")
+                process = await start_file_transcription(
+                    normalized,
+                    language,
+                    on_event,
+                    session_id=session_id,
+                )
+                _retranscribe_processes[session_id] = process
+                try:
+                    await process.wait_file()
+                except RuntimeError:
+                    if cancel_event.is_set():
+                        raise asyncio.CancelledError
+                    raise
+                _retranscribe_processes.pop(session_id, None)
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
+
+            set_stage(Stage.SAVING, "文字起こしを保存中...")
+            rec_mod._pipelines[session_id]["progress"] = 0.95
             await rec_mod._broadcast_pipeline(session_id)
-            try:
-                db.update_transcript(minutes_id, segments)
-            except Exception as e:
-                logger.error("update_transcript failed: %s", e)
+            if not db.update_transcript(minutes_id, segments, clear_summary=clear_summary):
+                raise RuntimeError("議事録が削除されたため、文字起こし結果を保存できませんでした")
+            transcript_path = audio_path.parent / rec_mod.TRANSCRIPT_JSONL_FILENAME
+            transcript_path.write_text(
+                "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in segments),
+                encoding="utf-8",
+            )
+            rec_mod._write_session_meta(session_id, state="retry_saved", retry_minutes_id=minutes_id)
 
-            transcript_payload = rec_mod.build_pipeline_transcript_payload(segments)
-            _set_retry_stage(Stage.DONE, "再文字起こし完了")
-            rec_mod._pipelines[session_id].update({
-                "state": "done",
-                "progress": 1.0,
-                "transcript": transcript_payload,
-            })
+            payload = rec_mod.build_pipeline_transcript_payload(segments)
+            set_stage(Stage.DONE, "Apple Speech の文字起こしが完了しました")
+            rec_mod._pipelines[session_id].update({"state": "done", "progress": 1.0, "transcript": payload})
             rec_mod._evict_completed_pipelines()
             await ws_manager.broadcast({
                 "type": "pipeline_done",
-                "data": {
-                    "session_id": session_id,
-                    "minutes_id": minutes_id,
-                    "retranscribe": True,
-                    "count": len(segments),
-                },
+                "data": {"session_id": session_id, "minutes_id": minutes_id, "retranscribe": True,
+                         "count": len(segments)},
             })
             await rec_mod._broadcast_pipeline(session_id)
-            if enqueue_summary_on_complete:
-                try:
-                    if _enqueue_summary_if_empty(minutes_id):
-                        logger.info("[import] auto-summary enqueued: %s", minutes_id)
-                except Exception as e:
-                    logger.warning("[import] failed to enqueue auto-summary for %s: %s", minutes_id, e)
-            logger.info("Retranscribe done: %s (%d segments)", session_id, len(segments))
 
-        except RetranscribeCancelledError:
-            await _publish_cancelled()
-            logger.info("Retranscribe cancelled: %s", session_id)
-        except asyncio.CancelledError:
-            await _publish_cancelled()
-            logger.info("Retranscribe task cancelled: %s", session_id)
-        except Exception as e:
-            logger.error("Retranscribe failed: %s", e)
-            rec_mod._pipelines[session_id].update({
-                "state": "error",
-                "message": str(e),
-                "error": str(e),
-            })
-            rec_mod._evict_completed_pipelines()
-            await ws_manager.broadcast({
-                "type": "pipeline_error",
-                "data": {"session_id": session_id, "message": str(e)},
-            })
-            await rec_mod._broadcast_pipeline(session_id)
-        finally:
-            if whisper_lease:
-                try:
-                    from src.transcribe.streaming import unload_model
-
-                    unload_model()
-                finally:
-                    model_resource_gate.release_whisper()
-            _retranscribe_tasks.pop(session_id, None)
-            _retranscribe_cancel_events.pop(session_id, None)
+            summary_ready = True
+            if enqueue_summary_on_complete and bool(config.get("minutes_ai", "auto_generate", default=True)):
+                current = db.get_minutes(minutes_id)
+                if current is None:
+                    summary_ready = False
+                elif not str(current.get("summary") or "").strip():
+                    summary_ready = _enqueue_summary_if_empty(minutes_id)
+            if summary_ready:
+                rec_mod._delete_session_meta(session_id)
+    except asyncio.CancelledError:
+        if process is not None and process.process.returncode is None:
+            await process.cancel()
+        rec_mod._pipelines[session_id].update({
+            "state": "done", "stage": Stage.CANCELLED.value,
+            "stage_label": STAGE_LABELS[Stage.CANCELLED], "message": "再文字起こしを停止しました",
+        })
+        rec_mod._delete_session_meta(session_id)
+        await ws_manager.broadcast({
+            "type": "pipeline_done",
+            "data": {"session_id": session_id, "minutes_id": minutes_id,
+                     "retranscribe": True, "cancelled": True},
+        })
+        await rec_mod._broadcast_pipeline(session_id)
+    except Exception as e:
+        _retranscribe_processes.pop(session_id, None)
+        logger.exception("Apple Speech retranscription failed [%s]", session_id)
+        rec_mod._pipelines[session_id].update({"state": "error", "message": str(e), "error": str(e)})
+        await ws_manager.broadcast({"type": "pipeline_error", "data": {"session_id": session_id, "message": str(e)}})
+        await rec_mod._broadcast_pipeline(session_id)
+    finally:
+        _retranscribe_processes.pop(session_id, None)
+        _retranscribe_cancel_events.pop(session_id, None)

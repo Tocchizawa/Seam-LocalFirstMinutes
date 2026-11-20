@@ -57,9 +57,10 @@ class ResourceMonitorTest(unittest.TestCase):
 
 
 class ModelResourceGateTest(unittest.TestCase):
-    def test_llm_waits_until_whisper_is_released(self) -> None:
+    def test_llm_access_is_exclusive(self) -> None:
         gate = ModelResourceGate()
-        self.assertTrue(gate.try_acquire_whisper())
+        self.assertTrue(gate.try_acquire_llm())
+        self.assertFalse(gate.try_acquire_llm())
 
         async def scenario() -> None:
             acquired = asyncio.Event()
@@ -72,10 +73,9 @@ class ModelResourceGateTest(unittest.TestCase):
             await asyncio.sleep(0.02)
             self.assertFalse(acquired.is_set())
 
-            gate.release_whisper()
+            gate.release_llm()
             await asyncio.wait_for(acquired.wait(), timeout=1.0)
             self.assertTrue(gate.snapshot()["llm_active"])
-            self.assertFalse(gate.try_acquire_whisper())
             gate.release_llm()
             await asyncio.wait_for(waiter, timeout=1.0)
 

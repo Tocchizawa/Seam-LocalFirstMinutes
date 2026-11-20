@@ -25,19 +25,10 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# ============================================================
-# Node.js (gui/)
-# ============================================================
+# JavaScript package-manager artifacts
 node_modules/
 *.tsbuildinfo
 .eslintcache
-
-# ============================================================
-# Rust / Tauri (gui/src-tauri/)
-# ============================================================
-target/
-# Tauri auto-generated schema (already in src-tauri/.gitignore)
-gen/schemas/
 
 # ============================================================
 # Swift (sidecar/)

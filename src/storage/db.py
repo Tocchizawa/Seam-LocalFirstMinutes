@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 
@@ -25,7 +26,6 @@ CREATE TABLE IF NOT EXISTS minutes (
     transcript_text TEXT NOT NULL DEFAULT '',
     summary         TEXT NOT NULL,
     context_snapshot TEXT,
-    whisper_model   TEXT,
     llm_model       TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -112,14 +112,30 @@ class Database:
         conn.execute(f"INSERT INTO minutes ({cols}) VALUES ({placeholders})", data)
         conn.commit()
 
-    def get_minutes(self, minutes_id: str) -> dict | None:
+    def get_minutes(self, minutes_id: str, *, include_transcript: bool = True) -> dict | None:
         conn = self._get_conn()
+        columns = "*" if include_transcript else (
+            "id, session_id, project_id, title, date, started_at, duration_sec, summary, "
+            "created_at, updated_at"
+        )
         row = conn.execute(
-            "SELECT * FROM minutes WHERE id = ?", (minutes_id,)
+            f"SELECT {columns} FROM minutes WHERE id = ?", (minutes_id,)
         ).fetchone()
         if row is None:
             return None
         return self._row_to_dict(row)
+
+    def get_transcript(self, minutes_id: str) -> list[dict] | None:
+        row = self._get_conn().execute(
+            "SELECT transcript FROM minutes WHERE id = ?", (minutes_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            transcript = json.loads(row["transcript"])
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return transcript if isinstance(transcript, list) else []
 
     def has_minutes_for_session(self, session_id: str) -> bool:
         conn = self._get_conn()
@@ -144,7 +160,7 @@ class Database:
     _LIST_COLUMNS: tuple[str, ...] = (
         "id", "session_id", "project_id", "title", "date", "started_at",
         "duration_sec", "summary", "created_at", "updated_at",
-        "whisper_model", "llm_model",
+        "llm_model",
     )
 
     @classmethod
@@ -189,14 +205,35 @@ class Database:
             out.append(d)
         return out
 
-    def update_transcript(self, minutes_id: str, transcript: list[dict]) -> bool:
+    def count_minutes(self, project_id: str) -> int:
+        row = self._get_conn().execute(
+            "SELECT COUNT(*) FROM minutes WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return row[0]
+
+    def update_transcript(
+        self,
+        minutes_id: str,
+        transcript: list[dict],
+        *,
+        clear_summary: bool = False,
+    ) -> bool:
         conn = self._get_conn()
         transcript_text = build_transcript_text(transcript)
         transcript_json = json.dumps(transcript, ensure_ascii=False)
-        result = conn.execute(
-            "UPDATE minutes SET transcript = ?, transcript_text = ?, updated_at = datetime('now') WHERE id = ?",
-            (transcript_json, transcript_text, minutes_id),
-        )
+        if clear_summary:
+            result = conn.execute(
+                "UPDATE minutes SET transcript = ?, transcript_text = ?, summary = '', "
+                "llm_model = '', updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, minutes_id),
+            )
+        else:
+            result = conn.execute(
+                "UPDATE minutes SET transcript = ?, transcript_text = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (transcript_json, transcript_text, minutes_id),
+            )
         conn.commit()
         return result.rowcount > 0
 
@@ -234,53 +271,6 @@ class Database:
         conn.commit()
         return result.rowcount > 0
 
-    def reassign_speaker_id(
-        self,
-        source_id: str,
-        target_id: str | None,
-        target_label: str | None = None,
-    ) -> int:
-        """全議事録の transcript で speaker_id=source_id を target_id (or None) に書き換える。
-
-        target_id=None の場合は speaker_id/label/confidence を null にする (= "話者?")。
-        target_label を指定すると label も上書き。
-        戻り値は更新されたセグメント数。
-        """
-        conn = self._get_conn()
-        rows = conn.execute("SELECT id, transcript FROM minutes").fetchall()
-        updated_segs = 0
-        for row in rows:
-            try:
-                transcript = json.loads(row["transcript"])
-            except Exception:
-                continue
-            if not isinstance(transcript, list):
-                continue
-            changed = False
-            for seg in transcript:
-                if not isinstance(seg, dict):
-                    continue
-                if str(seg.get("speaker_id") or "") != source_id:
-                    continue
-                if target_id is None:
-                    seg["speaker_id"] = None
-                    seg["speaker_label"] = None
-                    seg["speaker_confidence"] = None
-                else:
-                    seg["speaker_id"] = target_id
-                    if target_label is not None:
-                        seg["speaker_label"] = target_label
-                changed = True
-                updated_segs += 1
-            if changed:
-                new_text = build_transcript_text(transcript)
-                conn.execute(
-                    "UPDATE minutes SET transcript = ?, transcript_text = ?, updated_at = datetime('now') WHERE id = ?",
-                    (json.dumps(transcript, ensure_ascii=False), new_text, row["id"]),
-                )
-        conn.commit()
-        return updated_segs
-
     def delete_minutes(self, minutes_id: str) -> bool:
         conn = self._get_conn()
         result = conn.execute("DELETE FROM minutes WHERE id = ?", (minutes_id,))
@@ -292,6 +282,10 @@ class Database:
         safe = self._sanitize_fts_query(query)
         if not safe:
             return []
+        phrase = safe[1:-1]
+        if len(phrase) < 3:
+            # FTS5's trigram index cannot match a phrase shorter than three characters.
+            return self._search_short_phrase(phrase, project_id, limit)
 
         conn = self._get_conn()
         # ハイライト用に  /  をマーカーとして埋め込み、
@@ -321,6 +315,45 @@ class Database:
             ).fetchall()
         return [self._row_to_dict_with_highlights(r) for r in rows]
 
+    def _search_short_phrase(self, phrase: str, project_id: str | None, limit: int) -> list[dict]:
+        cols = self._list_columns_sql("m")
+        scope = "AND m.project_id = ?" if project_id else ""
+        args: list[str | int] = [phrase, phrase, phrase]
+        if project_id:
+            args.append(project_id)
+        args.append(limit)
+        rows = self._get_conn().execute(
+            f"""SELECT {cols}, m.summary AS full_summary, m.transcript_text
+                FROM minutes m
+                WHERE (instr(lower(m.title), lower(?)) > 0
+                    OR instr(lower(m.summary), lower(?)) > 0
+                    OR instr(lower(m.transcript_text), lower(?)) > 0)
+                {scope}
+                ORDER BY m.date DESC, m.started_at DESC, m.rowid DESC
+                LIMIT ?""",
+            args,
+        ).fetchall()
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        results: list[dict] = []
+        for row in rows:
+            data = dict(row)
+            data["hl_title"] = self._short_highlight(data["title"], pattern)
+            data["hl_summary"] = self._short_highlight(data.pop("full_summary"), pattern)
+            data["hl_transcript"] = self._short_highlight(data.pop("transcript_text"), pattern)
+            results.append(self._row_to_dict_with_highlights(data))
+        return results
+
+    @staticmethod
+    def _short_highlight(text: str, pattern: re.Pattern[str]) -> str | None:
+        match = pattern.search(text)
+        if match is None:
+            return None
+        start = max(0, match.start() - 18)
+        end = min(len(text), match.end() + 40)
+        prefix = "…" if start else ""
+        suffix = "…" if end < len(text) else ""
+        return f"{prefix}{text[start:match.start()]}\x01{match[0]}\x02{text[match.end():end]}{suffix}"
+
     @staticmethod
     def _sanitize_fts_query(q: str) -> str:
         # FTS5 の構文文字を排除して安全な phrase クエリにする。
@@ -331,6 +364,8 @@ class Database:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)
+        # Older databases may still have this column; keep its contents in SQLite but do not expose it.
+        d.pop("whisper_model", None)
         if "transcript" in d and isinstance(d["transcript"], str):
             try:
                 d["transcript"] = json.loads(d["transcript"])
@@ -338,7 +373,7 @@ class Database:
                 pass
         return d
 
-    def _row_to_dict_with_highlights(self, row: sqlite3.Row) -> dict:
+    def _row_to_dict_with_highlights(self, row: sqlite3.Row | dict) -> dict:
         d = dict(row)
         hl = {
             "title": d.pop("hl_title", None),

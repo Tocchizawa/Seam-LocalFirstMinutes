@@ -14,7 +14,6 @@ SYSTEM_PROMPT = """あなたは日本語の会議議事録作成アシスタン�
 - 思考過程・前置き・「以下に作成します」等の説明文は一切出力しない
 - 出力は ## から始まる Markdown 見出しのみで構成する
 - 文字起こしに無い情報を捏造しない
-- 文字起こし内の話者ラベル (例: 田中, 話者2) はそのまま使用する
 - 専門用語は glossary に従って表記を統一する
 - 各項目には背景・根拠・経緯を 1文添える(なぜそうなったか、何が論点か)
 - 会議内容を漏れなく拾うこと。長さの上限は設けない
@@ -295,7 +294,7 @@ def build_messages(
 # ─── Token見積り ────────────────────────────────────────────
 
 # 日本語混在テキストの粗い目安。
-# Whisper transcript は密度が高めなので 1 char ≒ 0.7-0.8 token。
+# 日本語 transcript は密度が高めなので 1 char ≒ 0.7-0.8 token。
 # 安全側 (= 大きめ) に評価するため小さい除数を採用。
 _CHARS_PER_TOKEN_JP = 1.3
 
@@ -356,11 +355,10 @@ def validate_context_budget(
 # ─── 文字起こしを provider 入力用に整形 ────────────────────
 
 def format_transcript_segments(segments: list[dict]) -> str:
-    """transcript (DB保存形式の list[dict]) を ``[mm:ss] (話者) text`` 形式に整形する。
+    """transcript (DB保存形式の list[dict]) を ``[mm:ss] text`` 形式に整形する。
 
     Args:
-        segments: [{"start": float, "end": float, "text": str,
-                   "speaker_label": str | None}, ...]
+        segments: [{"start": float, "end": float, "text": str}, ...]
     """
     lines: list[str] = []
     for seg in segments:
@@ -371,11 +369,7 @@ def format_transcript_segments(segments: list[dict]) -> str:
         mm = int(start // 60)
         ss = int(start % 60)
         timestamp = f"[{mm:02d}:{ss:02d}]"
-        label = str(seg.get("speaker_label") or "").strip()
-        if label:
-            lines.append(f"{timestamp} ({label}) {text}")
-        else:
-            lines.append(f"{timestamp} {text}")
+        lines.append(f"{timestamp} {text}")
     return "\n".join(lines)
 
 

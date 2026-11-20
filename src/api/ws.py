@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -12,6 +13,7 @@ from src.security import (
 )
 
 logger = logging.getLogger(__name__)
+WS_SEND_TIMEOUT_SEC = 2.0
 
 router = APIRouter()
 
@@ -80,7 +82,7 @@ class ConnectionManager:
         sent = 0
         for ws in self.connections[:]:
             try:
-                await ws.send_json(safe_message)
+                await asyncio.wait_for(ws.send_json(safe_message), timeout=WS_SEND_TIMEOUT_SEC)
                 sent += 1
             except WebSocketDisconnect:
                 # 正常な切断: connections から削除
@@ -88,6 +90,13 @@ class ConnectionManager:
                     self.connections.remove(ws)
                 logger.info("WS disconnected during send (type=%s, total=%d)",
                             msg_type, len(self.connections))
+            except asyncio.TimeoutError:
+                self.disconnect(ws)
+                try:
+                    await ws.close(code=1013, reason="client is not keeping up")
+                except Exception:
+                    pass
+                logger.warning("WS client dropped after send timeout (type=%s)", msg_type)
             except Exception as e:
                 # 送信エラー(JSON 化失敗など)は接続を削除しない — 単に1メッセージスキップ
                 logger.warning("WS send error (id=%s, type=%s): %s",

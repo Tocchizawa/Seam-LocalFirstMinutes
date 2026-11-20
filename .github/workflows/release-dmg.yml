@@ -11,29 +11,11 @@ permissions:
 
 jobs:
   build-dmg:
-    name: Build DMG (macOS)
-    runs-on: macos-14
-    defaults:
-      run:
-        working-directory: gui
+    name: Build Native DMG
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "pnpm"
-          cache-dependency-path: gui/pnpm-lock.yaml
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
         run: |
@@ -50,7 +32,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           missing=0
           for key in \
@@ -61,7 +44,8 @@ jobs:
             APPLE_ID \
             APPLE_APP_PASSWORD \
             APPLE_TEAM_ID \
-            TAURI_SIGNING_PRIVATE_KEY; do
+            SPARKLE_PUBLIC_KEY \
+            SPARKLE_PRIVATE_KEY; do
             if [ -z "${!key}" ]; then
               echo "::error::Missing required release signing secret: ${key}"
               missing=1
@@ -78,7 +62,6 @@ jobs:
         run: |
           CERTIFICATE_PATH="$RUNNER_TEMP/release-certificate.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/release-signing.keychain-db"
-
           echo "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
           security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
@@ -87,59 +70,50 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-      - name: Install Dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Bundle Backend Resources
-        run: bash ../scripts/bundle-backend.sh
-
-      - name: Build Tauri App Bundle
-        run: pnpm tauri build --bundles app --ci
-
-      - name: Create DMG
+      - name: Build Native app and DMG
         env:
-          RELEASE_DMG_REQUIRE_NOTARIZATION: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: bash scripts/build-native.sh
+
+      - name: Notarize app and DMG
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          cd ..
-          bash scripts/create-dmg.sh
+          APP_PATH="macos/.build/distribution/Seam.app"
+          DMG_PATH="$(find macos/.build/distribution -maxdepth 1 -name '*.dmg' -print -quit)"
+          ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/Seam.app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Seam.app.zip" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$APP_PATH"
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$APP_PATH"
+          xcrun stapler validate "$DMG_PATH"
 
-      - name: Generate updater artifact
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Sign updater feed
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
         env:
-          RELEASE_UPDATER_REQUIRE_NOTARIZATION: "1"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          cd ..
-          bash scripts/create-updater-artifact.sh
-
-      - name: Generate updater feed
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          cd ..
-          VERSION="${GITHUB_REF_NAME#v}"
-          bash scripts/create-updater-feed.sh "$VERSION" "$GITHUB_REF_NAME"
+          test "$GITHUB_REF_NAME" = "v$(tr -d '\n' < macos/VERSION)"
+          SPARKLE_TOOLS="macos/.build/artifacts/macos/Sparkle/bin"
+          printf '%s\n' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_TOOLS/generate_appcast" \
+            --ed-key-file - --maximum-deltas 0 \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+            macos/.build/distribution
+          grep -q 'sparkle:edSignature=' macos/.build/distribution/appcast.xml
+          grep -q 'sparkle-signatures:' macos/.build/distribution/appcast.xml
 
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4
         with:
           name: seam-dmg
-          path: gui/src-tauri/target/release/bundle/dmg/*.dmg
-          if-no-files-found: error
-
-      - name: Upload Updater Artifacts
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
-        with:
-          name: seam-updater
-          path: |
-            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz
-            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-            gui/src-tauri/target/release/bundle/updater/latest.json
+          path: macos/.build/distribution/*.dmg
           if-no-files-found: error
 
       - name: Publish GitHub Release Asset
@@ -147,25 +121,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            gui/src-tauri/target/release/bundle/dmg/*.dmg
-            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz
-            gui/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-            gui/src-tauri/target/release/bundle/updater/latest.json
+            macos/.build/distribution/*.dmg
+            macos/.build/distribution/appcast.xml
           prerelease: ${{ contains(github.ref_name, '-') }}
-
-      - name: Publish updater feed
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd ..
-          FEED_TAG="updater-feed"
-          if ! gh release view "$FEED_TAG" >/dev/null 2>&1; then
-            gh release create "$FEED_TAG" \
-              --title "Seam updater feed" \
-              --notes "Static Tauri updater feed for Seam." \
-              --latest=false
-          fi
-          gh release upload "$FEED_TAG" \
-            gui/src-tauri/target/release/bundle/updater/latest.json \
-            --clobber

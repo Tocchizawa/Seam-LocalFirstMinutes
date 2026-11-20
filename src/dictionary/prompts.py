@@ -72,7 +72,7 @@ DICTIONARY_UPDATE_SYSTEM_PROMPT = """あなたは会議議事録の辞書整理�
 
 # あなたが行うこと
 1. 文字起こし中に登場した固有名詞・専門用語のうち、まだ登録されていないものを `new_glossary` に追加
-2. 文字起こしに含まれる Whisper の誤転写 (固有名詞・専門用語が音韻の近い別表記になっているもの) を `new_corrections` に追加
+2. 文字起こしに含まれる音声認識の誤転写 (固有名詞・専門用語が音韻の近い別表記になっているもの) を `new_corrections` に追加
 
 # 出力形式 (JSON のみ。前置きや説明を一切付けない)
 {
@@ -106,7 +106,7 @@ def build_dictionary_update_user_prompt_inline(
     existing_glossary: list[str],
     existing_corrections: list[dict],
 ) -> str:
-    """API provider 用 (Ollama / Claude API / OpenAI)。docs を inline で渡す。"""
+    """用語辞書の自動更新に、参照資料の抜粋を渡す。"""
     parts: list[str] = []
     if project_name:
         parts.append(f"# プロジェクト: {project_name}")
@@ -128,48 +128,6 @@ def build_dictionary_update_user_prompt_inline(
     parts.append("# 文字起こし\n" + transcript)
     parts.append(
         "上記をもとに辞書整理を行い、`new_glossary` と `new_corrections` を含む JSON で返してください。"
-    )
-    return "\n\n".join(parts)
-
-
-def build_dictionary_update_user_prompt_agentic(
-    transcript: str,
-    *,
-    project_name: str,
-    doc_paths: list[str],
-    existing_glossary: list[str],
-    existing_corrections: list[dict],
-) -> str:
-    """CLI agent 用。docs は inline せず Read で取りに行かせる。"""
-    parts: list[str] = []
-    if project_name:
-        parts.append(f"# プロジェクト: {project_name}")
-    parts.append(
-        "# タスク\n"
-        "下記の文字起こしを読み、ドキュメントディレクトリを **Read / Glob / Grep で自由に探索** して照合し、"
-        "次回以降の Whisper 文字起こし精度を上げるための辞書整理を行ってください。"
-    )
-    parts.append(
-        "# 探索可能なドキュメントディレクトリ\n"
-        + "\n".join(f"- {p}" for p in doc_paths)
-    )
-    if existing_glossary:
-        parts.append(
-            "# 既存 glossary (これら以外で新規発見したもののみ new_glossary に入れる)\n"
-            + "\n".join(f"- {g}" for g in existing_glossary)
-        )
-    if existing_corrections:
-        parts.append(
-            "# 既知の誤転写ペア (これら以外で新規発見したもののみ new_corrections に入れる)\n"
-            + "\n".join(
-                f"- {p.get('wrong', '')} → {p.get('correct', '')}"
-                for p in existing_corrections
-            )
-        )
-    parts.append("# 文字起こし\n" + transcript)
-    parts.append(
-        "ドキュメントを深く読み込んだうえで `new_glossary` と `new_corrections` を含む JSON で返してください。"
-        "時間制限は気にせず、必要なら 5-10 分かけて構いません。"
     )
     return "\n\n".join(parts)
 

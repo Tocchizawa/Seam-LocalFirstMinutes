@@ -59,22 +59,22 @@ echo "[2] Settings"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/settings")
 assert_status "GET /api/settings" 200 "$STATUS"
 BODY=$(curl -s "$BASE/api/settings")
-assert_contains "default whisper model" "$BODY" '"model": "medium"'
+assert_contains "default Apple Speech language" "$BODY" '"language": "ja"'
 assert_contains "default ollama model" "$BODY" '"context_model": "qwen3:8b"'
 assert_contains "server port" "$BODY" '"port": 18900'
 
 # Update settings
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/api/settings" \
     -H "Content-Type: application/json" \
-    -d '{"whisper": {"model": "small"}}')
+    -d '{"speech": {"language": "en-US"}}')
 assert_status "PUT /api/settings" 200 "$STATUS"
 BODY=$(curl -s "$BASE/api/settings")
-assert_contains "updated whisper model" "$BODY" '"model": "small"'
+assert_contains "updated Apple Speech language" "$BODY" '"language": "en-US"'
 assert_contains "other settings preserved" "$BODY" '"context_model": "qwen3:8b"'
 
 # Restore
 curl -s -X PUT "$BASE/api/settings" -H "Content-Type: application/json" \
-    -d '{"whisper": {"model": "medium"}}' > /dev/null
+    -d '{"speech": {"language": "ja"}}' > /dev/null
 
 # ─── 3. Projects CRUD ───
 echo ""
@@ -195,14 +195,7 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/minutes/nonexistent/t
 assert_status "GET /api/minutes/nonexistent/transcript" 404 "$STATUS"
 
 echo ""
-echo "[15] Minutes — speakers更新 (存在しない)"
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/api/minutes/nonexistent/speakers" \
-    -H "Content-Type: application/json" \
-    -d '{"speaker_0": "テスト"}')
-assert_status "PUT /api/minutes/nonexistent/speakers" 404 "$STATUS"
-
-echo ""
-echo "[16] Minutes — search (空)"
+echo "[15] Minutes — search (空)"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/minutes/search?q=テスト")
 assert_status "GET /api/minutes/search" 200 "$STATUS"
 

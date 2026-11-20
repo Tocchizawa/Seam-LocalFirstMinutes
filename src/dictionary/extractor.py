@@ -1,6 +1,7 @@
 """プロジェクトドキュメントから glossary を LLM で自動抽出する。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -33,11 +34,13 @@ MAX_PER_FILE_CHARS = 6000
 DOC_EXTENSIONS = {".md", ".txt"}
 
 
-def collect_docs(doc_dirs: list[str], repo_path: str | None = None) -> str:
+def collect_docs(
+    doc_dirs: list[str], repo_path: str | None = None, *, max_chars: int = MAX_DOC_CHARS,
+) -> str:
     """doc_dirs と repo_path 直下から markdown/txt を再帰収集して連結する。
 
     優先度: KNOWLEDGE.md / GLOSSARY.md / README.md → その他
-    合計 MAX_DOC_CHARS で打ち切り。
+    合計 max_chars で打ち切り。
     """
     priority_names = ("KNOWLEDGE.md", "GLOSSARY.md", "glossary.md", "README.md")
 
@@ -69,22 +72,22 @@ def collect_docs(doc_dirs: list[str], repo_path: str | None = None) -> str:
     total = 0
     for p in candidates:
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
+            with p.open(encoding="utf-8", errors="replace") as doc:
+                text = doc.read(min(MAX_PER_FILE_CHARS, max_chars - total))
         except Exception as e:
             logger.warning("doc read failed (%s): %s", p, e)
             continue
         if not text.strip():
             continue
-        snippet = text[:MAX_PER_FILE_CHARS]
-        block = f"=== {p.name} ===\n{snippet}\n"
-        if total + len(block) > MAX_DOC_CHARS:
-            remaining = MAX_DOC_CHARS - total
+        block = f"=== {p.name} ===\n{text}\n"
+        if total + len(block) > max_chars:
+            remaining = max_chars - total
             if remaining > 200:
                 parts.append(block[:remaining])
             break
         parts.append(block)
         total += len(block)
-        if total >= MAX_DOC_CHARS:
+        if total >= max_chars:
             break
     return "\n".join(parts)
 
@@ -345,7 +348,6 @@ async def _claude_code_run(
     add_dirs: list[str] | None = None,
     on_activity: Callable[[str], None] | None = None,
 ) -> str:
-    import asyncio
     import os
 
     model = str(cfg.get("model", "sonnet")).strip() or "sonnet"
@@ -403,14 +405,14 @@ async def _claude_code_run(
                 proc.communicate(full.encode("utf-8")), timeout=timeout,
             )
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            await _kill_dictionary_cli(proc)
             raise SummaryError(
                 SummaryErrorCode.TIMEOUT,
                 f"Claude Code が {timeout}秒以内に応答しませんでした",
             )
+        except asyncio.CancelledError:
+            await _kill_dictionary_cli(proc)
+            raise
         if proc.returncode != 0:
             err_text = stderr.decode("utf-8", errors="replace")
             code = classify_cli_error_code(err_text)
@@ -515,7 +517,6 @@ async def _codex_run(
     add_dirs: list[str] | None = None,
     on_activity: Callable[[str], None] | None = None,
 ) -> str:
-    import asyncio
     import os
 
     model = str(cfg.get("model", "")).strip()
@@ -566,23 +567,19 @@ async def _codex_run(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    assert proc.stdin is not None
-    proc.stdin.write(full.encode("utf-8"))
-    await proc.stdin.drain()
-    proc.stdin.close()
     try:
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout,
+            proc.communicate(full.encode("utf-8")), timeout=timeout,
         )
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        await _kill_dictionary_cli(proc)
         raise SummaryError(
             SummaryErrorCode.TIMEOUT,
             f"Codex が {timeout}秒以内に応答しませんでした",
         )
+    except asyncio.CancelledError:
+        await _kill_dictionary_cli(proc)
+        raise
     if proc.returncode != 0:
         err_text = stderr.decode("utf-8", errors="replace")
         code = classify_cli_error_code(err_text)
@@ -594,3 +591,14 @@ async def _codex_run(
     import re
     raw = stdout.decode("utf-8", errors="replace")
     return re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", raw)
+
+
+async def _kill_dictionary_cli(proc: asyncio.subprocess.Process) -> None:
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=3)
+    except TimeoutError:
+        pass

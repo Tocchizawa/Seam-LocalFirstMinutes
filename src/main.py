@@ -187,10 +187,8 @@ from src.api.ws import router as ws_router
 from src.api.devices import router as devices_router
 from src.api.recording import router as recording_router
 from src.api.debug import router as debug_router
-from src.api.speakers import router as speakers_router
 from src.api.summarize import router as summarize_router
 from src.api.dictionary import router as dictionary_router
-from src.api.models import router as models_router
 from src.api.util import router as util_router
 
 app.include_router(projects_router)
@@ -200,24 +198,9 @@ app.include_router(ws_router)
 app.include_router(devices_router)
 app.include_router(recording_router)
 app.include_router(debug_router)
-app.include_router(speakers_router)
 app.include_router(summarize_router)
 app.include_router(dictionary_router)
-app.include_router(models_router)
 app.include_router(util_router)
-
-
-@app.on_event("startup")
-async def _preload_whisper() -> None:
-    """必要時のみ起動時プリロード。既定は遅延ロード。"""
-    if not config.get("whisper", "preload_on_startup", default=False):
-        logger.info("Whisper preload skipped (preload_on_startup=false)")
-        return
-    emit_progress("whisper", "Whisper モデルをロード中", 0.78)
-    from src.transcribe.streaming import preload_model
-    model_name = config.get("whisper", "model", default="medium")
-    preload_model(model_name)
-    emit_progress("whisper", "Whisper モデルのロード完了", 0.84)
 
 
 @app.on_event("startup")
@@ -237,7 +220,7 @@ async def _recover_pending_sessions() -> None:
     """録音停止後の文字起こし / 保存途中で落ちたセッションを救済。
 
     NOTE:
-    セッション復旧は長時間化しうる(長尺音声の再話者分離など)ため、
+    セッション復旧は長時間化しうる(長尺音声の再文字起こしなど)ため、
     起動シーケンスをブロックしないようバックグラウンドで実行する。
     """
     emit_progress("recovery", "未完了の録音セッションを確認中", 0.90)
@@ -324,7 +307,7 @@ async def health() -> dict:
 def main() -> None:
     server_cfg = config.get("server") or {}
     reload_enabled = bool(server_cfg.get("reload", config.get("debug", "enabled", default=False)))
-    # Tauri アプリ起動時は reload を無効化する。
+    # ネイティブアプリから起動する際は reload を無効化する。
     # reload=True だと reloader/worker の二重プロセスになり、startup hook が重複して
     # モデルロードや状態管理が不安定になりやすい。
     if os.environ.get("SEAM_PARENT_PID"):

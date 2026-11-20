@@ -5,17 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "[1/4] Python compile check"
-python3 -m compileall -q src scripts tests
+python3 -m compileall -q src scripts
 
-if [[ "${SKIP_GUI_BUILD:-0}" != "1" ]]; then
-  echo "[2/4] GUI build check"
-  npm --prefix gui run build >/dev/null
+if [[ "${SKIP_NATIVE_BUILD:-0}" != "1" ]]; then
+  echo "[2/4] Native app build check"
+  swift build --package-path macos --product SeamApp
+  swift build --package-path macos --product AppleSpeechTranscriber
 else
-  echo "[2/4] GUI build check (skipped: SKIP_GUI_BUILD=1)"
+  echo "[2/4] Native app build check (skipped: SKIP_NATIVE_BUILD=1)"
 fi
 
 echo "[3/4] Personal path / identifier scan"
-if rg -n --glob '!scripts/oss_preflight.sh' "/Users/|takumitochizawa|com\\.takumitochizawa" docs gui src scripts tests >/dev/null; then
+if rg -n --glob '!scripts/oss_preflight.sh' "/Users/|takumitochizawa|com\\.takumitochizawa" docs macos src scripts tests >/dev/null; then
   echo "Found personal path/identifier. Remove before publish." >&2
   exit 1
 fi

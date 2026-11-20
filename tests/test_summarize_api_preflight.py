@@ -41,8 +41,12 @@ class FakeRunner:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str | None]] = []
 
-    def enqueue(self, minutes_id: str, *, provider_name: str | None = None) -> None:
+    def is_phase_b_busy(self, _minutes_id: str) -> bool:
+        return False
+
+    def enqueue(self, minutes_id: str, *, provider_name: str | None = None) -> bool:
         self.enqueued.append((minutes_id, provider_name))
+        return True
 
 
 async def run_case(health: ProviderHealth):

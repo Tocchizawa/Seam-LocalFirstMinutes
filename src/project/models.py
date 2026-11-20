@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -11,16 +12,28 @@ class Member(BaseModel):
 
 
 class CorrectionPair(BaseModel):
-    """Whisper 誤転写 → 正式表記 のマッピング。
+    """音声認識の誤転写 → 正式表記 のマッピング。
 
     要約完了後の LLM 補正で発見した wrong→correct ペアをここに蓄積し、
-    将来の Whisper 出力には post-process 置換で適用する。
+    今後の文字起こしに post-process 置換として適用する。
     """
-    wrong: str       # Whisper が出力しがちな誤転写
+    wrong: str       # 音声認識で出力されがちな誤転写
     correct: str     # 正式表記
 
 
-class ProjectCreate(BaseModel):
+class ProjectAppearance(BaseModel):
+    emoji: str | None = Field(default=None, max_length=32)
+    color: Literal["blue", "teal", "green", "amber", "red", "pink", "purple", "slate"] | None = None
+
+    @field_validator("emoji")
+    @classmethod
+    def _validate_emoji(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ProjectCreate(ProjectAppearance):
     name: str
     repo_path: str | None = None
     doc_dirs: list[str] = Field(default_factory=list)
@@ -65,7 +78,7 @@ class ProjectCreate(BaseModel):
         return out
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(ProjectAppearance):
     name: str | None = None
     repo_path: str | None = None
     doc_dirs: list[str] | None = None
@@ -116,7 +129,21 @@ class ProjectUpdate(BaseModel):
         return out
 
 
-class Project(BaseModel):
+class ProjectOrder(BaseModel):
+    project_ids: list[str]
+
+    @field_validator("project_ids")
+    @classmethod
+    def _validate_project_ids(cls, value: list[str]) -> list[str]:
+        ids = [str(project_id).strip() for project_id in value]
+        if any(not project_id for project_id in ids):
+            raise ValueError("project_ids must not contain empty IDs")
+        if len(ids) != len(set(ids)):
+            raise ValueError("project_ids must not contain duplicates")
+        return ids
+
+
+class Project(ProjectAppearance):
     id: str
     name: str
     repo_path: str | None = None

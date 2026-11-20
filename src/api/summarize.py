@@ -17,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.api.errors import bad_request, not_found
+from src.api.errors import bad_request, conflict, internal_error, not_found
 from src.config import config
 from src.storage.db import db
 from src.summarize.base import SummaryError
@@ -45,8 +45,19 @@ async def trigger_summarize(
     Query:
         provider: 省略時は config の minutes_ai.provider を使う
     """
-    if db.get_minutes(minutes_id) is None:
+    minute = db.get_minutes(minutes_id)
+    if minute is None:
         raise not_found("MINUTES_NOT_FOUND", f"minutes '{minutes_id}' が見つかりません")
+    session_id = str(minute.get("session_id") or "")
+    if session_id:
+        from src.api import recording as rec_mod
+
+        pipeline = rec_mod._pipelines.get(session_id)
+        if pipeline and pipeline.get("state") in ("recording", "stopping", "transcribing"):
+            raise conflict("MINUTES_BUSY", "この議事録の文字起こし中は要約できません")
+    runner = get_runner()
+    if runner.is_phase_b_busy(minutes_id):
+        raise conflict("MINUTES_BUSY", "用語辞書の整理が終わってから要約できます")
     if provider and not is_known_provider(provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {provider}")
     # cloud provider なら consent チェック
@@ -68,13 +79,28 @@ async def trigger_summarize(
         raise bad_request("PROVIDER_HEALTH_CHECK_FAILED", str(e))
     if not health.ok:
         raise bad_request(health.code, health.message)
-    get_runner().enqueue(minutes_id, provider_name=provider)
+    if not runner.enqueue(minutes_id, provider_name=provider):
+        raise internal_error(
+            "SUMMARY_QUEUE_PERSIST_FAILED",
+            "要約キューを保存できなかったため、処理を開始できません",
+        )
     return {"job_id": minutes_id, "status": "queued"}
 
 
 @router.get("/api/minutes/{minutes_id}/summarize/status")
 async def summarize_status(minutes_id: str) -> dict:
-    status = get_runner().get_status(minutes_id)
+    runner = get_runner()
+    status = runner.get_status(minutes_id)
+    dictionary_stage = runner.dictionary_stage(minutes_id)
+    if dictionary_stage is not None:
+        stage, label = dictionary_stage
+        payload = status.to_dict() if status is not None else {"minutes_id": minutes_id}
+        payload.update({
+            "state": "dictionary_update",
+            "stage": stage,
+            "stage_label": label,
+        })
+        return payload
     if status is None:
         return {"state": "none"}
     return status.to_dict()
@@ -82,7 +108,13 @@ async def summarize_status(minutes_id: str) -> dict:
 
 @router.post("/api/minutes/{minutes_id}/summarize/cancel")
 async def summarize_cancel(minutes_id: str) -> dict:
-    ok = await get_runner().cancel(minutes_id)
+    try:
+        ok = await get_runner().cancel(minutes_id)
+    except OSError as exc:
+        raise internal_error(
+            "SUMMARY_QUEUE_PERSIST_FAILED",
+            "要約キューを保存できなかったため、処理を中止できません",
+        ) from exc
     return {"state": "cancelled" if ok else "none"}
 
 
@@ -94,15 +126,27 @@ async def summarize_active() -> list[dict]:
     """
     runner = get_runner()
     out: list[dict] = []
-    for mid in runner.list_active():
+    for mid in dict.fromkeys([*runner.list_active(), *runner.list_active_phase_b()]):
         m = db.get_minutes(mid)
         if m is None:
             continue
         status = runner.get_status(mid)
+        dictionary_stage = runner.dictionary_stage(mid)
+        if dictionary_stage is None and (status is None or status.state not in ("queued", "running")):
+            continue
         out.append({
             "minutes_id": mid,
             "project_id": m.get("project_id"),
-            "state": status.state if status is not None else None,
+            "title": m.get("title"),
+            "state": "dictionary_update" if dictionary_stage is not None else (
+                status.state if status is not None else None
+            ),
+            "stage": dictionary_stage[0] if dictionary_stage is not None else (
+                status.stage if status is not None else None
+            ),
+            "stage_label": dictionary_stage[1] if dictionary_stage is not None else (
+                status.stage_label if status is not None else None
+            ),
         })
     return out
 
@@ -209,6 +253,8 @@ async def consent_provider(provider: str) -> dict:
 
 class TestProviderRequest(BaseModel):
     provider: str = Field(min_length=1)
+    model: str | None = Field(default=None, max_length=160)
+    reasoning_effort: str | None = Field(default=None, max_length=16)
 
 
 @router.post("/api/summarize/test")
@@ -216,11 +262,19 @@ async def test_provider(body: TestProviderRequest) -> dict:
     if not is_known_provider(body.provider):
         raise bad_request("UNKNOWN_PROVIDER", f"未知のproviderです: {body.provider}")
     ai_cfg = config.get("minutes_ai") or {}
+    overrides = body.model_dump(include={"model", "reasoning_effort"}, exclude_none=True)
+    if overrides:
+        ai_cfg = {**ai_cfg, body.provider: {**(ai_cfg.get(body.provider) or {}), **overrides}}
     try:
         provider = get_provider(body.provider, ai_cfg)
+        from src.summarize.codex import CodexProvider
+
+        if isinstance(provider, CodexProvider):
+            health = await provider.health_check(strict_model=True)
+        else:
+            health = await provider.health_check()
     except SummaryError as e:
         return {"ok": False, "code": e.code.value, "message": e.message}
-    health = await provider.health_check()
     return {
         "ok": health.ok,
         "code": health.code,

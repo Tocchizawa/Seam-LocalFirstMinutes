@@ -208,7 +208,7 @@ class CodexProvider(SummarizerProvider):
         low = (text or "").lower()
         return "not supported when using codex with a chatgpt account" in low
 
-    async def health_check(self) -> ProviderHealth:
+    async def health_check(self, *, strict_model: bool = False) -> ProviderHealth:
         version_cmd, launcher_label = self._build_cmd(["--version"])
         if version_cmd is None:
             return ProviderHealth(
@@ -219,6 +219,20 @@ class CodexProvider(SummarizerProvider):
                     "https://github.com/openai/codex からインストールしてください。"
                 ),
             )
+        async def communicate(
+            process: asyncio.subprocess.Process, timeout: float, input_bytes: bytes | None = None,
+        ) -> tuple[bytes, bytes]:
+            try:
+                return await asyncio.wait_for(process.communicate(input_bytes), timeout=timeout)
+            except (TimeoutError, asyncio.CancelledError):
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                await process.communicate()
+                raise
+
         try:
             # 1) まず CLI 自体の疎通確認
             proc = await asyncio.create_subprocess_exec(
@@ -227,12 +241,8 @@ class CodexProvider(SummarizerProvider):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                stdout, stderr = await communicate(proc, timeout=5.0)
+            except TimeoutError:
                 return ProviderHealth(
                     ok=False,
                     code=SummaryErrorCode.TIMEOUT.value,
@@ -280,20 +290,13 @@ class CodexProvider(SummarizerProvider):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                assert probe.stdin is not None
-                probe.stdin.write(b"Reply with exactly OK.\n")
-                await probe.stdin.drain()
-                probe.stdin.close()
                 try:
-                    out, err = await asyncio.wait_for(
-                        probe.communicate(),
+                    out, err = await communicate(
+                        probe,
                         timeout=self._connect_timeout_sec,
+                        input_bytes=b"Reply with exactly OK. Do not access files or use tools.\n",
                     )
-                except asyncio.TimeoutError:
-                    try:
-                        probe.kill()
-                    except Exception:
-                        pass
+                except TimeoutError:
                     return None
                 return probe.returncode or 0, out, err
 
@@ -312,6 +315,12 @@ class CodexProvider(SummarizerProvider):
             if probe_rc != 0 and self._model:
                 err_text = _strip_ansi(probe_err.decode(errors="replace")).strip()
                 if self._is_chatgpt_model_unsupported(err_text):
+                    if strict_model:
+                        return ProviderHealth(
+                            ok=False,
+                            code=SummaryErrorCode.MODEL_UNAVAILABLE.value,
+                            message="選んだモデルは現在のCodexアカウントで使えません。「CLIの既定」か別のモデルを選んでください。",
+                        )
                     fallback_res = await _run_probe(use_configured_model=False)
                     if fallback_res is None:
                         return ProviderHealth(
@@ -328,7 +337,13 @@ class CodexProvider(SummarizerProvider):
             if probe_rc != 0:
                 err_text = _strip_ansi(probe_err.decode(errors="replace")).strip()
                 excerpt = err_text[-300:] if len(err_text) > 300 else err_text
-                code = classify_cli_error_code(err_text)
+                if self._model and ("model_not_found" in err_text.lower() or "unknown model" in err_text.lower()):
+                    code = SummaryErrorCode.MODEL_UNAVAILABLE
+                    excerpt = "選んだモデルを利用できません。モデル名を確認してください。"
+                else:
+                    code = classify_cli_error_code(err_text)
+                if code == SummaryErrorCode.AUTH_FAILED:
+                    excerpt = "ターミナルで codex login を実行してから、接続テストを再実行してください。"
                 return ProviderHealth(
                     ok=False,
                     code=code.value,

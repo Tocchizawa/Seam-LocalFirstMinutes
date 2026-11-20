@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <path id="tile" d="M330 100H694C789 100 837 100 880 144C924 187 924 235 924 330V694C924 789 924 837 880 880C837 924 789 924 694 924H330C235 924 187 924 144 880C100 837 100 789 100 694V330C100 235 100 187 144 144C187 100 235 100 330 100Z"/>
+    <linearGradient id="paper" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EEECEA"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="124%">
+      <feGaussianBlur stdDeviation="13"/>
+    </filter>
+  </defs>
+  <use href="#tile" transform="translate(0 8)" fill="#191612" opacity="0.19" filter="url(#shadow)"/>
+  <use href="#tile" fill="url(#paper)" stroke="#D8D6D3" stroke-width="2"/>
+  <path transform="translate(218 218) scale(2.94)" fill="#141414" fill-rule="evenodd" d="M57 12H153L108 74H162L190 116L140 188H52L93 129H41L10 80Z M70 40H101L62 96H143L158 116L128 162H100L138 106H60L42 80Z"/>
+</svg>

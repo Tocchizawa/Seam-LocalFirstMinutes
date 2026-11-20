@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
@@ -37,7 +38,16 @@ from .registry import get_provider
 logger = logging.getLogger(__name__)
 
 DRAFTS_DIR = APP_DIR / "summary_drafts"
+SUMMARY_QUEUE_PATH = APP_DIR / "summary_queue.json"
 CODEX_USAGE_PATH = APP_DIR / "codex_usage.jsonl"
+MAX_RETAINED_SUMMARY_STATUSES = 100
+DICTIONARY_UPDATE_TIMEOUT = 180
+DICTIONARY_STAGE_LABELS = {
+    "dictionary_waiting": "用語辞書の更新を待機中",
+    "dictionary_reading": "参照資料を確認中",
+    "dictionary_extracting": "用語・補正候補を抽出中",
+    "dictionary_saving": "用語辞書を保存中",
+}
 
 _USAGE_KEYS = (
     "input_tokens",
@@ -155,6 +165,7 @@ class _Job:
     minutes_id: str
     provider_name: str | None     # None ならconfig既定
     enqueued_at: float
+    status: JobStatus
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -177,8 +188,12 @@ class SummaryRunner:
         self._queue: asyncio.Queue[_Job] = asyncio.Queue()
         self._statuses: dict[str, JobStatus] = {}
         self._jobs: dict[str, _Job] = {}      # in-flight or queued
+        self._durable_jobs: dict[str, str | None] = {}
+        self._durable_phase_b: dict[str, str | None] = {}
         self._current: _Job | None = None
         self._current_provider: SummarizerProvider | None = None
+        self._phase_b_tasks: dict[str, asyncio.Task] = {}
+        self._dictionary_stages: dict[str, str] = {}
         self._worker_task: asyncio.Task | None = None
         self._broadcaster = broadcaster
         self._shutdown = False
@@ -189,9 +204,12 @@ class SummaryRunner:
         if self._worker_task is not None:
             return
         DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+        self._restore_pending_jobs()
         self._worker_task = asyncio.create_task(
             self._worker(), name="summary-runner"
         )
+        for minutes_id, provider_name in list(self._durable_phase_b.items()):
+            self._schedule_phase_b(minutes_id, provider_name, persist=False)
         logger.info("SummaryRunner started")
 
     async def shutdown(self) -> None:
@@ -210,35 +228,196 @@ class SummaryRunner:
             except (asyncio.CancelledError, Exception):
                 pass
             self._worker_task = None
+        phase_b_tasks = list(self._phase_b_tasks.values())
+        for task in phase_b_tasks:
+            task.cancel()
+        if phase_b_tasks:
+            await asyncio.gather(*phase_b_tasks, return_exceptions=True)
+        self._phase_b_tasks.clear()
+
+    @staticmethod
+    def _sync_queue_directory() -> None:
+        """Rename/unlink 後のディレクトリエントリを可能なら同期する。"""
+        try:
+            directory_fd = os.open(SUMMARY_QUEUE_PATH.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception as exc:
+            # 一部ファイルシステムではディレクトリ fsync が未対応。
+            # キューファイル本体は fsync 済みで原子的に置換されている。
+            logger.debug("[summary] queue directory sync unavailable: %s", exc)
+
+    def _persist_pending_jobs(self) -> bool:
+        """要約と辞書整理の待機ジョブを保存し、再起動時に戻す。"""
+        temporary_path = SUMMARY_QUEUE_PATH.with_suffix(".json.tmp")
+        try:
+            if not self._durable_jobs and not self._durable_phase_b:
+                existed = SUMMARY_QUEUE_PATH.exists()
+                SUMMARY_QUEUE_PATH.unlink(missing_ok=True)
+                if existed:
+                    self._sync_queue_directory()
+                return True
+            SUMMARY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            jobs = [
+                {"minutes_id": minutes_id, "provider": provider}
+                for minutes_id, provider in sorted(self._durable_jobs.items())
+            ]
+            phase_b = [
+                {"minutes_id": minutes_id, "provider": provider}
+                for minutes_id, provider in sorted(self._durable_phase_b.items())
+            ]
+            with temporary_path.open("w", encoding="utf-8") as queue_file:
+                json.dump(
+                    {"jobs": jobs, "phase_b": phase_b},
+                    queue_file,
+                    ensure_ascii=False,
+                )
+                queue_file.flush()
+                os.fsync(queue_file.fileno())
+            os.replace(temporary_path, SUMMARY_QUEUE_PATH)
+            self._sync_queue_directory()
+            return True
+        except Exception as exc:
+            logger.warning("[summary] failed to persist pending queue: %s", exc)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+
+    def _restore_pending_jobs(self) -> None:
+        try:
+            payload = json.loads(SUMMARY_QUEUE_PATH.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            logger.warning("[summary] pending queue could not be read: %s", exc)
+            return
+
+        raw_jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_jobs, list):
+            logger.warning("[summary] pending queue has an invalid jobs list")
+            return
+
+        from src.storage.db import db
+
+        for item in raw_jobs:
+            if not isinstance(item, dict):
+                continue
+            minutes_id = str(item.get("minutes_id") or "").strip()
+            if not minutes_id or minutes_id in self._jobs:
+                continue
+            provider = item.get("provider")
+            provider_name = str(provider) if provider else None
+            try:
+                record = db.get_minutes(minutes_id)
+            except Exception as exc:
+                logger.warning("[summary] queued minute lookup failed (%s): %s", minutes_id, exc)
+                self._durable_jobs[minutes_id] = provider_name
+                continue
+            if record is None or str(record.get("summary") or "").strip():
+                continue
+
+            status = JobStatus(
+                minutes_id=minutes_id,
+                state="queued",
+                provider=provider_name,
+            )
+            job = _Job(
+                minutes_id=minutes_id,
+                provider_name=provider_name,
+                enqueued_at=time.time(),
+                status=status,
+            )
+            self._durable_jobs[minutes_id] = provider_name
+            self._jobs[minutes_id] = job
+            self._statuses[minutes_id] = status
+            self._queue.put_nowait(job)
+
+        raw_phase_b = payload.get("phase_b", []) if isinstance(payload, dict) else []
+        if isinstance(raw_phase_b, list):
+            for item in raw_phase_b:
+                if not isinstance(item, dict):
+                    continue
+                minutes_id = str(item.get("minutes_id") or "").strip()
+                if not minutes_id or minutes_id in self._phase_b_tasks:
+                    continue
+                provider = item.get("provider")
+                provider_name = str(provider) if provider else None
+                self._durable_phase_b[minutes_id] = provider_name
+                try:
+                    record = db.get_minutes(minutes_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[summary] phase B minute lookup failed (%s): %s",
+                        minutes_id,
+                        exc,
+                    )
+                    continue
+                if record is None or not str(record.get("summary") or "").strip():
+                    self._durable_phase_b.pop(minutes_id, None)
+                    continue
+                self._schedule_phase_b(minutes_id, provider_name, persist=False)
+
+        self._persist_pending_jobs()
+        if self._durable_jobs:
+            logger.info("[summary] restored %d pending job(s)", len(self._durable_jobs))
+        if self._durable_phase_b:
+            logger.info(
+                "[summary] restored %d pending dictionary update(s)",
+                len(self._durable_phase_b),
+            )
 
     # ─── public API ────────────────────────────────────
 
     def enqueue(
         self, minutes_id: str, *, provider_name: str | None = None
-    ) -> None:
+    ) -> bool:
         """要約ジョブを投入する。
 
         同一minutes_idの既存ジョブがあれば cancel して新ジョブで上書き。
         """
+        previous_provider = self._durable_jobs.get(minutes_id)
+        had_previous = minutes_id in self._durable_jobs
+        self._durable_jobs[minutes_id] = provider_name
+        if not self._persist_pending_jobs():
+            if had_previous:
+                self._durable_jobs[minutes_id] = previous_provider
+            else:
+                self._durable_jobs.pop(minutes_id, None)
+            logger.warning(
+                "[summary] enqueue rejected because restart queue could not be saved: %s",
+                minutes_id,
+            )
+            return False
+
         existing = self._jobs.get(minutes_id)
         if existing is not None:
             existing.cancel_event.set()
-            self._jobs.pop(minutes_id, None)
+            if self._current is existing and self._current_provider is not None:
+                try:
+                    asyncio.create_task(self._current_provider.cancel())
+                except RuntimeError:
+                    pass
             logger.info(
                 "[summary] cancelling existing job for re-enqueue: %s", minutes_id
             )
 
-        job = _Job(
-            minutes_id=minutes_id,
-            provider_name=provider_name,
-            enqueued_at=time.time(),
-        )
-        self._jobs[minutes_id] = job
-        self._statuses[minutes_id] = JobStatus(
+        status = JobStatus(
             minutes_id=minutes_id,
             state="queued",
             provider=provider_name,
         )
+        job = _Job(
+            minutes_id=minutes_id,
+            provider_name=provider_name,
+            enqueued_at=time.time(),
+            status=status,
+        )
+        self._jobs[minutes_id] = job
+        self._remember_status(status)
         self._queue.put_nowait(job)
         logger.info(
             "[summary] enqueued: %s (provider=%s)", minutes_id, provider_name or "default"
@@ -259,9 +438,92 @@ class SummaryRunner:
             except RuntimeError:
                 # 起動時 (event loop 未稼働) は black hole 化、worker 開始後に再 broadcast される
                 pass
+        return True
+
+    def ensure_queued(self, minutes_id: str) -> bool:
+        """実行中のジョブを止めずに、再起動用キューへの保存を確認する。"""
+        status = self._statuses.get(minutes_id)
+        if status is not None and status.state in ("queued", "running"):
+            job = self._jobs.get(minutes_id)
+            provider_name = job.provider_name if job is not None else status.provider
+            self._durable_jobs[minutes_id] = provider_name
+            return self._persist_pending_jobs()
+        return self.enqueue(minutes_id)
+
+    def pending_provider(self, minutes_id: str) -> str | None:
+        """復元前でも、永続キューに記録された provider を取得する。"""
+        for jobs in (self._durable_phase_b, self._durable_jobs):
+            if minutes_id in jobs and jobs[minutes_id]:
+                return jobs[minutes_id]
+        try:
+            payload = json.loads(SUMMARY_QUEUE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        for key in ("phase_b", "jobs"):
+            entries = payload.get(key, [])
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                if isinstance(item, dict) and str(item.get("minutes_id") or "") == minutes_id:
+                    provider = item.get("provider")
+                    if provider:
+                        return str(provider)
+        return None
+
+    def persist_phase_b_intent(
+        self, minutes_id: str, provider_name: str | None
+    ) -> bool:
+        """要約保存と辞書整理の間で落ちても後段処理を復元できるよう先に記録する。"""
+        self._durable_phase_b[minutes_id] = provider_name
+        return self._persist_pending_jobs()
+
+    def _remember_status(self, status: JobStatus) -> None:
+        self._statuses.pop(status.minutes_id, None)
+        self._statuses[status.minutes_id] = status
+        self._prune_statuses()
+
+    def _prune_statuses(self) -> None:
+        excess = sum(
+            1
+            for status in self._statuses.values()
+            if status.state not in ("queued", "running")
+        ) - MAX_RETAINED_SUMMARY_STATUSES
+        if excess <= 0:
+            return
+        for minutes_id, status in list(self._statuses.items()):
+            if status.state in ("queued", "running"):
+                continue
+            self._statuses.pop(minutes_id, None)
+            excess -= 1
+            if excess <= 0:
+                return
 
     def get_status(self, minutes_id: str) -> JobStatus | None:
         return self._statuses.get(minutes_id)
+
+    def is_busy(self, minutes_id: str) -> bool:
+        status = self._statuses.get(minutes_id)
+        if status is not None and status.state in ("queued", "running"):
+            return True
+        return self.is_phase_b_busy(minutes_id)
+
+    def is_phase_b_busy(self, minutes_id: str) -> bool:
+        task = self._phase_b_tasks.get(minutes_id)
+        return task is not None and not task.done()
+
+    def list_active_phase_b(self) -> list[str]:
+        """辞書整理中の議事録 ID 一覧を返す。"""
+        return [
+            minutes_id
+            for minutes_id, task in self._phase_b_tasks.items()
+            if not task.done()
+        ]
+
+    def dictionary_stage(self, minutes_id: str) -> tuple[str, str] | None:
+        stage = self._dictionary_stages.get(minutes_id)
+        return (stage, DICTIONARY_STAGE_LABELS[stage]) if stage is not None else None
 
     def list_active(self) -> list[str]:
         """進行中 (queued / running) の minutes_id 一覧を返す。"""
@@ -278,11 +540,45 @@ class SummaryRunner:
             キャンセル可能だった場合 True
         """
         job = self._jobs.get(minutes_id)
-        if job is None:
+        phase_b = self._phase_b_tasks.get(minutes_id)
+        if phase_b is not None and phase_b.done():
+            phase_b = None
+        if phase_b is None and job is None:
             return False
+
+        pending = self._durable_jobs
+        if phase_b is not None:
+            pending = self._durable_phase_b
+            # A draft left by recovery would otherwise enqueue dictionary work again.
+            (DRAFTS_DIR / f"{minutes_id}.md").unlink(missing_ok=True)
+        if minutes_id in pending:
+            provider_name = pending.pop(minutes_id)
+            if not self._persist_pending_jobs():
+                pending[minutes_id] = provider_name
+                raise OSError("summary cancellation could not be persisted")
+
+        if phase_b is not None:
+            phase_b.cancel()
+            await asyncio.gather(phase_b, return_exceptions=True)
+            await self._broadcast({
+                "type": "dictionary_update_finished",
+                "data": {"minutes_id": minutes_id},
+            })
+            return True
+
+        assert job is not None
         job.cancel_event.set()
+        if job.status.state == "queued":
+            self._jobs.pop(minutes_id, None)
+            job.status.state = "cancelled"
+            job.status.finished_at = time.time()
+            self._remember_status(job.status)
+            await self._broadcast({
+                "type": "summary_cancelled",
+                "data": {"minutes_id": minutes_id},
+            })
         # 進行中ジョブだったら provider 側もcancel
-        if self._current is not None and self._current.minutes_id == minutes_id:
+        if self._current is job:
             if self._current_provider is not None:
                 try:
                     await self._current_provider.cancel()
@@ -302,14 +598,20 @@ class SummaryRunner:
 
             # キャンセル済みジョブはスキップ
             if job.cancel_event.is_set():
-                self._jobs.pop(job.minutes_id, None)
-                self._statuses[job.minutes_id] = JobStatus(
-                    minutes_id=job.minutes_id, state="cancelled"
-                )
+                if self._jobs.get(job.minutes_id) is job:
+                    self._jobs.pop(job.minutes_id, None)
+                    if not self._shutdown:
+                        self._durable_jobs.pop(job.minutes_id, None)
+                        self._persist_pending_jobs()
+                    job.status.state = "cancelled"
+                    job.status.finished_at = time.time()
+                    self._remember_status(job.status)
                 continue
 
             self._current = job
             local_model_lease = False
+            dequeued_at = time.monotonic()
+            queue_wait = max(0, time.time() - job.enqueued_at)
             try:
                 provider_name = job.provider_name or str(
                     (config.get("minutes_ai") or {}).get("provider", "ollama")
@@ -317,18 +619,43 @@ class SummaryRunner:
                 if provider_name in {"ollama", "claude_code", "codex"}:
                     from src.audio.resource_monitor import model_resource_gate
 
-                    await model_resource_gate.acquire_llm_async()
-                    local_model_lease = True
-                    # CA-09: LLM を起動する前に Whisper の MLX モデルを解放する。
-                    try:
-                        from src.transcribe.streaming import unload_model
-
-                        unload_model()
-                    except Exception as exc:
-                        logger.warning("Whisper unload before local LLM failed: %s", exc)
-                await self._process_job(job)
+                    local_model_lease = await model_resource_gate.acquire_llm_async(
+                        job.cancel_event.is_set,
+                    )
+                    if not local_model_lease:
+                        if self._jobs.get(job.minutes_id) is job:
+                            job.status.state = "cancelled"
+                            job.status.finished_at = time.time()
+                            self._remember_status(job.status)
+                            await self._broadcast({
+                                "type": "summary_cancelled",
+                                "data": {"minutes_id": job.minutes_id},
+                            })
+                        continue
+                if self._jobs.get(job.minutes_id) is job and not job.cancel_event.is_set():
+                    logger.info(
+                        "[summary] start %s provider=%s queue_wait=%.1fs resource_wait=%.1fs",
+                        job.minutes_id, provider_name, queue_wait,
+                        time.monotonic() - dequeued_at,
+                    )
+                    await self._process_job(job)
+                elif self._jobs.get(job.minutes_id) is job:
+                    job.status.state = "cancelled"
+                    job.status.finished_at = time.time()
+                    self._remember_status(job.status)
             except Exception as e:
                 logger.exception("[summary] worker unhandled error: %s", e)
+                if (
+                    self._jobs.get(job.minutes_id) is job
+                    and not job.cancel_event.is_set()
+                    and job.status.state in ("queued", "running")
+                ):
+                    self._mark_failed(
+                        job.status,
+                        SummaryErrorCode.UNKNOWN.value,
+                        f"要約処理に失敗しました: {e}",
+                    )
+                    await self._broadcast_failed(job.status, job)
             finally:
                 if local_model_lease:
                     from src.audio.resource_monitor import model_resource_gate
@@ -336,7 +663,13 @@ class SummaryRunner:
                     model_resource_gate.release_llm()
                 self._current = None
                 self._current_provider = None
-                self._jobs.pop(job.minutes_id, None)
+                if self._jobs.get(job.minutes_id) is job:
+                    self._jobs.pop(job.minutes_id, None)
+                    if not self._shutdown:
+                        self._durable_jobs.pop(job.minutes_id, None)
+                        self._persist_pending_jobs()
+                if self._statuses.get(job.minutes_id) is job.status:
+                    self._remember_status(job.status)
 
     async def _process_job(self, job: _Job) -> None:
         from src.storage.db import db
@@ -344,7 +677,9 @@ class SummaryRunner:
         from src.pipeline.state import Stage, STAGE_LABELS
 
         minutes_id = job.minutes_id
-        status = self._statuses[minutes_id]
+        status = job.status
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+            return
         status.state = "running"
         status.started_at = time.time()
         status.stage = Stage.SUMMARY_HEALTH.value
@@ -357,6 +692,8 @@ class SummaryRunner:
                 "stage_label": status.stage_label,
             },
         })
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+            return
 
         # 1. DBから minutes 取得
         record = db.get_minutes(minutes_id)
@@ -385,10 +722,11 @@ class SummaryRunner:
             logger.info("[summary] transcript too short, skipping: %s", minutes_id)
             status.state = "skipped"
             status.finished_at = time.time()
-            await self._broadcast({
-                "type": "summary_skipped",
-                "data": {"minutes_id": minutes_id, "reason": "TRANSCRIPT_TOO_SHORT"},
-            })
+            if self._jobs.get(minutes_id) is job:
+                await self._broadcast({
+                    "type": "summary_skipped",
+                    "data": {"minutes_id": minutes_id, "reason": "TRANSCRIPT_TOO_SHORT"},
+                })
             return
 
         # 3. provider 選択
@@ -407,7 +745,7 @@ class SummaryRunner:
                     SummaryErrorCode.NOT_CONFIGURED.value,
                     f"{provider_name} の利用同意が未取得です。設定画面で同意してください。",
                 )
-                await self._broadcast_failed(status)
+                await self._broadcast_failed(status, job)
                 return
 
         # 5. provider取得
@@ -415,15 +753,17 @@ class SummaryRunner:
             provider = get_provider(provider_name, ai_cfg)
         except SummaryError as e:
             self._mark_failed(status, e.code.value, e.message)
-            await self._broadcast_failed(status)
+            await self._broadcast_failed(status, job)
             return
 
         # 6. health check
         try:
             health = await provider.health_check()
+            if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+                return
             if not health.ok:
                 self._mark_failed(status, health.code, health.message)
-                await self._broadcast_failed(status)
+                await self._broadcast_failed(status, job)
                 return
             status.model = health.model
         except Exception as e:
@@ -431,7 +771,7 @@ class SummaryRunner:
             self._mark_failed(
                 status, SummaryErrorCode.UNKNOWN.value, str(e)
             )
-            await self._broadcast_failed(status)
+            await self._broadcast_failed(status, job)
             return
 
         # 7. ProjectContext 構築
@@ -450,8 +790,12 @@ class SummaryRunner:
                 "stage_label": status.stage_label,
             },
         })
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+            return
 
         async def on_token(chunk: str) -> None:
+            if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+                return
             status.partial_text += chunk
             await self._broadcast({
                 "type": "summary_chunk",
@@ -464,7 +808,7 @@ class SummaryRunner:
 
         async def on_activity(label: str) -> None:
             # CLI provider (claude_code / codex) が「何をしているか」を UI に伝えるイベント
-            if not label:
+            if not label or self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
                 return
             status.activity = label
             await self._broadcast({
@@ -491,28 +835,33 @@ class SummaryRunner:
             if e.code == SummaryErrorCode.CANCELLED or job.cancel_event.is_set():
                 status.state = "cancelled"
                 status.finished_at = time.time()
-                await self._broadcast({
-                    "type": "summary_cancelled",
-                    "data": {"minutes_id": minutes_id},
-                })
+                if self._jobs.get(minutes_id) is job:
+                    await self._broadcast({
+                        "type": "summary_cancelled",
+                        "data": {"minutes_id": minutes_id},
+                    })
                 return
             self._mark_failed(status, e.code.value, e.message)
-            await self._broadcast_failed(status)
+            await self._broadcast_failed(status, job)
             return
         except asyncio.CancelledError:
             status.state = "cancelled"
             status.finished_at = time.time()
-            await self._broadcast({
-                "type": "summary_cancelled",
-                "data": {"minutes_id": minutes_id},
-            })
+            if self._jobs.get(minutes_id) is job:
+                await self._broadcast({
+                    "type": "summary_cancelled",
+                    "data": {"minutes_id": minutes_id},
+                })
             return
         except Exception as e:
             logger.exception("[summary] generate raised unexpected: %s", e)
             self._mark_failed(
                 status, SummaryErrorCode.UNKNOWN.value, str(e)
             )
-            await self._broadcast_failed(status)
+            await self._broadcast_failed(status, job)
+            return
+
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
             return
 
         if result.usage:
@@ -530,7 +879,7 @@ class SummaryRunner:
                 _record_codex_usage(minutes_id, result.model, result.usage)
 
         # 9. draft保存 → DB更新 → draft削除
-        await self._save_with_recovery(record, status, result)
+        await self._save_with_recovery(record, status, result, job)
 
     def _mark_failed(
         self, status: JobStatus, code: str, message: str
@@ -551,7 +900,9 @@ class SummaryRunner:
         except Exception as e:
             logger.warning("WS broadcast failed: %s", e)
 
-    async def _broadcast_failed(self, status: JobStatus) -> None:
+    async def _broadcast_failed(self, status: JobStatus, job: _Job | None = None) -> None:
+        if job is not None and self._jobs.get(job.minutes_id) is not job:
+            return
         await self._broadcast({
             "type": "summary_failed",
             "data": {
@@ -562,7 +913,7 @@ class SummaryRunner:
         })
 
     async def _save_with_recovery(
-        self, record: dict, status: JobStatus, result: SummaryResult
+        self, record: dict, status: JobStatus, result: SummaryResult, job: _Job
     ) -> None:
         """要約結果を draft → DB → draft削除 の順で保存。
 
@@ -572,6 +923,8 @@ class SummaryRunner:
         from src.pipeline.state import Stage, STAGE_LABELS
 
         minutes_id = status.minutes_id
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+            return
         status.stage = Stage.SUMMARY_SAVE.value
         status.stage_label = STAGE_LABELS[Stage.SUMMARY_SAVE]
         await self._broadcast({
@@ -582,38 +935,76 @@ class SummaryRunner:
                 "stage_label": status.stage_label,
             },
         })
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+            return
 
         DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
         draft_path = DRAFTS_DIR / f"{minutes_id}.md"
 
         # 要約本体 (タイトルセクション無し、概要〜議論ハイライトのみ)
         summary_body = result.text
+        temporary_draft_path = draft_path.with_suffix(".md.tmp")
         try:
-            draft_path.write_text(summary_body, encoding="utf-8")
+            with temporary_draft_path.open("w", encoding="utf-8") as draft_file:
+                draft_file.write(summary_body)
+                draft_file.flush()
+                os.fsync(draft_file.fileno())
+            os.replace(temporary_draft_path, draft_path)
         except Exception as e:
             logger.warning("[summary] failed to write draft (%s): %s", minutes_id, e)
+            try:
+                temporary_draft_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # DB保存より先に後段ジョブを記録する。起動時には要約が空ならこの
+        # intent を捨てて要約ジョブを再開し、要約があれば辞書整理を再開する。
+        phase_b_persisted = self.persist_phase_b_intent(
+            minutes_id, result.provider
+        )
 
         new_title: str | None = None
         try:
-            db.update_summary(
+            saved = db.update_summary(
                 minutes_id,
                 summary_body,
                 llm_model=f"{result.provider}:{result.model}",
             )
         except Exception as e:
             logger.exception("[summary] DB update failed: %s", e)
+            self._durable_phase_b.pop(minutes_id, None)
+            self._persist_pending_jobs()
             self._mark_failed(
                 status, SummaryErrorCode.UNKNOWN.value, f"DB更新に失敗: {e}"
             )
-            await self._broadcast_failed(status)
+            await self._broadcast_failed(status, job)
             return
 
-        # DB更新成功 → draft削除
-        try:
-            if draft_path.exists():
-                draft_path.unlink()
-        except Exception:
-            pass
+        if not saved:
+            self._durable_phase_b.pop(minutes_id, None)
+            self._persist_pending_jobs()
+            # The minute may have been deleted while generation was running.
+            # Do not report success for a result that was never persisted.
+            try:
+                draft_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._mark_failed(
+                status, SummaryErrorCode.NOT_CONFIGURED.value,
+                "議事録が削除されたため、要約を保存できませんでした",
+            )
+            await self._broadcast_failed(status, job)
+            return
+
+        # 要約DB更新後に永続化を再確認する。保存に失敗した場合は下書きを残し、
+        # 起動時に要約が既に存在すれば辞書整理の復元マーカーとして利用する。
+        if not phase_b_persisted:
+            phase_b_persisted = self._persist_pending_jobs()
+        if phase_b_persisted:
+            try:
+                draft_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         # ─── タイトル生成 (別リクエスト、失敗しても要約結果は保持) ───
         from src.config import config as _cfg
@@ -652,6 +1043,8 @@ class SummaryRunner:
                         project=project_now,
                         timeout_sec=60,
                     )
+                    if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+                        return
                     from .prompts import normalize_generated_title
 
                     new_title = normalize_generated_title(raw_title)
@@ -674,6 +1067,8 @@ class SummaryRunner:
         status.partial_text = result.text
         status.model = result.model
         status.finished_at = time.time()
+        if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
+            return
         await self._broadcast({
             "type": "summary_done",
             "data": {
@@ -688,7 +1083,7 @@ class SummaryRunner:
                 "new_title": new_title,
             },
         })
-        if new_title:
+        if new_title and self._jobs.get(minutes_id) is job:
             # 一覧画面など別箇所も再描画できるよう、専用イベントも送る
             await self._broadcast({
                 "type": "minutes_title_updated",
@@ -706,16 +1101,117 @@ class SummaryRunner:
         # ─── 辞書整理 (Phase B) をバックグラウンドで実行 ───
         # transcript と glossary/docs を LLM で照合し、新規 glossary + 誤転写ペアを発見。
         # ここを await しないことで、UI への "summary_done" は即時届く。
-        asyncio.create_task(self._run_phase_b(status.minutes_id))
+        minutes_id = status.minutes_id
+        previous_phase_b = self._phase_b_tasks.get(minutes_id)
+        if previous_phase_b is not None and not previous_phase_b.done():
+            return
+        self._schedule_phase_b(minutes_id, result.provider, persist=False)
 
-    async def _run_phase_b(self, minutes_id: str) -> None:
-        """辞書整理 (Phase B) を fire-and-forget で実行する薄いラッパー。"""
+    def _schedule_phase_b(
+        self,
+        minutes_id: str,
+        provider_name: str | None,
+        *,
+        persist: bool = True,
+    ) -> None:
+        previous = self._phase_b_tasks.get(minutes_id)
+        if previous is not None and not previous.done():
+            return
+        self._durable_phase_b[minutes_id] = provider_name
+        if persist:
+            self._persist_pending_jobs()
+        task = asyncio.create_task(
+            self._run_durable_phase_b(minutes_id, provider_name),
+            name=f"summary-phase-b-{minutes_id}",
+        )
+        self._dictionary_stages[minutes_id] = "dictionary_waiting"
+        self._phase_b_tasks[minutes_id] = task
+
+        def clear_finished_task(done: asyncio.Task) -> None:
+            if self._phase_b_tasks.get(minutes_id) is done:
+                self._phase_b_tasks.pop(minutes_id, None)
+                self._dictionary_stages.pop(minutes_id, None)
+
+        task.add_done_callback(clear_finished_task)
+
+    async def _set_dictionary_stage(self, minutes_id: str, stage: str) -> None:
+        if minutes_id not in self._dictionary_stages:
+            return
+        self._dictionary_stages[minutes_id] = stage
+        await self._broadcast({
+            "type": "dictionary_update_stage",
+            "data": {"minutes_id": minutes_id, "stage": stage, "stage_label": DICTIONARY_STAGE_LABELS[stage]},
+        })
+
+    async def _run_durable_phase_b(
+        self,
+        minutes_id: str,
+        provider_name: str | None,
+    ) -> None:
+        started = time.monotonic()
+        await self._broadcast({
+            "type": "dictionary_update_started",
+            "data": {
+                "minutes_id": minutes_id,
+                "stage_label": DICTIONARY_STAGE_LABELS["dictionary_waiting"],
+            },
+        })
+        discard_draft = True
         try:
-            await self._apply_dictionary_corrections(minutes_id)
-        except Exception as e:
-            logger.warning("[phase-b] correction step failed (%s): %s", minutes_id, e)
+            await self._run_phase_b(minutes_id, provider_name)
+        except asyncio.CancelledError:
+            # Shutdown cancellation keeps the durable entry for the next launch.
+            logger.info("[phase-b] cancelled %s elapsed=%.1fs", minutes_id, time.monotonic() - started)
+            raise
+        except (TimeoutError, SummaryError) as exc:
+            code = exc.code.value if isinstance(exc, SummaryError) else SummaryErrorCode.TIMEOUT.value
+            logger.warning("[phase-b] failed %s code=%s elapsed=%.1fs", minutes_id, code, time.monotonic() - started)
+        except Exception:
+            discard_draft = False
+            logger.exception("[phase-b] unexpected failure (%s)", minutes_id)
+        self._durable_phase_b.pop(minutes_id, None)
+        self._dictionary_stages.pop(minutes_id, None)
+        self._persist_pending_jobs()
+        if discard_draft:
+            try:
+                (DRAFTS_DIR / f"{minutes_id}.md").unlink(missing_ok=True)
+            except Exception:
+                pass
+        logger.info("[phase-b] finished %s elapsed=%.1fs", minutes_id, time.monotonic() - started)
+        await self._broadcast({
+            "type": "dictionary_update_finished",
+            "data": {"minutes_id": minutes_id},
+        })
 
-    async def _apply_dictionary_corrections(self, minutes_id: str) -> int:
+    async def _run_phase_b(self, minutes_id: str, provider_name: str | None = None) -> None:
+        """辞書整理 (Phase B) を fire-and-forget で実行する薄いラッパー。"""
+        ai_cfg = config.get("minutes_ai") or {}
+        flag = ai_cfg.get("auto_dictionary_update")
+        if flag is None:
+            flag = ai_cfg.get("auto_correct_dictionary", True)
+        if not bool(flag):
+            return
+
+        provider_name = str(provider_name or ai_cfg.get("provider") or "ollama")
+        local_model_lease = provider_name in {"ollama", "claude_code", "codex"}
+        queued_at = time.monotonic()
+        if local_model_lease:
+            from src.audio.resource_monitor import model_resource_gate
+
+            await model_resource_gate.acquire_llm_async()
+        try:
+            logger.info(
+                "[phase-b] start %s provider=%s resource_wait=%.1fs timeout=%ss",
+                minutes_id, provider_name, time.monotonic() - queued_at, DICTIONARY_UPDATE_TIMEOUT,
+            )
+            await self._apply_dictionary_corrections(minutes_id, provider_name, ai_cfg)
+        finally:
+            if local_model_lease:
+                from src.audio.resource_monitor import model_resource_gate
+
+                model_resource_gate.release_llm()
+
+    async def _apply_dictionary_corrections(self, minutes_id: str, provider_name: str, ai_cfg: dict) -> int:
         """Phase B: 要約完了直後に呼ばれる辞書整理。
 
         - transcript + docs + 既存辞書を LLM に渡し、new_glossary と new_corrections を取得
@@ -727,17 +1223,8 @@ class SummaryRunner:
         """
         from src.storage.db import db
         from src.project.manager import project_manager
-        from src.config import config as _cfg
         from src.dictionary.corrector import update_dictionary_from_meeting
         from src.dictionary.replacer import apply_corrections
-
-        ai_cfg = _cfg.get("minutes_ai") or {}
-        # 新設定キー auto_dictionary_update を最優先、旧キー auto_correct_dictionary は後方互換
-        flag = ai_cfg.get("auto_dictionary_update")
-        if flag is None:
-            flag = ai_cfg.get("auto_correct_dictionary", True)
-        if not bool(flag):
-            return 0
 
         record = db.get_minutes(minutes_id)
         if record is None or not record.get("project_id"):
@@ -767,34 +1254,68 @@ class SummaryRunner:
             for c in (project.corrections or [])
         ]
 
-        provider_name = str(ai_cfg.get("provider") or "ollama")
         threshold = float(ai_cfg.get("correction_confidence", 0.85))
 
-        result = await update_dictionary_from_meeting(
-            transcript_text,
-            existing_glossary=glossary_terms,
-            existing_corrections=existing_corrections,
-            project_name=project.name,
-            doc_dirs=list(project.doc_dirs),
-            repo_path=project.repo_path,
-            provider_name=provider_name,
-            ai_cfg=ai_cfg,
-            timeout_sec=180,
-            confidence_threshold=threshold,
-        )
+        await self._set_dictionary_stage(minutes_id, "dictionary_reading")
+        started = time.monotonic()
+        extraction_error = None
+        try:
+            result = await update_dictionary_from_meeting(
+                transcript_text,
+                existing_glossary=glossary_terms,
+                existing_corrections=existing_corrections,
+                project_name=project.name,
+                doc_dirs=list(project.doc_dirs),
+                repo_path=project.repo_path,
+                provider_name=provider_name,
+                ai_cfg=ai_cfg,
+                timeout_sec=DICTIONARY_UPDATE_TIMEOUT,
+                confidence_threshold=threshold,
+                on_extracting=lambda: self._set_dictionary_stage(minutes_id, "dictionary_extracting"),
+            )
+        except (SummaryError, TimeoutError) as exc:
+            # 保存済み辞書による補正は、新しい候補を取得できなかった場合も行う。
+            extraction_error = exc
+            result = {"new_glossary": [], "new_corrections": []}
         new_glossary = result["new_glossary"]
         new_pairs = result["new_corrections"]
+        logger.info(
+            "[phase-b] candidates %s elapsed=%.1fs terms=%d corrections=%d",
+            minutes_id, time.monotonic() - started, len(new_glossary), len(new_pairs),
+        )
+        await self._set_dictionary_stage(minutes_id, "dictionary_saving")
+
+        # LLM の待機中に再文字起こしや辞書編集が行われた場合は最新値を使う。
+        latest_record = db.get_minutes(minutes_id)
+        if latest_record is None:
+            return 0
+        latest_segments = latest_record.get("transcript")
+        if isinstance(latest_segments, str):
+            try:
+                latest_segments = json.loads(latest_segments)
+            except Exception:
+                return 0
+        if not isinstance(latest_segments, list):
+            return 0
+        latest_project = project_manager.get(record["project_id"])
+        if latest_project is None:
+            return 0
+        current_corrections = [
+            {"wrong": c.wrong, "correct": c.correct}
+            for c in (latest_project.corrections or [])
+        ]
 
         # ─── transcript への補正適用 ───
-        all_pairs = existing_corrections + [
+        all_pairs = current_corrections + [
             {"wrong": p["wrong"], "correct": p["correct"]} for p in new_pairs
         ]
         replaced_count = 0
         if all_pairs:
-            replaced_segments, replaced_count = apply_corrections(seg_raw, all_pairs)
+            replaced_segments, replaced_count = apply_corrections(latest_segments, all_pairs)
             if replaced_count > 0:
                 try:
-                    db.update_transcript(minutes_id, replaced_segments)
+                    if not db.update_transcript(minutes_id, replaced_segments):
+                        replaced_count = 0
                 except Exception as e:
                     logger.warning("[phase-b] update_transcript failed: %s", e)
                     replaced_count = 0
@@ -809,7 +1330,10 @@ class SummaryRunner:
                 added_term_count = 0
 
                 if new_pairs:
-                    known_pairs = {(c.wrong, c.correct) for c in (project.corrections or [])}
+                    known_pairs = {
+                        (c.wrong, c.correct)
+                        for c in (latest_project.corrections or [])
+                    }
                     additions: list[CorrectionPair] = []
                     for p in new_pairs:
                         key = (p["wrong"], p["correct"])
@@ -817,11 +1341,11 @@ class SummaryRunner:
                             continue
                         additions.append(CorrectionPair(wrong=p["wrong"], correct=p["correct"]))
                     if additions:
-                        update_payload["corrections"] = list(project.corrections or []) + additions
+                        update_payload["corrections"] = list(latest_project.corrections or []) + additions
                         added_pair_count = len(additions)
 
                 if new_glossary:
-                    known_terms = set(project.glossary or [])
+                    known_terms = set(latest_project.glossary or [])
                     additions_g: list[str] = []
                     for g in new_glossary:
                         term = g.get("term", "")
@@ -829,11 +1353,11 @@ class SummaryRunner:
                             additions_g.append(term)
                             known_terms.add(term)
                     if additions_g:
-                        update_payload["glossary"] = list(project.glossary or []) + additions_g
+                        update_payload["glossary"] = list(latest_project.glossary or []) + additions_g
                         added_term_count = len(additions_g)
 
                 if update_payload:
-                    project_manager.update(project.id, ProjectUpdate(**update_payload))
+                    project_manager.update(latest_project.id, ProjectUpdate(**update_payload))
                     logger.info(
                         "[phase-b] project %s updated: +%d glossary, +%d corrections",
                         project.id, added_term_count, added_pair_count,
@@ -860,6 +1384,8 @@ class SummaryRunner:
                 "[phase-b] applied %d replacement(s) on minutes %s",
                 replaced_count, minutes_id,
             )
+        if extraction_error is not None:
+            raise extraction_error
         return replaced_count
 
     def _build_project_context(
@@ -898,7 +1424,7 @@ class SummaryRunner:
 def recover_drafts() -> int:
     """``~/.seam/summary_drafts/{id}.md`` を全件チェックして DB に書き戻す。
 
-    DB の summary が空なら draft で埋める、既に値あれば draft 破棄。
+    DB の summary が空なら draft で埋め、既に値があれば辞書整理を復元する。
 
     Returns:
         リカバリ件数
@@ -926,19 +1452,30 @@ def recover_drafts() -> int:
             continue
 
         existing_summary = str(record.get("summary") or "").strip()
+        runner = get_runner()
+        llm_model = str(record.get("llm_model") or "")
+        provider_name = (
+            llm_model.split(":", 1)[0]
+            if ":" in llm_model
+            else runner.pending_provider(minutes_id)
+        )
         if existing_summary:
-            # 既に summary 入っている → draft破棄
-            try:
-                draft_path.unlink()
-            except Exception:
-                pass
+            # 要約保存後に落ちた場合、このdraftを辞書整理の復元マーカーに使う。
+            if runner.persist_phase_b_intent(minutes_id, provider_name):
+                try:
+                    draft_path.unlink()
+                except Exception:
+                    pass
             continue
 
         # summary 空 → draft で埋める
         try:
             text = draft_path.read_text(encoding="utf-8")
-            db.update_summary(minutes_id, text, llm_model="recovered_draft")
-            draft_path.unlink()
+            if not db.update_summary(minutes_id, text, llm_model="recovered_draft"):
+                logger.warning("[recovery] draft target disappeared: %s", minutes_id)
+                continue
+            if runner.persist_phase_b_intent(minutes_id, provider_name):
+                draft_path.unlink()
             recovered += 1
             logger.info("[recovery] recovered summary draft: %s", minutes_id)
         except Exception as e:
