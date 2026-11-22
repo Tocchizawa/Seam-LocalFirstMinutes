@@ -489,6 +489,7 @@ public struct Workspace: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, compact ? 14 : 33)
+            .padding(.top, 12)
             .padding(.bottom, 24)
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
