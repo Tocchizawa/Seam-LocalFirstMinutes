@@ -25,6 +25,8 @@ private struct WorkspaceTitleBar<Actions: View>: ViewModifier {
     let toggleSidebar: () -> Void
     let actions: Actions
 
+    private var isPreview: Bool { ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" }
+
     private var sidebarButton: some View {
         let label = sidebarVisible ? "プロジェクトパネルを閉じる" : "プロジェクトパネルを開く"
         return Button(action: toggleSidebar) {
@@ -70,7 +72,7 @@ private struct WorkspaceTitleBar<Actions: View>: ViewModifier {
 
     private var barContents: some View {
         HStack(spacing: 12) {
-            sidebarButton
+            if isPreview { sidebarButton }
             heading
             HStack(spacing: 8) { actions }
                 .fixedSize(horizontal: true, vertical: false)
@@ -79,11 +81,10 @@ private struct WorkspaceTitleBar<Actions: View>: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        let isPreview = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
-        return content
+        content
             .safeAreaInset(edge: .top, spacing: 0) {
                 barContents
-                    .padding(.leading, isPreview ? 16 : 87)
+                    .padding(.leading, isPreview ? 16 : 135)
                     .padding(.trailing, 8)
                     .frame(height: 52)
                     .background(Color.seamPanel(for: colorScheme))
@@ -96,6 +97,12 @@ private struct WorkspaceTitleBar<Actions: View>: ViewModifier {
                     }
             }
             .ignoresSafeArea(.container, edges: .top)
+            .toolbar {
+                if !isPreview {
+                    ToolbarItem(placement: .navigation) { sidebarButton }
+                        .sharedBackgroundVisibility(.hidden)
+                }
+            }
     }
 }
 

@@ -106,12 +106,14 @@ private struct SeamWindow: View {
         .preferredColorScheme(appearance == "light" ? .light : (appearance == "dark" ? .dark : nil))
         .frame(minWidth: 770, minHeight: 550)
         .toolbar {
-            // ウィンドウが表示されている間は、起動の状態に関わらず同じ標準ツールバーを使う。
-            ToolbarItem(placement: .navigation) {
-                Color.clear.frame(width: 1, height: 36)
-                    .accessibilityHidden(true)
+            // 起動後は Workspace のボタンがこの位置に入る。
+            if service.session == nil {
+                ToolbarItem(placement: .navigation) {
+                    Color.clear.frame(width: 36, height: 36)
+                        .accessibilityHidden(true)
+                }
+                .sharedBackgroundVisibility(.hidden)
             }
-            .sharedBackgroundVisibility(.hidden)
         }
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
     }
