@@ -46,6 +46,7 @@ struct RecordingMenuPanel: View {
             .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
         }
         .padding(14)
+        .tint(.primary)
         .frame(width: Self.width, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
     }

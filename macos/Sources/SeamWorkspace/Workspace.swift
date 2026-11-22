@@ -108,7 +108,6 @@ public struct Workspace: View {
         if case .settings = page { return true }
         return false
     }
-    private var accent: Color { Color(red: 0.70, green: 0.12, blue: 0.21) }
     private var selectedProject: Project? { projects.first { $0.id == projectID } }
     private var projectName: String { selectedProject?.name ?? "Seam" }
     private var showsSidebar: Bool { sidebarVisible && !readerExpanded && !liveExpanded }
@@ -322,7 +321,7 @@ public struct Workspace: View {
                     list(compact: compact)
                 }
             }
-            .scrollEdgeBar {
+            .safeAreaBar(edge: .top, spacing: 0) {
                 VStack(spacing: 0) {
                     if projectID != nil, case .list = page {
                         searchHeader(compact: compact)
@@ -492,6 +491,7 @@ public struct Workspace: View {
             .padding(.horizontal, compact ? 14 : 33)
             .padding(.bottom, 24)
         }
+        .scrollEdgeEffectStyle(.soft, for: .top)
     }
 
     private var archiveDivider: some View {
@@ -639,7 +639,7 @@ public struct Workspace: View {
         var result = AttributedString()
         for (index, part) in value.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\u{1}" || $0 == "\u{2}" }).enumerated() {
             var token = AttributedString(part)
-            if index.isMultiple(of: 2) == false { token.backgroundColor = accent.opacity(0.13) }
+            if index.isMultiple(of: 2) == false { token.backgroundColor = Color.primary.opacity(0.13) }
             result += token
         }
         return Text(result)

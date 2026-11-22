@@ -206,7 +206,7 @@ app.include_router(util_router)
 @app.on_event("startup")
 async def _recover_summary_drafts() -> None:
     """前回のジョブが DB 反映前に落ちた場合の救済 (~/.seam/summary_drafts/*.md → DB)。"""
-    emit_progress("recovery", "中断された要約ジョブを確認中", 0.86)
+    emit_progress("recovery", "保存されていない要約を確認中", 0.86)
     try:
         from src.summarize.runner import recover_drafts
 
@@ -223,7 +223,7 @@ async def _recover_pending_sessions() -> None:
     セッション復旧は長時間化しうる(長尺音声の再文字起こしなど)ため、
     起動シーケンスをブロックしないようバックグラウンドで実行する。
     """
-    emit_progress("recovery", "未完了の録音セッションを確認中", 0.90)
+    emit_progress("recovery", "保存されていない録音を確認中", 0.90)
     from src.api.recording import recover_pending_sessions_async
 
     async def _run() -> None:
@@ -242,7 +242,7 @@ async def _recover_pending_sessions() -> None:
 @app.on_event("startup")
 async def _start_summary_runner() -> None:
     """要約ジョブの非同期ワーカーを起動。WS broadcasterを注入。"""
-    emit_progress("summary", "要約ワーカーを起動中", 0.94)
+    emit_progress("summary", "要約機能を準備中", 0.94)
     try:
         from src.api.ws import ws_manager
         from src.summarize.runner import get_runner, set_broadcaster
@@ -266,7 +266,7 @@ async def _autostart_ollama() -> None:
         if provider != "ollama" or not auto_start:
             emit_progress("ready", "起動完了", 1.0)
             return
-        emit_progress("ollama", "Ollama を起動中", 0.97)
+        emit_progress("ollama", "要約に使う Ollama を確認中", 0.97)
         from src.summarize.ollama_runtime import ensure_ollama_running
 
         base_url = str(

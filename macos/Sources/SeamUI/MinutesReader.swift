@@ -9,7 +9,6 @@ import SeamCore
 @available(macOS 15.0, *)
 public struct MinutesReader: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Stored private var summaryPosition: Int?
     @Stored private var transcriptPosition: Int?
@@ -69,9 +68,7 @@ public struct MinutesReader: View {
         self.exportNotice = exportNotice
     }
 
-    private var tint: Color {
-        colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
-    }
+    private let tint: Color = .primary
     private var motion: Animation? { animated && !reduceMotion ? SeamMotion.update : nil }
     private var padding: CGFloat { compact ? 14 : 33 }
     private var canCopy: Bool {

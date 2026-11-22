@@ -136,10 +136,6 @@ public struct NativeSettings<Appearance: View>: View {
         self.appearance = appearance
     }
 
-    private var accent: Color {
-        colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
-    }
-
     private var provider: SummaryProvider {
         SummaryProvider(rawValue: editor.document["minutes_ai.provider"]?.text ?? "") ?? .ollama
     }
@@ -296,7 +292,7 @@ public struct NativeSettings<Appearance: View>: View {
             Task { await editor.save() }
         }
         .keyboardShortcut("s")
-        .buttonStyle(SettingsActionStyle(tint: accent))
+        .buttonStyle(SettingsActionStyle())
         .disabled(editor.loading || editor.saving || busy)
     }
 
@@ -602,7 +598,6 @@ public struct NativeSettings<Appearance: View>: View {
     private func flag(_ label: String, _ key: String, fallback: Bool) -> some View {
         SettingsToggleRow(label, isOn: Binding(get: { editor.document[key]?.flag ?? fallback },
                                               set: { editor.set(key, .flag($0)) }))
-            .tint(accent)
     }
 
     private func act(_ operation: @escaping @MainActor (SeamAPI) async throws -> Void) {
