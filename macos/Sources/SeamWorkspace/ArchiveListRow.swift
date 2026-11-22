@@ -4,7 +4,6 @@ import SwiftUI
 @available(macOS 26.0, *)
 struct ArchiveListRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
 
     let title: Text
     let date: String?
@@ -14,17 +13,13 @@ struct ArchiveListRow: View {
     let problem: String?
     let opensDetail: Bool
 
-    private var tint: Color {
-        colorScheme == .dark ? Color(red: 0.51, green: 0.81, blue: 0.75) : Color(red: 0.14, green: 0.38, blue: 0.34)
-    }
-
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: opensDetail ? "doc.text.fill" : "waveform")
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(tint)
+                .foregroundStyle(.primary)
                 .frame(width: 38, height: 38)
-                .background(tint.opacity(0.11), in: .rect(cornerRadius: 10))
+                .background(.primary.opacity(0.07), in: .rect(cornerRadius: 10))
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -88,7 +83,7 @@ struct ArchiveListRow: View {
             }
         }
         .font(.caption.weight(.medium))
-        .foregroundStyle(failed ? Color.orange : tint)
+        .foregroundStyle(failed ? Color.orange : Color.secondary)
         .help(problem ?? label)
     }
 }

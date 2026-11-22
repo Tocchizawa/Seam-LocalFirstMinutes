@@ -101,6 +101,7 @@ private struct SeamWindow: View {
             }
         }
         .environment(\.appUpdateControls, updates.settings)
+        .tint(.primary)
         .animation(reduceMotion ? nil : SeamMotion.update, value: service.session != nil)
         .preferredColorScheme(appearance == "light" ? .light : (appearance == "dark" ? .dark : nil))
         .frame(minWidth: 770, minHeight: 550)

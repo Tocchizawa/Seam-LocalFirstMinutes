@@ -11,7 +11,7 @@ from src.startup_progress import emit
 
 
 def main() -> None:
-    emit("init", "設定と作業環境を読み込み中", 0.60)
+    emit("init", "Seam の設定を読み込み中", 0.60)
     import uvicorn
 
     from src.config import APP_DIR, config

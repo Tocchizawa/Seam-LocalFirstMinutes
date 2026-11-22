@@ -3,6 +3,14 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.2] - 2026-11-22
+
+### Changed
+
+- Redesign the startup screen to put the current setup task first, with an animated indicator for the active stage.
+- Replace the green app accent with neutral colors in light and dark mode.
+- Use the native SwiftUI scroll edge blur behind the minutes list header.
+
 ## [1.0.1] - 2026-11-20
 
 ### Changed

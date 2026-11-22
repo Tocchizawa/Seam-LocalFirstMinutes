@@ -17,25 +17,18 @@ final class LocalBackend: ObservableObject {
         var title: String {
             switch self {
             case .resources: "アプリの確認"
-            case .environment: "実行環境の準備"
-            case .service: "録音サービスの起動"
-            }
-        }
-
-        var symbol: String {
-            switch self {
-            case .resources: "app.badge.checkmark"
-            case .environment: "shippingbox"
-            case .service: "waveform"
+            case .environment: "セットアップ"
+            case .service: "サービスの起動"
             }
         }
     }
 
     struct StartupProgress: Equatable {
         let stage: StartupStage
-        let detail: String
+        let title: String
+        var detail: String? = nil
 
-        static let resources = Self(stage: .resources, detail: "アプリに含まれるファイルを確認しています。")
+        static let resources = Self(stage: .resources, title: "アプリのファイルを確認中")
     }
 
     @Published private(set) var state: State = .preparing(.resources)
@@ -163,9 +156,11 @@ final class LocalBackend: ObservableObject {
         child.standardOutput = logHandle
         child.standardError = logHandle
         let hasEnvironment = files.isExecutableFile(atPath: pythonEnvironment.appendingPathComponent("bin/python").path)
-        var progress = StartupProgress(stage: .environment, detail: hasEnvironment
-            ? "保存済みの実行環境を確認しています。"
-            : "初回起動では、必要に応じてファイルをダウンロードします。")
+        var progress = StartupProgress(
+            stage: .environment,
+            title: hasEnvironment ? "保存済みの実行環境を確認中" : "録音に必要なファイルを準備中",
+            detail: hasEnvironment ? nil : "初回は、必要なファイルのダウンロードに時間がかかることがあります。"
+        )
         state = .preparing(progress)
         try child.run()
         process = child
@@ -179,11 +174,11 @@ final class LocalBackend: ObservableObject {
             var update = progress
             if let bytes = try? Data(contentsOf: progressFile),
                let reported = try? JSONDecoder().decode(BackendProgress.self, from: bytes) {
-                let detail = reported.phase == "ready" ? "録音サービスに接続中" : reported.message
-                update = StartupProgress(stage: .service, detail: detail)
+                let title = reported.phase == "ready" ? "録音サービスに接続中" : reported.message
+                update = StartupProgress(stage: .service, title: title)
             } else if progress.stage == .environment, let startupLog,
-                      let detail = Self.environmentDetail(from: startupLog) {
-                update = StartupProgress(stage: .environment, detail: detail)
+                      let title = Self.environmentTitle(from: startupLog) {
+                update = StartupProgress(stage: .environment, title: title)
             }
             if update != progress {
                 progress = update
@@ -210,7 +205,7 @@ final class LocalBackend: ObservableObject {
         throw Failure(message: "録音サービスが終了しました（終了コード \(child.terminationStatus)）。")
     }
 
-    private static func environmentDetail(from log: FileHandle) -> String? {
+    private static func environmentTitle(from log: FileHandle) -> String? {
         // uv's console messages can add detail during setup. The backend's own
         // progress file is what advances startup to the next stage.
         guard let end = try? log.seekToEnd(), end > 0 else { return nil }
@@ -232,7 +227,7 @@ final class LocalBackend: ObservableObject {
             if line.hasPrefix("Downloaded ") { return "必要なライブラリを準備中" }
             if line.hasPrefix("Prepared ") { return "ライブラリをインストール中" }
             if line.hasPrefix("Installed ") || line.hasPrefix("Audited ") {
-                return "実行環境を確認しました。録音サービスを読み込み中"
+                return "録音サービスを読み込み中"
             }
         }
         return nil

@@ -139,7 +139,7 @@ public struct MinutesAudioBar: View {
     private let tint: Color
     private let motion: Animation?
 
-    public init(playback: MinutesPlayback, compact: Bool = false, tint: Color = .accentColor, motion: Animation? = nil) {
+    public init(playback: MinutesPlayback, compact: Bool = false, tint: Color = .primary, motion: Animation? = nil) {
         self.playback = playback
         self.compact = compact
         self.tint = tint
