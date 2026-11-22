@@ -3,6 +3,17 @@
 All notable changes to Seam are documented here.
 Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.3] - 2026-11-22
+
+### Security
+
+- Update bundled Python dependencies to resolve the current security advisories.
+
+### Fixed
+
+- Keep the project sidebar toggle clickable in the window toolbar.
+- Add space above the first item in the minutes list.
+
 ## [1.0.2] - 2026-11-22
 
 ### Changed
