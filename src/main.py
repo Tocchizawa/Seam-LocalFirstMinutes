@@ -183,6 +183,7 @@ async def _origin_guard_middleware(request: Request, call_next):
 from src.api.projects import router as projects_router
 from src.api.settings import router as settings_router
 from src.api.minutes import router as minutes_router
+from src.api.meeting import router as meeting_router
 from src.api.ws import router as ws_router
 from src.api.devices import router as devices_router
 from src.api.recording import router as recording_router
@@ -194,6 +195,7 @@ from src.api.util import router as util_router
 app.include_router(projects_router)
 app.include_router(settings_router)
 app.include_router(minutes_router)
+app.include_router(meeting_router)
 app.include_router(ws_router)
 app.include_router(devices_router)
 app.include_router(recording_router)

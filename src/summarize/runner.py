@@ -30,10 +30,11 @@ from .base import (
     SummaryResult,
 )
 from .prompts import (
+    build_messages,
     format_transcript_segments,
     is_too_short_for_summary,
 )
-from .registry import get_provider
+from .registry import get_provider, is_known_provider
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,8 @@ class _Job:
     provider_name: str | None     # None ならconfig既定
     enqueued_at: float
     status: JobStatus
+    refresh: bool = False
+    notes_changed: bool = False
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -189,6 +192,7 @@ class SummaryRunner:
         self._statuses: dict[str, JobStatus] = {}
         self._jobs: dict[str, _Job] = {}      # in-flight or queued
         self._durable_jobs: dict[str, str | None] = {}
+        self._durable_refreshes: set[str] = set()
         self._durable_phase_b: dict[str, str | None] = {}
         self._current: _Job | None = None
         self._current_provider: SummarizerProvider | None = None
@@ -261,7 +265,11 @@ class SummaryRunner:
                 return True
             SUMMARY_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
             jobs = [
-                {"minutes_id": minutes_id, "provider": provider}
+                {
+                    "minutes_id": minutes_id,
+                    "provider": provider,
+                    **({"refresh": True} if minutes_id in self._durable_refreshes else {}),
+                }
                 for minutes_id, provider in sorted(self._durable_jobs.items())
             ]
             phase_b = [
@@ -309,6 +317,7 @@ class SummaryRunner:
             minutes_id = str(item.get("minutes_id") or "").strip()
             if not minutes_id or minutes_id in self._jobs:
                 continue
+            refresh = item.get("refresh") is True
             provider = item.get("provider")
             provider_name = str(provider) if provider else None
             try:
@@ -316,9 +325,13 @@ class SummaryRunner:
             except Exception as exc:
                 logger.warning("[summary] queued minute lookup failed (%s): %s", minutes_id, exc)
                 self._durable_jobs[minutes_id] = provider_name
+                if refresh:
+                    self._durable_refreshes.add(minutes_id)
                 continue
-            if record is None or str(record.get("summary") or "").strip():
+            if record is None or (not refresh and str(record.get("summary") or "").strip()):
                 continue
+            if refresh:
+                self._durable_refreshes.add(minutes_id)
 
             status = JobStatus(
                 minutes_id=minutes_id,
@@ -330,6 +343,7 @@ class SummaryRunner:
                 provider_name=provider_name,
                 enqueued_at=time.time(),
                 status=status,
+                refresh=refresh,
             )
             self._durable_jobs[minutes_id] = provider_name
             self._jobs[minutes_id] = job
@@ -373,7 +387,7 @@ class SummaryRunner:
     # ─── public API ────────────────────────────────────
 
     def enqueue(
-        self, minutes_id: str, *, provider_name: str | None = None
+        self, minutes_id: str, *, provider_name: str | None = None, refresh: bool = False
     ) -> bool:
         """要約ジョブを投入する。
 
@@ -381,8 +395,17 @@ class SummaryRunner:
         """
         previous_provider = self._durable_jobs.get(minutes_id)
         had_previous = minutes_id in self._durable_jobs
+        was_refresh = minutes_id in self._durable_refreshes
         self._durable_jobs[minutes_id] = provider_name
+        if refresh:
+            self._durable_refreshes.add(minutes_id)
+        else:
+            self._durable_refreshes.discard(minutes_id)
         if not self._persist_pending_jobs():
+            if was_refresh:
+                self._durable_refreshes.add(minutes_id)
+            else:
+                self._durable_refreshes.discard(minutes_id)
             if had_previous:
                 self._durable_jobs[minutes_id] = previous_provider
             else:
@@ -415,6 +438,7 @@ class SummaryRunner:
             provider_name=provider_name,
             enqueued_at=time.time(),
             status=status,
+            refresh=refresh,
         )
         self._jobs[minutes_id] = job
         self._remember_status(status)
@@ -439,6 +463,23 @@ class SummaryRunner:
                 # 起動時 (event loop 未稼働) は black hole 化、worker 開始後に再 broadcast される
                 pass
         return True
+
+    def refresh_for_notes(self, session_id: str) -> bool:
+        from src.storage.db import db
+
+        record = db.get_minutes_by_session(session_id)
+        if not record:
+            return True  # 録音中のメモは、停止後の初回要約で読み込む。
+        minutes_id = record["id"]
+        job = self._jobs.get(minutes_id)
+        if job is not None and not job.cancel_event.is_set() and job.status.state in ("queued", "running", "done"):
+            if job.status.state != "queued":
+                job.notes_changed = True
+            return True
+        if not (record.get("summary") or "").strip():
+            return True
+        provider = (record.get("llm_model") or "").partition(":")[0]
+        return self.enqueue(minutes_id, provider_name=provider if is_known_provider(provider) else None, refresh=True)
 
     def ensure_queued(self, minutes_id: str) -> bool:
         """実行中のジョブを止めずに、再起動用キューへの保存を確認する。"""
@@ -541,7 +582,7 @@ class SummaryRunner:
         """
         job = self._jobs.get(minutes_id)
         phase_b = self._phase_b_tasks.get(minutes_id)
-        if phase_b is not None and phase_b.done():
+        if phase_b is not None and (phase_b.done() or (job and job.status.state in ("queued", "running"))):
             phase_b = None
         if phase_b is None and job is None:
             return False
@@ -556,6 +597,8 @@ class SummaryRunner:
             if not self._persist_pending_jobs():
                 pending[minutes_id] = provider_name
                 raise OSError("summary cancellation could not be persisted")
+            if pending is self._durable_jobs:
+                self._durable_refreshes.discard(minutes_id)
 
         if phase_b is not None:
             phase_b.cancel()
@@ -602,6 +645,7 @@ class SummaryRunner:
                     self._jobs.pop(job.minutes_id, None)
                     if not self._shutdown:
                         self._durable_jobs.pop(job.minutes_id, None)
+                        self._durable_refreshes.discard(job.minutes_id)
                         self._persist_pending_jobs()
                     job.status.state = "cancelled"
                     job.status.finished_at = time.time()
@@ -667,9 +711,16 @@ class SummaryRunner:
                     self._jobs.pop(job.minutes_id, None)
                     if not self._shutdown:
                         self._durable_jobs.pop(job.minutes_id, None)
+                        self._durable_refreshes.discard(job.minutes_id)
                         self._persist_pending_jobs()
                 if self._statuses.get(job.minutes_id) is job.status:
                     self._remember_status(job.status)
+                if not self._shutdown and not job.cancel_event.is_set() and job.notes_changed:
+                    from src.storage.db import db
+
+                    record = db.get_minutes(job.minutes_id, include_transcript=False)
+                    if record:
+                        self.refresh_for_notes(record["session_id"])
 
     async def _process_job(self, job: _Job) -> None:
         from src.storage.db import db
@@ -718,7 +769,9 @@ class SummaryRunner:
         transcript_text = format_transcript_segments(transcript_segments)
 
         # 2. 文字起こし極小→スキップ
-        if is_too_short_for_summary(transcript_text):
+        previous = str(record.get("summary") or "").strip() if job.refresh else ""
+        if (is_too_short_for_summary(transcript_text) and not previous
+                and not db.meeting_notes(record["session_id"])):
             logger.info("[summary] transcript too short, skipping: %s", minutes_id)
             status.state = "skipped"
             status.finished_at = time.time()
@@ -775,7 +828,7 @@ class SummaryRunner:
             return
 
         # 7. ProjectContext 構築
-        project = self._build_project_context(record.get("project_id"), project_manager)
+        project = build_project_context(record.get("project_id"), project_manager)
 
         # 8. 生成
         self._current_provider = provider
@@ -824,13 +877,68 @@ class SummaryRunner:
                 raise SummaryError(
                     SummaryErrorCode.CANCELLED, "ジョブがキャンセルされました"
                 )
-            result = await provider.generate(
-                transcript_text,
-                project=project,
-                on_token=on_token,
-                on_activity=on_activity,
-                timeout_sec=timeout_sec,
-            )
+            job.notes_changed = False
+            notes = [
+                {"id": note["id"], "start": note["start"], "title": note["title"], "memo": note["body"]}
+                for note in db.meeting_notes(record["session_id"])
+            ]
+            note_context = json.dumps(notes, ensure_ascii=False)
+            if notes:
+                transcript_text += (
+                    "\n\n# 発言に付けられたユーザーメモ (JSON)\n"
+                    "start は録音開始からの秒数。対応する発言と合わせて補足情報として考慮してください。\n"
+                    + note_context
+                )
+
+            system, user = build_messages(transcript_text, project)
+            context = db.summary_context(minutes_id) if previous else {}
+            options: dict[str, Any] = {}
+            if getattr(provider, "supports_resume", False):
+                options["persist_session"] = True
+            if previous:
+                system = context.get("system") or system
+                user = context.get("user") or user
+                update = (
+                    "発言に紐づくユーザーメモが更新されました。以下は現在有効なメモの全件です。"
+                    "一覧から削除されたメモにのみ由来する内容は取り除き、文字起こしに根拠がある記述は保持してください。"
+                    "直前の要約を更新し、差分や説明を付けず、同じ形式で更新後の要約全文を返してください。"
+                    f"\n\n# 現在のメモ (JSON)\n{note_context}"
+                )
+                if context.get("session_id"):
+                    update += f"\n\n# 現在の要約\n{previous}"
+                options["messages"] = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                    {"role": "assistant", "content": previous},
+                    {"role": "user", "content": update},
+                ]
+                if options.get("persist_session") and context.get("session_id"):
+                    options["resume_session"] = context["session_id"]
+
+            async def generate() -> SummaryResult:
+                return await provider.generate(
+                    transcript_text,
+                    project=project,
+                    on_token=on_token,
+                    on_activity=on_activity,
+                    timeout_sec=timeout_sec,
+                    **options,
+                )
+
+            try:
+                result = await generate()
+            except SummaryError as error:
+                # CLI側で古いセッションが消えていても、Seamに残した会話から継続できる。
+                if not options.get("resume_session") or error.code not in (
+                    SummaryErrorCode.UNKNOWN, SummaryErrorCode.NOT_CONFIGURED,
+                ) or job.cancel_event.is_set():
+                    raise
+                options.pop("resume_session")
+                status.partial_text = ""
+                result = await generate()
+            if not result.text.strip():
+                raise SummaryError(SummaryErrorCode.OUTPUT_FORMAT, "要約が空でした")
+            summary_context = {"system": system, "user": user, "session_id": result.session_id}
         except SummaryError as e:
             if e.code == SummaryErrorCode.CANCELLED or job.cancel_event.is_set():
                 status.state = "cancelled"
@@ -879,7 +987,7 @@ class SummaryRunner:
                 _record_codex_usage(minutes_id, result.model, result.usage)
 
         # 9. draft保存 → DB更新 → draft削除
-        await self._save_with_recovery(record, status, result, job)
+        await self._save_with_recovery(record, status, result, job, context=summary_context)
 
     def _mark_failed(
         self, status: JobStatus, code: str, message: str
@@ -913,7 +1021,8 @@ class SummaryRunner:
         })
 
     async def _save_with_recovery(
-        self, record: dict, status: JobStatus, result: SummaryResult, job: _Job
+        self, record: dict, status: JobStatus, result: SummaryResult, job: _Job,
+        *, context: dict | None = None,
     ) -> None:
         """要約結果を draft → DB → draft削除 の順で保存。
 
@@ -938,42 +1047,45 @@ class SummaryRunner:
         if self._jobs.get(minutes_id) is not job or job.cancel_event.is_set():
             return
 
-        DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
         draft_path = DRAFTS_DIR / f"{minutes_id}.md"
+        phase_b_persisted = False
+        if not job.refresh:
+            DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 要約本体 (タイトルセクション無し、概要〜議論ハイライトのみ)
-        summary_body = result.text
-        temporary_draft_path = draft_path.with_suffix(".md.tmp")
-        try:
-            with temporary_draft_path.open("w", encoding="utf-8") as draft_file:
-                draft_file.write(summary_body)
-                draft_file.flush()
-                os.fsync(draft_file.fileno())
-            os.replace(temporary_draft_path, draft_path)
-        except Exception as e:
-            logger.warning("[summary] failed to write draft (%s): %s", minutes_id, e)
+            # 要約本体 (タイトルセクション無し、概要〜議論ハイライトのみ)
+            temporary_draft_path = draft_path.with_suffix(".md.tmp")
             try:
-                temporary_draft_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                with temporary_draft_path.open("w", encoding="utf-8") as draft_file:
+                    draft_file.write(result.text)
+                    draft_file.flush()
+                    os.fsync(draft_file.fileno())
+                os.replace(temporary_draft_path, draft_path)
+            except Exception as e:
+                logger.warning("[summary] failed to write draft (%s): %s", minutes_id, e)
+                try:
+                    temporary_draft_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-        # DB保存より先に後段ジョブを記録する。起動時には要約が空ならこの
-        # intent を捨てて要約ジョブを再開し、要約があれば辞書整理を再開する。
-        phase_b_persisted = self.persist_phase_b_intent(
-            minutes_id, result.provider
-        )
+            # DB保存より先に後段ジョブを記録する。起動時には要約が空ならこの
+            # intent を捨てて要約ジョブを再開し、要約があれば辞書整理を再開する。
+            phase_b_persisted = self.persist_phase_b_intent(
+                minutes_id, result.provider
+            )
 
         new_title: str | None = None
         try:
             saved = db.update_summary(
                 minutes_id,
-                summary_body,
+                result.text,
                 llm_model=f"{result.provider}:{result.model}",
+                context=context,
             )
         except Exception as e:
             logger.exception("[summary] DB update failed: %s", e)
-            self._durable_phase_b.pop(minutes_id, None)
-            self._persist_pending_jobs()
+            if not job.refresh:
+                self._durable_phase_b.pop(minutes_id, None)
+                self._persist_pending_jobs()
             self._mark_failed(
                 status, SummaryErrorCode.UNKNOWN.value, f"DB更新に失敗: {e}"
             )
@@ -981,8 +1093,9 @@ class SummaryRunner:
             return
 
         if not saved:
-            self._durable_phase_b.pop(minutes_id, None)
-            self._persist_pending_jobs()
+            if not job.refresh:
+                self._durable_phase_b.pop(minutes_id, None)
+                self._persist_pending_jobs()
             # The minute may have been deleted while generation was running.
             # Do not report success for a result that was never persisted.
             try:
@@ -998,7 +1111,7 @@ class SummaryRunner:
 
         # 要約DB更新後に永続化を再確認する。保存に失敗した場合は下書きを残し、
         # 起動時に要約が既に存在すれば辞書整理の復元マーカーとして利用する。
-        if not phase_b_persisted:
+        if not job.refresh and not phase_b_persisted:
             phase_b_persisted = self._persist_pending_jobs()
         if phase_b_persisted:
             try:
@@ -1011,7 +1124,7 @@ class SummaryRunner:
 
         ai_cfg = _cfg.get("minutes_ai") or {}
         title_enabled = bool(ai_cfg.get("generate_title", True))
-        if title_enabled:
+        if title_enabled and not job.refresh:
             try:
                 # 復元用: 大半の provider に generate_title が実装されてなければ skip
                 provider_obj = self._current_provider
@@ -1034,7 +1147,7 @@ class SummaryRunner:
                             format_transcript_segments(seg_raw or []),
                         )
 
-                    project_now = self._build_project_context(
+                    project_now = build_project_context(
                         record_now.get("project_id") if record_now else None,
                         __import__("src.project.manager", fromlist=["project_manager"]).project_manager,
                     )
@@ -1102,6 +1215,8 @@ class SummaryRunner:
         # transcript と glossary/docs を LLM で照合し、新規 glossary + 誤転写ペアを発見。
         # ここを await しないことで、UI への "summary_done" は即時届く。
         minutes_id = status.minutes_id
+        if job.refresh:
+            return
         previous_phase_b = self._phase_b_tasks.get(minutes_id)
         if previous_phase_b is not None and not previous_phase_b.done():
             return
@@ -1388,35 +1503,35 @@ class SummaryRunner:
             raise extraction_error
         return replaced_count
 
-    def _build_project_context(
-        self, project_id: str | None, project_manager: Any
-    ) -> ProjectContext | None:
-        if not project_id:
-            return None
-        try:
-            project = project_manager.get(project_id)
-        except Exception:
-            return None
-        if project is None:
-            return None
-        # project は Pydantic Model (Project)
-        members_raw = getattr(project, "members", []) or []
-        members: list[dict[str, str]] = []
-        for m in members_raw:
-            name = getattr(m, "name", "") if not isinstance(m, dict) else m.get("name", "")
-            role = getattr(m, "role", "") if not isinstance(m, dict) else m.get("role", "")
-            if name:
-                members.append({"name": str(name), "role": str(role or "")})
-        glossary = list(getattr(project, "glossary", []) or [])
-        repo_path = getattr(project, "repo_path", None)
-        doc_dirs = getattr(project, "doc_dirs", []) or []
-        return ProjectContext(
-            name=str(getattr(project, "name", "") or ""),
-            members=members,
-            glossary=[str(g) for g in glossary if g],
-            repo_path=str(repo_path) if repo_path else None,
-            doc_dirs=[str(d) for d in doc_dirs if d],
-        )
+def build_project_context(
+    project_id: str | None, project_manager: Any
+) -> ProjectContext | None:
+    if not project_id:
+        return None
+    try:
+        project = project_manager.get(project_id)
+    except Exception:
+        return None
+    if project is None:
+        return None
+    # project は Pydantic Model (Project)
+    members_raw = getattr(project, "members", []) or []
+    members: list[dict[str, str]] = []
+    for m in members_raw:
+        name = getattr(m, "name", "") if not isinstance(m, dict) else m.get("name", "")
+        role = getattr(m, "role", "") if not isinstance(m, dict) else m.get("role", "")
+        if name:
+            members.append({"name": str(name), "role": str(role or "")})
+    glossary = list(getattr(project, "glossary", []) or [])
+    repo_path = getattr(project, "repo_path", None)
+    doc_dirs = getattr(project, "doc_dirs", []) or []
+    return ProjectContext(
+        name=str(getattr(project, "name", "") or ""),
+        members=members,
+        glossary=[str(g) for g in glossary if g],
+        repo_path=str(repo_path) if repo_path else None,
+        doc_dirs=[str(d) for d in doc_dirs if d],
+    )
 
 
 # ─── 起動時リカバリ ────────────────────────────────────

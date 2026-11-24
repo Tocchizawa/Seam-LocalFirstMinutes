@@ -4,14 +4,25 @@ import SwiftUI
 /// スクロールバーを内容に重ねて表示し、表示切り替えで本文の幅が変わらないようにする。
 public struct SeamScrollView<Content: View>: View {
     private let axes: Axis.Set
+    private let indicatorInset: CGFloat
     private let content: () -> Content
 
-    public init(_ axes: Axis.Set = .vertical, @ViewBuilder content: @escaping () -> Content) {
+    public init(_ axes: Axis.Set = .vertical, indicatorInset: CGFloat = 0,
+                @ViewBuilder content: @escaping () -> Content) {
         self.axes = axes
+        self.indicatorInset = indicatorInset
         self.content = content
     }
 
-    public var body: some View {
+    @ViewBuilder public var body: some View {
+        if #available(macOS 14.0, *), indicatorInset > 0 {
+            scrollView.contentMargins(.trailing, indicatorInset, for: .scrollIndicators)
+        } else {
+            scrollView
+        }
+    }
+
+    private var scrollView: some View {
         ScrollView(axes) {
             content()
                 .background(alignment: .topLeading) {

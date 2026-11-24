@@ -7,9 +7,14 @@ import SwiftUI
 struct CapturePane: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("meetingChatWidth") private var chatWidth = 0.0
     @State private var microphoneSettingsOpen = false
+    @StateObject private var notebook = MeetingNotes()
+    @State private var transcriptQuestion: MeetingTranscriptQuestion?
+    @State private var jump: (id: UUID, time: Double)?
     @ObservedObject var session: WorkspaceSession
     @Binding var expanded: Bool
+    @Binding var chatOpen: Bool
 
     private var transition: Animation? { reduceMotion ? nil : SeamMotion.update }
     private var red: Color {
@@ -18,48 +23,89 @@ struct CapturePane: View {
     }
 
     var body: some View {
-        // 画面の間隔や左右余白は VStack spacing / padding の値で調整する。
         if let capture = session.capture {
-            VStack(spacing: 16) {
-                if let reminder = session.idleReminder, capture.phase == .running {
-                    HStack(spacing: 8) {
-                        Label("\(reminder.silentForSec)秒間、音声入力がありません", systemImage: "bell")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button {
-                            session.idleReminder = nil
-                        } label: {
-                            Image(systemName: "xmark")
-                                .frame(width: 28, height: 28)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("録音の通知を閉じる")
-                    }
-                    .font(.callout)
-                    .padding(.leading, 12)
-                    .padding(.trailing, 3)
-                    .padding(.vertical, 3)
-                    .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 9))
-                }
-                CaptureTranscript(rows: session.transcript.segments + session.transcript.draftSegments,
-                                  lastFinalizedStart: session.transcript.segments.last?.start,
-                                  expanded: expanded, deferred: capture.deferred, tint: red)
-                    .scrollEdgeBar { header(capture) }
-
-                ZStack(alignment: .bottom) {
-                    CaptureWaveform(meter: session.audioMeter, tint: red, running: capture.phase == .running)
-                        .frame(height: expanded ? 100 : 82)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-
-                    transport(capture)
+            MeetingSplitView(showing: chatOpen && capture.id != nil, preferredWidth: $chatWidth) {
+                transcriptArea(capture)
+            } side: { _ in
+                if let id = capture.id {
+                    let inProgress = capture.phase == .running || capture.phase == .paused
+                    MeetingChatPanel(api: session.api, session: id, showsQuickQuestions: inProgress,
+                                     transcriptQuestion: $transcriptQuestion, jump: { jump = (UUID(), $0) }, close: { chatOpen = false })
                 }
             }
-            .padding(.horizontal, expanded ? 34 : 19)
-            .padding(.bottom, 19)
-            .frame(maxWidth: expanded ? 850 : .infinity, maxHeight: .infinity)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .task(id: "\(capture.id ?? ""):\(session.meetingNotesRevision):\(session.connected)") {
+                if let id = capture.id {
+                    await notebook.load(via: session.api, session: id)
+                }
+            }
+            .sheet(item: $notebook.editor) { editing in
+                if let id = capture.id {
+                    MeetingNoteEditor(editing: editing) { title, body in
+                        try await notebook.save(editing, title: title, body: body, via: session.api, session: id)
+                    }
+                }
+            }
+            .alert("メモ", isPresented: Binding(
+                get: { notebook.problem != nil },
+                set: { if !$0 { notebook.problem = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(notebook.problem ?? "")
+            }
         }
+    }
+
+    private func transcriptArea(_ capture: WorkspaceSession.Capture) -> some View {
+        VStack(spacing: 16) {
+            if let reminder = session.idleReminder, capture.phase == .running {
+                HStack(spacing: 8) {
+                    Label("\(reminder.silentForSec)秒間、音声入力がありません", systemImage: "bell")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        session.idleReminder = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("録音の通知を閉じる")
+                }
+                .font(.callout)
+                .padding(.leading, 12)
+                .padding(.trailing, 3)
+                .padding(.vertical, 3)
+                .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 9))
+            }
+            let confirmed = session.transcript.segments
+            CaptureTranscript(rows: confirmed + session.transcript.draftSegments,
+                              lastFinalizedStart: confirmed.last?.start,
+                              expanded: expanded, deferred: capture.deferred, tint: red,
+                              notes: notebook.byStart(in: confirmed), jump: jump,
+                              editNote: { row, note in notebook.editor = .init(start: row.start, note: note) },
+                              removeNote: { note in
+                                  guard let id = capture.id else { return }
+                                  Task { await notebook.delete(note, via: session.api, session: id) }
+                              }, askChat: { row in
+                                  chatOpen = true
+                                  transcriptQuestion = .init(start: row.start)
+                              })
+                .scrollEdgeBar { header(capture) }
+
+            ZStack(alignment: .bottom) {
+                CaptureWaveform(meter: session.audioMeter, tint: red, running: capture.phase == .running)
+                    .frame(height: expanded ? 100 : 82)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+
+                transport(capture)
+            }
+        }
+        .padding(.horizontal, expanded ? 34 : 19)
+        .padding(.bottom, 19)
+        .frame(maxWidth: expanded ? 850 : .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // 録音状態と文字起こしの全体表示切り替えを置く上部バー。
@@ -80,11 +126,19 @@ struct CapturePane: View {
                     .accessibilityAddTraits(.isHeader)
             }
             Spacer()
-            let label = expanded ? "並行表示に戻す" : "文字起こしを全体表示"
-            control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+            let transcriptOnly = expanded && !chatOpen
+            let label = transcriptOnly ? "並行表示に戻す" : "文字起こしを全体表示"
+            control(transcriptOnly ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                     name: label, size: 32) {
-                expanded.toggle()
+                expanded = !transcriptOnly
+                chatOpen = false
             }
+            control(chatOpen ? "bubble.left.fill" : "bubble.left",
+                    name: chatOpen ? "会議チャットを閉じる" : "会議チャットを開く", size: 32) {
+                chatOpen.toggle()
+            }
+            .accessibilityAddTraits(chatOpen ? .isSelected : [])
+            .disabled(capture.id == nil)
         }
         .padding(.top, 26)
         .padding(.bottom, 12)
@@ -139,7 +193,7 @@ struct CapturePane: View {
                             .frame(width: 22, height: 39)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(SeamToolbarButtonStyle(active: microphoneSettingsOpen))
                     .accessibilityLabel("マイクの入力設定")
                     .help("マイクの入力設定")
                     .popover(isPresented: $microphoneSettingsOpen, arrowEdge: .top) {
@@ -190,14 +244,10 @@ private struct MicrophoneInputSettings: View {
             Text("マイク入力").font(.headline).accessibilityAddTraits(.isHeader)
 
             if let devices, let capture = session.capture {
-                Picker("入力元", selection: Binding(get: { session.capture?.microphoneUID }, set: select)) {
-                    Text("システムの既定").tag(nil as String?)
-                    ForEach(devices) { device in Text(device.name).tag(Optional(device.uid)) }
-                    if let selected = capture.microphoneUID, !devices.contains(where: { $0.uid == selected }) {
-                        Text(capture.microphoneName ?? "接続されていないマイク").tag(Optional(selected)).disabled(true)
-                    }
-                }
-                .pickerStyle(.menu)
+                SeamDropdownSelection("入力元",
+                    selection: Binding(get: { session.capture?.microphoneUID }, set: select),
+                    options: [(nil, "システムの既定")] + devices.map { (Optional($0.uid), $0.name) },
+                    unknown: capture.microphoneName ?? "接続されていないマイク")
                 .disabled(session.switchingMicrophone || session.isChanging || capture.phase == .stopping)
                 if session.switchingMicrophone {
                     Text("マイクを切り替え中…").font(.caption).foregroundStyle(.secondary)
@@ -259,16 +309,22 @@ private struct CaptureTranscript: View {
     @Stored private var scrolling = false
     @Stored private var nearEnd = true
     @Stored private var firstVisible: Double?
+    @Stored private var highlightedStart: Double?
 
     let rows: [TranscriptSegment]
     let lastFinalizedStart: Double?
     let expanded: Bool
     let deferred: Bool
     let tint: Color
+    let notes: [Double: MeetingNote]
+    let jump: (id: UUID, time: Double)?
+    let editNote: (TranscriptSegment, MeetingNote?) -> Void
+    let removeNote: (MeetingNote) -> Void
+    let askChat: (TranscriptSegment) -> Void
 
     var body: some View {
         // 新しい発話を自動追従する。手動でスクロールした場合は位置を保つ。
-        SeamScrollView {
+        SeamScrollView(indicatorInset: 6) {
             LazyVStack(alignment: .leading, spacing: expanded ? 22 : 16) {
                 if rows.isEmpty {
                     Text(deferred ? "確定版は録音後に作成します" : "発話を待機中")
@@ -277,9 +333,12 @@ private struct CaptureTranscript: View {
                 }
                 ForEach(rows) { row in
                     let isDraft = row.start > (lastFinalizedStart ?? -.infinity)
+                    let note = notes[row.start]
+                    let highlighted = row.start == highlightedStart
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 8) {
                             Text(minutesTime(row.start)).monospacedDigit()
+                            if let note { MeetingNoteBadge(note: note) }
                         }
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(row.id == rows.last?.id ? tint : .secondary)
@@ -291,6 +350,25 @@ private struct CaptureTranscript: View {
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.accentColor.opacity(highlighted ? 0.15 : 0), in: .rect(cornerRadius: 8))
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .frame(width: 2)
+                            .padding(.leading, 2)
+                            .padding(.vertical, 6)
+                            .opacity(highlighted ? 1 : 0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                    .padding(-8)
+                    .contentShape(Rectangle())
+                    .transcriptNoteMenu(text: row.text, note: note, draft: isDraft,
+                                        edit: { editNote(row, note) }, remove: {
+                                            if let note { removeNote(note) }
+                                        }, askChat: { askChat(row) })
                     .id(row.id)
                 }
             }
@@ -318,6 +396,18 @@ private struct CaptureTranscript: View {
         }
         .onChange(of: rows.last) {
             if following && !scrolling { jumpToEnd() }
+        }
+        .task(id: jump?.id) {
+            guard let jump, let index = rows.transcriptIndex(at: jump.time) else { return }
+            following = false
+            let start = rows[index].id
+            withAnimation(reduceMotion ? nil : SeamMotion.update) {
+                highlightedStart = start
+                position.scrollTo(id: start, anchor: .top)
+            }
+            do { try await Task.sleep(for: .seconds(1.4)) }
+            catch { return }
+            withAnimation(reduceMotion ? nil : SeamMotion.update) { highlightedStart = nil }
         }
         .onChange(of: expanded) {
             if following { jumpToEnd() }

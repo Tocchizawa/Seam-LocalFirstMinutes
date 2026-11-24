@@ -1,451 +1,321 @@
-# Changelog
+# 変更履歴
 
-All notable changes to Seam are documented here.
-Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
+Seam の主な変更を記録する。
+[Keep a Changelog](https://keepachangelog.com/) の形式に従う。
+
+## [1.0.4] - 2026-11-24
+
+### 追加
+
+- 文字起こしの発言にメモとラベルを追加し、会議チャットから発言の内容を質問できる機能を追加。
+- 議事録に紐づく複数のチャットスレッドと、プロジェクト資料を含む会議コンテキストを追加。
+
+### 改善
+
+- メモや文字起こしの更新を、Codex、Claude、OpenAI、Ollama の要約に反映。
+- チャット、ラベル、履歴、設定、プロジェクト編集の操作性と表示を改善。
+- サイドパネルの幅変更、対象発言への移動とハイライト、コンテキストメニューに対応。
 
 ## [1.0.3] - 2026-11-22
 
-### Security
+### セキュリティ
 
-- Update bundled Python dependencies to resolve the current security advisories.
+- 現在のセキュリティ勧告に対応するため、同梱する Python 依存関係を更新。
 
-### Fixed
+### 修正
 
-- Keep the project sidebar toggle clickable in the window toolbar.
-- Add space above the first item in the minutes list.
+- ウィンドウツールバーのプロジェクトサイドバー切り替えボタンをクリックできるよう修正。
+- 議事録一覧の先頭項目の上に余白を追加。
 
 ## [1.0.2] - 2026-11-22
 
-### Changed
+### 変更
 
-- Redesign the startup screen to put the current setup task first, with an animated indicator for the active stage.
-- Replace the green app accent with neutral colors in light and dark mode.
-- Use the native SwiftUI scroll edge blur behind the minutes list header.
+- 起動画面で現在のセットアップ作業を優先して表示し、進行中の段階をアニメーションで示すよう変更。
+- ライトモードとダークモードのアプリアクセントカラーを緑からニュートラルカラーへ変更。
+- 議事録一覧ヘッダーの背後に SwiftUI 標準のスクロールエッジぼかしを使用。
 
 ## [1.0.1] - 2026-11-20
 
-### Changed
+### 追加
 
-- Show the current startup stage with animation and report runtime setup activity when it is available.
-- Redesign the minutes list with recording times, durations, and inline processing status.
-- Add a context menu for editing, moving, copying, and deleting minutes from the list.
-- Animate the header title and count when switching projects, and support native window zoom by double-clicking the header.
+- 議事録の編集、移動、複製、削除を行うコンテキストメニューを追加。
+- ヘッダーのダブルクリックによる macOS 標準のウィンドウ拡大に対応。
 
-### Fixed
+### 変更
 
-- Keep the project panel button responsive when clicking it to activate the window.
-- Open minutes on the first click while searching and keep the search filter when the field loses focus.
+- 起動中のセットアップ段階をアニメーション付きで表示し、取得できる場合は実行時の進捗も表示。
+- 録音時刻、録音時間、処理状況を一覧に表示するよう議事録一覧を刷新。
+- プロジェクト切り替え時にヘッダーのタイトルと件数をアニメーション表示。
+
+### 修正
+
+- ウィンドウをアクティブにした際もプロジェクトパネルのボタンを操作できるよう修正。
+- 検索中も最初のクリックで議事録を開けるよう修正し、検索欄からフォーカスが外れても検索条件を維持。
+
+## [1.0.0] - 2026-11-20
+
+### 追加
+
+- React/Tauri の画面を SwiftUI のネイティブ macOS アプリへ置き換え。
+- 録音中と保存済み音声の文字起こしに Apple Speech を採用し、Mac 上で処理。
+- 録音、議事録、プロジェクト、検索、要約設定をネイティブの作業画面に統合。
+- 署名・公証済み DMG とアプリ内アップデートに対応。
+
+### 変更
+
+- Apple Silicon と macOS 26 以降を対象とするネイティブアプリとして配布。
+- 既存の議事録、音声、`~/.seam` の設定を引き続き利用できるよう移行。
 
 ## [0.2.3] - 2026-09-15
 
-### Added
+### 追加
 
-- Show Codex CLI activity and token usage in Seam while a summary is running.
-- Add Codex reasoning-effort settings and 30-day usage totals to the settings screen.
+- 要約中に Codex CLI の動作状況とトークン使用量を表示。
+- 設定画面に Codex の推論レベル設定と過去30日間の使用量を追加。
 
-### Changed
+### 変更
 
-- Run Seam-launched Codex summaries with structured JSONL output.
-- Avoid forcing Codex to read entire project reference documents before summarizing.
-
-### Tests
-
-- `tests/test_cli_providers.py` (42 passed)
-- `tests/test_summarize_foundation.py` (69 passed)
-- `pnpm build`
+- Seam から起動する Codex の要約処理で構造化 JSONL 出力を使用。
+- 要約時に Codex がプロジェクトの参照資料全体を読み込まなくてもよいよう変更。
 
 ## [0.2.2] - 2026-08-14
 
-### Fixed
+### 修正
 
-- Keep the Whisper worker running when macOS rejects the optional process-priority change.
-- Fix playback seeking for legacy FLAC recordings and reduce false-positive transcript filtering.
-
-### Tests
-
-- `python -m unittest tests/test_resource_monitor.py tests/test_streaming_model_loader.py tests/test_streaming_generation.py`
+- macOS が任意のプロセス優先度変更を拒否した場合も Whisper ワーカーが動作し続けるよう修正。
+- 旧形式の FLAC 録音での再生位置移動と、文字起こしの誤検出を修正。
 
 ## [0.2.1] - 2026-08-13
 
-This release stabilizes recording startup and keeps the Whisper model controls compact.
+### 変更
 
-### Changed
+- 設定画面のモデル一覧をコンパクトにし、録音ツールバーに重複していたダウンロード状況を削除。
 
-- Keep the settings model list compact and remove duplicate download status from the recording toolbar.
+### 修正
 
-### Fixed
-
-- Keep the Whisper resource lease until recording cleanup when a streaming worker is restarted unexpectedly.
-- Prevent recording startup from getting stuck while the Whisper worker is being recovered.
-
-### Tests
-
-- `uv run python -m unittest tests.test_streaming_generation tests.test_resource_monitor`
-- `pnpm build`
-- Signed and notarized macOS `.app` / DMG build
+- ストリーミングワーカーが予期せず再起動した場合も、録音の後処理が終わるまで Whisper のリソース確保を維持。
+- Whisper ワーカーの復旧中に録音開始が停止したままになる問題を修正。
 
 ## [0.2.0-beta.16] - 2026-08-07
 
-This beta improves Whisper model management and makes model preparation visible during recording start.
+### 変更
 
-### Changed
+- Whisper の個別モデル選択欄を、選択可能なコンパクトなモデル一覧に置き換え。
+- 設定画面と録音画面にモデルのダウンロード進捗、割合、速度を表示。
 
-- Replace the separate Whisper model selector with a compact selectable model list.
-- Show download spinner, percentage, and speed in the settings and recording views.
+### 修正
 
-### Fixed
-
-- Reuse valid cached Whisper snapshots even when the Hugging Face `refs/main` file is missing.
-- Keep the model download status visible while recording startup is still in progress.
-- Avoid showing a fresh download state when the selected model is already cached.
-
-### Tests
-
-- `uv run python -m unittest tests.test_model_management tests.test_streaming_model_loader tests.test_model_loader`
-- `pnpm --dir gui build`
-- `python3 -m py_compile src/transcribe/streaming.py`
+- Hugging Face の `refs/main` ファイルがなくても、有効な Whisper のキャッシュを再利用。
+- 録音開始処理中もモデルのダウンロード状況を表示。
+- 選択済みモデルがキャッシュされている場合に、新しいダウンロード状態を表示しないよう修正。
 
 ## [0.2.0-beta.15] - 2026-08-06
 
-This beta fixes downloading and loading the `large-v3-turbo` Whisper model.
+### 修正
 
-### Fixed
-
-- Accept Hugging Face Whisper snapshots that use `weights.safetensors` as well as `weights.npz`.
-- Report both supported weight formats when a model snapshot is invalid.
-
-### Tests
-
-- `PYTHONPATH=. ./.venv/bin/python -m unittest tests.test_model_management tests.test_model_loader tests.test_streaming_model_loader`
-- `bash scripts/oss_preflight.sh`
-- Tauri smoke build without bundling
+- `weights.safetensors` または `weights.npz` を使う Hugging Face Whisper スナップショットに対応。
+- モデルのスナップショットが無効な場合、対応する両方の重み形式をエラーに表示。
 
 ## [0.2.0-beta.14] - 2026-08-06
 
-This beta adds on-demand Whisper model management and download progress.
+### 追加
 
-### Added
+- 対応する Whisper モデルのダウンロードと削除を行う設定項目を追加。
+- 設定画面と録音開始処理中に、バイト単位のモデルダウンロード進捗を表示。
+- モデル一覧、ダウンロード、削除の API を追加。
 
-- Add settings controls to download and delete supported Whisper models.
-- Show byte-level model download progress in settings and while recording starts.
-- Add model catalog, download, and delete APIs.
+### 変更
 
-### Changed
-
-- Share the Hugging Face cache and download state between settings and recording.
-- Remove the unused log-based aggregate download-progress parser.
-
-### Tests
-
-- `./.venv/bin/python -m unittest tests.test_model_management tests.test_model_loader tests.test_streaming_model_loader`
-- `pnpm build`
-- Tauri smoke build without bundling
+- 設定画面と録音処理で Hugging Face のキャッシュとダウンロード状況を共有。
+- 使用されていないログ集計型のダウンロード進捗パーサーを削除。
 
 ## [0.2.0-beta.13] - 2026-08-06
 
-This beta reduces recording storage and local AI resource contention, and gives Codex CLI connection checks enough startup time on macOS.
+### 追加
 
-### Added
+- Whisper と要約処理に、CPU、メモリ、プロセス優先度、ローカルモデル連携の制御を追加。
+- 未保存変更の確認機能を備えた、設定画面下部に固定表示する保存フッターを追加。
+- 診断用の実行時リソース情報を追加。
 
-- Add CPU, memory, process-priority, and local-model coordination controls for Whisper and summary processing.
-- Add a sticky settings save footer with unsaved-change confirmation.
-- Add runtime resource snapshots for diagnostics.
+### 変更
 
-### Changed
-
-- Save new mixed recordings as 16 kHz mono FLAC and stop generating a redundant playback WAV.
-- Prefer canonical FLAC for playback and recovery while retaining legacy WAV compatibility.
-- Load slower settings data only when its category is opened.
-- Increase the Codex CLI connection-test timeout from 12 to 30 seconds and migrate the previous default.
-
-### Tests
-
-- `./scripts/oss_preflight.sh`
-- `PYTHONPATH=. ./.venv/bin/python tests/test_summarize_foundation.py`
-- `PYTHONPATH=. ./.venv/bin/python tests/test_cli_providers.py`
-- `PYTHONPATH=. ./.venv/bin/python tests/test_recording_pipeline_failures.py`
-- `PYTHONPATH=. ./.venv/bin/python tests/test_resource_monitor.py`
-- Signed and notarized macOS `.app` / DMG build
+- 新規のミックス録音を 16 kHz モノラル FLAC で保存し、重複する再生用 WAV の生成を廃止。
+- 旧 WAV 形式との互換性を保ちつつ、再生と復旧では標準形式の FLAC を優先。
+- 読み込みに時間がかかる設定データは、該当カテゴリを開いたときに読み込むよう変更。
+- Codex CLI の接続テストのタイムアウトを12秒から30秒に延長し、従来の既定値も移行。
 
 ## [0.2.0-beta.12] - 2026-08-06
 
-This beta improves recording controls and keeps ScreenCaptureKit internal audio capture recoverable across display-idle sleep and OS-initiated stream stops.
+### 追加
 
-### Added
+- 話者分離、カスタム要約プロンプト、文字起こしのスロットリング、終了確認、完了時のネイティブ通知の設定を追加。
+- ストリームエラー、取得バイト数、経過時間、再起動理由、復旧状況を記録する ScreenCaptureKit 診断情報を追加。
 
-- Add settings for speaker diarization, custom summary prompts, transcription throttling, quit confirmation, and native completion notifications.
-- Add structured ScreenCaptureKit diagnostics for stream errors, captured bytes, elapsed duration, restart reasons, and recovery state.
+### 修正
 
-### Fixed
-
-- Prevent display-idle sleep while internal audio recording is active.
-- Recreate the same ScreenCaptureKit capture path after stream stops, sidecar exits, raw-byte stalls, or a silent tail after valid audio.
-- Preserve every captured RAW segment and insert silence only for the measured recovery gap.
-- Wait for the display capture source to return without consuming the recovery budget, while limiting consecutive non-display restart failures.
-- Avoid repeated silent-tail restarts until the recreated stream has captured new non-silent audio.
-- Use `Seam Setup` as the DMG volume name to avoid macOS mount-path conflicts.
-
-### Tests
-
-- `./scripts/oss_preflight.sh`
-- `uv run python tests/test_system_capture_failures.py` (27 tests)
-- `uv run python tests/test_recorder_preflight.py` (11 tests)
-- `uv run python tests/test_recording_pipeline_failures.py` (6 tests)
-- `PYTHONPATH=. uv run python tests/test_audio_leveling.py` (3 tests)
-- `uv run python tests/test_streaming_generation.py` (3 tests)
-- `cargo test --manifest-path gui/src-tauri/Cargo.toml -- --nocapture` (3 tests)
-- Objective-C sidecar compile with `-Wall -Wextra -Werror`
-- Target PR: [#82](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/82)
+- 内部音声の録音中に、ディスプレイのアイドルスリープが発生しないよう修正。
+- ストリーム停止、サイドカー終了、データ停滞、有効な音声の後の無音区間から ScreenCaptureKit のキャプチャを復旧。
+- 取得済みの RAW 音声区間をすべて保持し、計測した復旧時間分だけ無音を挿入。
+- ディスプレイのキャプチャソース復帰を待つ時間を復旧予算から除外し、その他の原因による連続失敗は制限。
+- 再作成したストリームで新しい非無音音声を取得するまで、無音末尾による再起動を繰り返さないよう修正。
+- macOS のマウントパス競合を避けるため、DMG のボリューム名を `Seam Setup` に変更。
 
 ## [0.2.0-beta.11] - 2026-07-13
 
-This beta release replaces the internal system audio capture path with ScreenCaptureKit and removes the previous Core Audio Tap fallback paths.
+### 変更
 
-### Fixed
+- 内部システム音声のキャプチャを ScreenCaptureKit のみに統一し、Core Audio Tap の代替経路を廃止。
+- ネイティブ `audio-capture` サイドカーが、ScreenCaptureKit の音声をメタデータ付きのモノラル `f32le` RAW PCM として出力。
+- ScreenCaptureKit のみを使う内部音声キャプチャに合わせ、関連ドキュメントと利用可否判定を更新。
+- 配布用サイドカーに ScreenCaptureKit、CoreMedia、CoreGraphics、AppKit、CoreAudio、AudioToolbox の各フレームワークを同梱。
 
-- Use ScreenCaptureKit as the only internal system audio capture backend.
-- Fail recording startup when requested internal audio cannot start, instead of continuing as a microphone-only recording.
-- Detect recordings where ScreenCaptureKit writes raw bytes for the full duration but produces only silence.
-- Reject removed backend modes such as `coreaudio_tap`, `tap`, and `blackhole`.
+### 修正
 
-### Changed
-
-- Update the native `audio-capture` sidecar to write ScreenCaptureKit audio as mono `f32le` raw PCM with metadata.
-- Update internal audio documentation and availability checks to describe ScreenCaptureKit-only capture.
-- Bundle the native sidecar with ScreenCaptureKit, CoreMedia, CoreGraphics, AppKit, CoreAudio, and AudioToolbox frameworks.
-
-### Tests
-
-- `uv run python tests/test_system_capture_failures.py`
-- `uv run python tests/test_recorder_preflight.py`
-- `uv run python tests/test_recording_pipeline_failures.py`
-- `PYTHONPATH=. uv run python tests/test_audio_leveling.py`
-- `uv run python tests/test_audio_devices.py`
-- `uv run python -m py_compile src/api/recording.py src/audio/recorder.py src/audio/system_capture.py src/config.py src/api/devices.py tests/test_system_capture_failures.py tests/test_recorder_preflight.py tests/test_recording_pipeline_failures.py tests/test_audio_leveling.py tests/test_audio_devices.py`
-- `xcrun clang ... sidecar/audio-capture/Sources/main.m -o /tmp/seam-audio-capture-test`
-- `cargo check --manifest-path gui/src-tauri/Cargo.toml`
-- `pnpm --dir gui build`
-- `pnpm build`
-- Target PR: [#75](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/75)
+- 要求された内部音声を開始できない場合、マイク音声のみで録音を続けず、録音開始を失敗として扱う。
+- ScreenCaptureKit が録音時間中に RAW データを書き込んでも、音声が無音になる問題を検出。
+- 廃止済みの `coreaudio_tap`、`tap`、`blackhole` などのバックエンド指定を拒否。
 
 ## [0.2.0-beta.10] - 2026-07-09
 
-スプラッシュ画面の最初に起動時アップデート確認を挟み、自動アップデートを許可している場合は通常起動前に更新を適用する beta リリース。
+### 変更
 
-### Fixed
+- 起動時の更新確認と自動更新の判断が終わるまで、バックエンド起動と通常 UI の初期化を待機。
+- 起動時にバックエンド API を呼び出さず、Tauri 側で `~/.seam/config.yaml` の `app_update` 設定を読み込み。
+- 更新確認のみを有効にしている場合、通常起動後に設定画面を案内する通知を表示。
+- 自動更新に失敗した場合、スプラッシュ画面に理由を簡潔に表示してから通常起動を継続。
 
-- 起動時アップデート確認がバックエンド起動後に走っていたため、最初の読み込み画面で更新処理が見えない問題を修正
-- `auto_install_on_startup=true` の場合、スプラッシュ画面上で更新確認、ダウンロード、インストール、再起動まで進むように修正
+### 修正
 
-### Changed
-
-- 起動時アップデート確認または自動更新の継続判断が終わるまで、バックエンド起動と通常 UI 初期化を待機するように変更
-- 起動直後に backend API を呼ばずに `~/.seam/config.yaml` の `app_update` 設定を Tauri 側で読み取るように変更
-- 更新確認のみ有効な場合は、通常起動後に設定画面へ誘導する通知を表示するように変更
-- 自動更新失敗時はスプラッシュ上で失敗理由を短く表示し、その後通常起動へ進むように変更
-
-### Tests
-
-- `cargo test --manifest-path gui/src-tauri/Cargo.toml -- --nocapture`
-- `pnpm --dir gui build`
-- `git diff --check`
-- `pnpm dev` で、更新ゲート後にバックエンドが起動し、`/health` と通常 API が 200 になることを確認
-- 対象PR: [#71](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/71)
+- 起動時の更新確認をバックエンド起動前に行い、最初の読み込み画面に進捗を表示。
+- `auto_install_on_startup=true` の場合、スプラッシュ画面から更新のダウンロード、インストール、再起動まで実行。
 
 ## [0.2.0-beta.9] - 2026-07-09
 
-Codex CLI / Claude Code CLI などの CLI 型要約プロバイダで、接続不可や認証不備を早く検知できるようにした beta リリース。
+### 追加
 
-### Fixed
+- 手動要約の前に CLI 型プロバイダーを確認し、CLI の未導入、認証エラー、ネットワーク障害、プロバイダー停止、タイムアウトを早期に通知。
 
-- 手動要約の開始前に CLI 型プロバイダの preflight を行い、CLI 未導入、未認証、ネットワーク不可、プロバイダ障害、タイムアウトを早期にエラー表示するように修正
-- Codex CLI / Claude Code CLI の実行前にシェルのコマンドキャッシュを消去し、ログインシェル由来の PATH を読み直してから実行するように修正
-- Codex CLI の設定保存で `minutes_ai.codex` 配下の既存設定が失われないように修正
+### 変更
 
-### Changed
+- CLI 型プロバイダーの接続エラーを `AUTH_FAILED`、`OFFLINE`、`TIMEOUT`、`PROVIDER_DOWN` などの判別しやすい分類に統一。
+- 手動要約の開始前にプロバイダーの状態を確認し、エラー時は要約処理を実行せず応答。
+- Codex CLI と Claude Code CLI の実行前にシェルのコマンドキャッシュを消去し、ログインシェルの `PATH` を再読み込み。
 
-- CLI 型プロバイダの接続失敗を `AUTH_FAILED` / `OFFLINE` / `TIMEOUT` / `PROVIDER_DOWN` などの扱いやすい分類へ正規化
-- 手動要約APIの前処理でプロバイダ状態を確認し、失敗時は長い要約処理へ進まず即時に応答するように変更
+### 修正
 
-### Tests
-
-- `uv run python tests/test_summarize_foundation.py tests/test_settings_api.py`
-- `pnpm --dir gui build`
-- 対象PR: [#68](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/68)
+- Codex CLI の設定保存時に `minutes_ai.codex` 配下の既存設定が失われないよう修正。
 
 ## [0.2.0-beta.8] - 2026-07-09
 
-アプリ起動時と設定画面から更新できる、署名検証付きのアプリ内アップデートを追加する beta リリース。
+### 追加
 
-### Added
+- Tauri updater による署名検証付きのアプリ内更新を追加。起動時と設定画面から利用可能。
+- 現在のバージョン、起動時の更新確認、自動更新、手動更新を操作する「アプリ」設定カテゴリを追加。
+- 設定に従って起動時に更新を確認し、自動更新が有効な場合に限りインストールと再起動を実行。
+- `Seam.app.tar.gz`、署名、`latest.json` を GitHub Releases に公開し、固定フィード `updater-feed/latest.json` を更新するワークフローを追加。
 
-- Tauri updater によるアプリ内アップデート機能を追加
-- 設定画面に「アプリ」カテゴリを追加し、現在バージョン、起動時の更新確認、起動時自動アップデート、手動更新を操作できるように変更
-- 起動時は設定に従って更新確認し、ユーザーが `起動時に自動アップデート` を有効にした場合のみ自動インストールと再起動まで進めるように変更
-- GitHub Releases に `Seam.app.tar.gz` / `.sig` / `latest.json` を publish し、固定フィード `updater-feed/latest.json` を更新する release workflow を追加
+### 変更
 
-### Changed
-
-- 録音中は起動時・手動更新ともインストールや再起動に進まず、録音終了後に更新する案内に留めるように変更
-- Tauri capability を updater の check/download/install と process restart に限定
-- release 用 updater artifact は署名・公証済みの最終 `.app` から作成し、配布時は codesign / notarization 検証を必須化
-
-### Tests
-
-- `cargo check --manifest-path gui/src-tauri/Cargo.toml`
-- `pnpm --dir gui build`
-- `pnpm --dir gui tauri build --bundles app --ci`
-- `uv run python tests/test_summarize_foundation.py`
-- backend 一時起動で `app_update` の既定値と保存時正規化を確認
-- updater artifact / signature / feed JSON の生成を確認
-- 対象PR: [#66](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/66)
+- 録音中は更新のインストールと再起動を行わず、録音終了後に更新するよう案内。
+- Tauri の権限をアップデートの確認、ダウンロード、インストール、プロセス再起動に限定。
+- 署名と公証を済ませた最終版アプリから更新用ファイルを作成し、配布時にコード署名と公証の検証を必須化。
 
 ## [0.2.0-beta.7] - 2026-07-02
 
-マイク入力を Core Audio sidecar に寄せ、PortAudio の mic overflow 起因で自分の音声が途切れるケースを避ける beta リリース。
+### 変更
 
-### Fixed
-
-- マイク録音の既定 backend を Python/sounddevice の blocking read から Core Audio Audio Queue sidecar に変更
-- mic sidecar の raw PCM を Python 側で追尾し、`mic.wav` とリアルタイム文字起こし入力へ流す構成に変更
-- 配布ビルドの audio-capture sidecar に microphone mode を同梱
-
-### Tests
-
-- Core Audio mic sidecar 単体起動、`mic.wav` 生成、`Recorder.start()` / `Recorder.stop()` 経由の `combined.flac` 生成をローカル確認
-- 録音 preflight / 録音パイプライン失敗 / audio leveling / デバイス refresh の回帰テストを実行
-- 対象PR: [#63](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/63)
+- マイク録音の既定バックエンドを Python の `sounddevice` によるブロッキング読み取りから、Core Audio Audio Queue サイドカーへ変更。
+- サイドカーの RAW マイク PCM を Python 側で読み取り、`mic.wav` とリアルタイム文字起こしへ転送。
+- Whisper に渡すリアルタイムのミックス音声を録音中に保存し、録音後の `combined.flac` に使用。
+- 文字起こし、再生、話者再割り当てが同じ音声タイムラインを参照するよう統一。
+- 配布用 `audio-capture` サイドカーにマイクモードを同梱。
 
 ## [0.2.0-beta.6] - 2026-07-02
 
-マイク入力の overflow 時に、推定無音を録音へ差し込まないようにして、マイク音声だけが断続的に壊れるケースを抑止する beta リリース。
+### 変更
 
-### Fixed
-
-- PortAudio の mic buffer overflow 時に、欠落時間を推定して mic WAV / live mixer へ無音 padding を挿入していた処理を削除
-- overflow 連続時にマイクストリームを再オープンし、block size を自動変更する処理を削除
-
-### Changed
-
-- `recording.mic_stream` から overflow 起因の再オープン設定を削除し、マイク音声は実際に読み取れたサンプルだけを保存する方針に整理
-
-### Tests
-
-- 録音 preflight / 録音パイプライン失敗 / audio leveling の回帰テストを実行
-- 対象PR: [#61](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/61)
+- マイクのバッファオーバーフロー時に推定した無音を挿入せず、実際に読み取れたサンプルだけを保存するよう変更。オーバーフロー後にストリームを再開してブロックサイズを変える処理も廃止。
 
 ## [0.2.0-beta.5] - 2026-07-02
 
-録音完了後の文字起こし確定フローを整理し、録音中に確定した transcript をそのまま保存する beta リリース。
+### 変更
 
-### Fixed
+- 録音完了時の一覧ステータスを「再文字起こし中」ではなく、通常の「文字起こし中」として表示。
+- 録音中に確定した文字起こし結果を保存し、`combined.flac` は手動で再文字起こしする場合のみ使用。
 
-- 録音完了後に自動で再文字起こしが始まり、既存の文字起こし結果が表示されないケースを修正
-- 詳細画面で空の transcript が既存のライブ文字起こし表示を上書きしないように修正
+### 修正
 
-### Changed
-
-- 録音完了時の一覧ステータスを「再文字起こし中」固定ではなく、通常の「文字起こし中」として表示
-- 録音停止後の保存用 transcript を `combined.flac` から自動再生成する設計記述を廃止し、手動再文字起こし時のみ `combined.flac` を使う方針に更新
-
-### Tests
-
-- combined 音声が存在しても録音完了時に自動再文字起こしを起動しない回帰テストを追加
-- 対象PR: [#58](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/58), [#59](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/59)
+- 録音後に自動で再文字起こしが始まり、既存の文字起こし結果が隠れる問題を修正。
+- 詳細画面で空の文字起こし結果がライブ表示を上書きしないよう修正。
 
 ## [0.2.0-beta.4] - 2026-06-30
 
-Core Audio Tap を唯一の内部音声キャプチャ経路にし、ScreenCaptureKit / BlackHole フォールバックを廃止する beta リリース。
+### 変更
 
-### Changed
-
-- システム音声キャプチャを Core Audio Process Tap sidecar のみに統一
-- Core Audio Tap が使えない場合は内部音声録音を開始失敗として扱うように変更
-- 内部音声の利用可否 API に `system_audio_available` を追加し、既存 UI 互換用の `screen_capture_available` は維持
-- ScreenCaptureKit / BlackHole フォールバック前提の要件定義・アーキテクチャ・技術スタック・データモデルを更新
-- 配布ビルドの Info.plist から `NSScreenCaptureUsageDescription` を削除し、システム音声取得権限の説明へ整理
-
-### Tests
-
-- Core Audio Tap sidecar 起動失敗・変換失敗時の回帰テストを更新
-- 録音パイプライン失敗テストの内部音声エラー文言を Core Audio Tap 前提に更新
-- 対象PR: [#56](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/56)
+- システム音声のキャプチャを Core Audio Process Tap サイドカーのみに統一し、利用できない場合は録音開始を失敗として扱う。
+- 内部音声の利用可否 API に `system_audio_available` を追加し、UI 互換のため `screen_capture_available` は維持。
+- 録音停止後の文字起こしを `combined.flac` を基準に確定し、ライブ文字起こしは録音中のプレビューとして扱う。
+- マイク入力のオーバーフローや読み取り停滞時に、音声のタイムラインがずれないよう処理を調整。
+- ScreenCaptureKit と BlackHole の代替経路廃止に合わせ、要件、アーキテクチャ、技術スタック、データモデルの各資料を更新。
+- 配布アプリの Info.plist から `NSScreenCaptureUsageDescription` を削除し、システム音声の権限説明に整理。
 
 ## [0.2.0-beta.3] - 2026-06-30
 
-Core Audio Tap ベースの内部音声キャプチャ、起動時の復旧表示、録音デバイス更新まわりを改善する beta リリース。
+### 追加
 
-### Added
+- macOS 14.2 以降で内部音声をキャプチャする Core Audio Process Tap サイドカーを追加。
+- スプラッシュ画面にバックエンドの起動失敗と復旧状況を表示。
+- 議事録一覧に追加読み込みのページ送りを追加し、設定画面からマイクデバイス一覧を再読み込み可能に。
 
-- macOS 14.2+ 向けに Core Audio Process Tap sidecar を追加し、内部音声キャプチャの第一候補として利用
-- Splash 画面でバックエンド起動失敗や復旧状況を確認できる表示を追加
-- 議事録一覧の初期表示後に追加読み込みできるページング導線を追加
-- デバイス設定でマイクデバイス一覧を再読み込みできる導線を追加
+### 変更
 
-### Fixed
+- 配布時に audio-capture サイドカーを Tauri のリソースへ同梱。
+- Core Audio Tap に合わせて要件、アーキテクチャ、技術スタック、データモデルの各資料を更新。
 
-- Whisper モデルロードが詰まった場合に stale loader lease を timeout で復旧できるように修正
-- 古い世代の streaming transcribe 結果が現在の録音状態へ反映されるケースを抑止
-- アプリ起動後に追加されたマイクがデバイス一覧へ反映されないケースを、PortAudio の再初期化で更新
-- `sounddevice` の既定入力デバイス判定を `_InputOutputPair` に対応
+### 修正
 
-### Changed
-
-- Core Audio Tap を前提に、要件定義・アーキテクチャ・技術スタック・データモデルを更新
-- 配布ビルド時に audio-capture sidecar を Tauri resources へ同梱するように更新
-
-### Tests
-
-- Core Audio Tap / system capture 失敗時の回帰テストを追加
-- streaming transcribe の世代管理とモデル loader timeout の回帰テストを追加
-- マイクデバイス一覧 refresh の回帰テストを追加
-- 対象PR: [#47](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/47), [#49](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/49), [#50](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/50), [#51](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/51), [#53](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/53), [#54](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/54)
+- 古いローダー確保状態が残った場合、タイムアウトによって Whisper モデルの読み込みを復旧。
+- 古い世代のストリーミング文字起こし結果が現在の録音へ反映されないよう修正。
+- PortAudio を再初期化し、アプリ起動後に接続したマイクをデバイス一覧へ反映。
+- `sounddevice` の既定入力デバイスが `_InputOutputPair` で表される場合に対応。
 
 ## [0.2.0-beta.2] - 2026-06-23
 
-録音の安定性と配布版アップデート時の復旧性を改善する beta リリース。
+### 変更
 
-### Fixed
+- RMS ベースの自動ゲイン補正を録音中の文字起こし入力に適用し、保存する `combined.flac` に音量補正を適用。
+- 一時的な PortAudio エラーでマイク録音を開始できない場合、音声バックエンドをリセットして再試行。
+- 録音のデータベース保存に失敗した場合、復旧可能なセッション情報を保持して `pipeline_error` として通知。
+- アプリ更新時に古い Python ファイルが `python-env` に残らないよう、同梱バックエンドを一時展開してから置き換え、失敗時に戻せるよう変更。
+- 音量補正に合わせて要件、アーキテクチャ、データモデルの各資料を更新。
 
-- 長時間録音でマイク音声とシステム音声が途中から小さくなるケースに対し、録音中の文字起こし入力へRMSベースの自動ゲイン補正を追加
-- 録音停止後に生成する `combined.flac` へ `amix normalize=0` と `dynaudnorm + alimiter` を適用し、保存音声の音量低下を補正
-- macOSでアプリをしばらく放置した後などにPortAudioの一時的な内部エラーでマイク録音開始に失敗するケースを、音声バックエンドのreset/retryで回復
-- DB保存に失敗した録音を成功扱いにせず、復旧可能なセッション情報を残したまま `pipeline_error` として通知
-- 録音中にマイクキャプチャが落ちた場合に、バックエンドとフロントエンドの録音中表示が残り続けないように状態同期を修正
-- システム音声の開始/変換失敗を明示的に失敗扱いにし、要求されたシステム音声が取れなかった録音を成功したマイク単独議事録として保存しないように修正
-- 配布版アップデート時に同梱バックエンドの古いPythonファイルが `python-env` に残らないよう、temp展開とrollback可能な差し替えに変更
+### 修正
 
-### Changed
-
-- 音声レベリング仕様に合わせて要件定義・アーキテクチャ・データモデルを更新
-
-### Tests
-
-- 音量低下補正、録音前preflight、録音パイプライン失敗、システム音声失敗の回帰テストを追加
-- 対象PR: [#38](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/38), [#46](https://github.com/Tocchizawa/Seam-LocalFirstMinutes/pull/46)
+- マイクのキャプチャ停止時に、バックエンドとフロントエンドの録音状態がずれないよう修正。
+- 要求されたシステム音声の開始または変換に失敗した録音を、マイクのみで成功した議事録として保存しないよう修正。
 
 ## [0.2.0-beta.1] - 2026-05-21
 
-初の公開 beta リリース。
+### 追加
 
-### Added
+- 議事録一覧から音声ファイルやセッションフォルダを取り込み、保存済みの文字起こしを読み込めるよう対応。
+- Issue / PR テンプレート、行動規範、Dependabot の設定を追加。
+- 議事録一覧を3行カード形式に刷新し、日付、開始時刻、録音時間、タイトル、要約プレビューを表示。
+- 検索バーをスクロール時も固定し、一覧との境界を明確化。
+- 要約タブの検索結果を強調表示し、現在のタブ内で前後の結果へ移動可能に。
+- 起動時に未完了セッションの復元状況を表示し、GUI 同期用の `GET /api/recording/recovery/status` を追加。
+- pyannote の segmentation、embedding、clustering の各段階の進捗をフロントエンドへ通知。
+- 手動リリースを自動化する `scripts/release.sh` を追加。
 
-- 議事録一覧をカード型 3 行レイアウトに刷新 (日付 · 開始時刻 · 録音時間 / タイトル / 要約プレビュー)
-- 一覧の検索バーを sticky 固定 + リストとの border 分離
-- 要約タブでの検索ハイライト (tiptap Decoration ベース、アクティブマッチへ auto-scroll)
-- 検索 prev/next が現在開いているタブのマッチに対して動作 (タブ切替時に findIndex リセット)
-- 起動時セッション復元の進捗バナー (`RecoveryBanner`)。「未完了セッションを復元中 (3/5): 5/19 14:32 の会議」のように現在処理中のセッションが見える
-- `GET /api/recording/recovery/status` エンドポイント (GUI 同期用)
-- pyannote の segmentation / embedding / clustering 各ステージ進捗をフロントへ伝搬
-- 手動 Release を一括実行する `scripts/release.sh`
+### 変更
 
-### Changed
+- `transcript.jsonl` がある場合は既存の文字起こしを先に取り込み、再文字起こしを任意実行に変更。文字起こしがない場合は従来どおり自動で開始。
+- Apple の手順に合わせて DMG の公証と stapling を刷新し、`Seam.app` と DMG の両方に公証チケットを付与。macOS Sequoia の自己参照保護を避けるため、ボリューム名を `Seam Installer` に変更。
+- `tauri.conf.json` から DMG ファイル名を動的に決定。
 
-- DMG notarize/staple ワークフローを Apple 公式手順に合わせ刷新 (`Seam.app` と DMG の両方に staple ticket を付与、`Seam Installer` volname で macOS Sequoia の自己参照保護も回避)
-- `create-dmg.sh` の DMG ファイル名を `tauri.conf.json` から動的導出
+### 修正
 
-### Fixed
-
-- 要約完了でタイトル自動生成されても一覧が更新されない (MainView が `summary_done` / `minutes_title_updated` 等を購読していなかった)
-- summary_done 直後に詳細画面の要約本文が一瞬空になるフリッカー (`partial_text` を fallback で残すように)
-- DetailView の reload 後に他コンポーネントが追従できるよう `minutes-updated` カスタムイベントを dispatch
+- 要約完了後にタイトルが自動生成された際、議事録一覧が更新されない問題を修正。
+- `summary_done` 直後に要約本文が一時的に消える問題を修正し、`partial_text` を代替表示として保持。
+- 詳細画面の再読み込み後に他のコンポーネントも更新できるよう、`minutes-updated` カスタムイベントを送信。

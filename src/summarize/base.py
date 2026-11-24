@@ -78,6 +78,7 @@ class SummaryResult:
     output_chars: int
     duration_sec: float
     usage: dict[str, int] | None = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -122,6 +123,7 @@ class SummarizerProvider(Protocol):
         transcript: str,
         *,
         project: ProjectContext | None = None,
+        messages: list[dict[str, str]] | None = None,
         on_token: TokenCallback | None = None,
         on_activity: ActivityCallback | None = None,
         timeout_sec: float = 300,

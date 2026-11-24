@@ -662,9 +662,11 @@ def _make_emit_speech_event(
                         _append_transcript_segment(session_id, segment)
                     logger.info("Apple Speech segment [%s]: %s", session_id, segment["text"][:40])
                     await ws_manager.broadcast({"type": event_type, "data": segment})
-            elif event_type == "transcript_preview" or (
-                event_type == "transcription_error" and broadcast_errors
-            ):
+            elif event_type == "transcript_preview":
+                if persist and (pipeline := _pipelines.get(session_id)) is not None:
+                    pipeline["transcript_preview"] = payload if payload.get("text") else None
+                await ws_manager.broadcast({"type": event_type, "data": payload})
+            elif event_type == "transcription_error" and broadcast_errors:
                 await ws_manager.broadcast({"type": event_type, "data": payload})
         except Exception:
             logger.exception("Apple Speech event broadcast failed [%s]", session_id)
@@ -854,7 +856,7 @@ async def _finalize_session(session_id: str) -> None:
             raise RuntimeError("inserted minutes not found")
         logger.info("Minutes saved: %s (%d Apple Speech segments)", session_id, len(segments))
 
-        _set_state(session_id, state="done", transcript=transcript_payload)
+        _set_state(session_id, state="done", transcript=transcript_payload, transcript_preview=None)
         await ws_manager.broadcast({
             "type": "pipeline_done",
             "data": {"session_id": session_id, "minutes_id": minutes_id, **transcript_payload},

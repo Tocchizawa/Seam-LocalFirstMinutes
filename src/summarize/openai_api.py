@@ -154,6 +154,7 @@ class OpenAIProvider(SummarizerProvider):
         transcript: str,
         *,
         project: ProjectContext | None = None,
+        messages: list[dict[str, str]] | None = None,
         on_token: TokenCallback | None = None,
         on_activity: ActivityCallback | None = None,
         timeout_sec: float = 300,
@@ -166,7 +167,12 @@ class OpenAIProvider(SummarizerProvider):
             RateLimitError,
         )
 
-        sys_p, user_p = build_messages(transcript, project)
+        if messages is None:
+            system, user = build_messages(transcript, project)
+            conversation = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        else:
+            conversation = messages
+        input_chars = sum(len(message["content"]) for message in conversation)
         client = self._build_client()
         self._client = client
         self._cancel_event.clear()
@@ -178,10 +184,7 @@ class OpenAIProvider(SummarizerProvider):
                 stream = await client.chat.completions.create(
                     model=self._model,
                     max_tokens=self._max_tokens,
-                    messages=[
-                        {"role": "system", "content": sys_p},
-                        {"role": "user", "content": user_p},
-                    ],
+                    messages=conversation,
                     stream=True,
                 )
                 async for event in stream:
@@ -276,7 +279,7 @@ class OpenAIProvider(SummarizerProvider):
             text=text,
             provider=self.name,
             model=self._model,
-            input_chars=len(sys_p) + len(user_p),
+            input_chars=input_chars,
             output_chars=len(text),
             duration_sec=duration,
         )

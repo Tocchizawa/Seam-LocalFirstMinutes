@@ -5,6 +5,8 @@ provider 共通でプロンプトを組み立てる。
 """
 from __future__ import annotations
 
+import json
+
 from .base import ProjectContext, SummaryError, SummaryErrorCode
 
 SYSTEM_PROMPT = """あなたは日本語の会議議事録作成アシスタントです。
@@ -289,6 +291,16 @@ def build_messages(
     ここでは要約本体のみ生成する prompt を返す。
     """
     return get_system_prompt(), build_user_prompt(transcript, project)
+
+
+def format_conversation(messages: list[dict[str, str]]) -> str:
+    """CLI の標準入力に会話の役割と順番を保って渡す。"""
+    system, *history, latest = messages
+    return (
+        f"{system['content']}\n\n"
+        f"会話履歴 (JSON):\n{json.dumps(history, ensure_ascii=False)}\n\n"
+        f"今回の依頼:\n{latest['content']}"
+    )
 
 
 # ─── Token見積り ────────────────────────────────────────────

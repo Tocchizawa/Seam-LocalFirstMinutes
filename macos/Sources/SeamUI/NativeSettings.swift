@@ -159,7 +159,9 @@ public struct NativeSettings<Appearance: View>: View {
         }
         .animatePageChange(for: page, enabled: !reduceMotion)
         .scrollEdgeBar { settingsHeader }
-        .scrollEdgeBar(.bottom, blur: false) { settingsFooter }
+        .scrollEdgeBar(.bottom) { settingsFooter }
+        .animation(reduceMotion ? nil : SeamMotion.update, value: hasPendingChanges)
+        .animation(reduceMotion ? nil : SeamMotion.update, value: editor.feedback)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .tint(.primary)
         .task { await editor.load() }
@@ -176,7 +178,7 @@ public struct NativeSettings<Appearance: View>: View {
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("文字起こしの本文が\(provider.label)に送信されます。")
+            Text("文字起こし、メモ、チャットの質問、参照するプロジェクト資料が\(provider.label)に送信されます。")
         }
     }
 
@@ -184,24 +186,11 @@ public struct NativeSettings<Appearance: View>: View {
     private var settingsContent: some View {
         SeamScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack(alignment: .center, spacing: 16) {
-                    Text(page.rawValue)
-                        .font(.system(size: compact ? 24 : 30, weight: .semibold))
-                        .accessibilityAddTraits(.isHeader)
-                    Spacer(minLength: 0)
-                    if !editor.changes.isEmpty || editor.saving {
-                        saveButton
-                            .transition(reduceMotion ? .identity : .move(edge: .trailing).combined(with: .opacity))
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .animation(reduceMotion ? nil : SeamMotion.reposition,
-                           value: !editor.changes.isEmpty || editor.saving)
-
                 if editor.loading {
                     ProgressView("設定を読み込み中")
                         .controlSize(.small)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Group(sections: fields) { sections in
                         ForEach(sections) { section in
@@ -211,23 +200,18 @@ public struct NativeSettings<Appearance: View>: View {
                                     .accessibilityAddTraits(.isHeader)
                                     .padding(.horizontal, 4)
                                 SettingsRows { section.content }
-                                    .background(Color.primary.opacity(colorScheme == .dark ? 0.045 : 0.028),
-                                                in: RoundedRectangle(cornerRadius: 16))
-                                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 16)
-                                            .strokeBorder(Color.primary.opacity(0.08))
-                                            .allowsHitTesting(false)
-                                    }
+                                    .seamFieldSurface(radius: 18)
+                                    .clipShape(.rect(cornerRadius: 18))
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 20)
+            .frame(maxWidth: 720, alignment: .leading)
+            .padding(.vertical, 16)
             .padding(.horizontal, gutter)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .disabled(editor.loading || editor.saving || busy)
     }
@@ -236,54 +220,61 @@ public struct NativeSettings<Appearance: View>: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 Text("設定")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: compact ? 20 : 24, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 4)
                 categoryTabs
             }
             HStack(spacing: 12) {
                 Text("設定")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: compact ? 20 : 24, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 4)
-                settingsGlass {
-                    Menu {
-                        ForEach(NativeSettingsPage.allCases) { item in
-                            Button(item.rawValue, systemImage: page == item ? "checkmark" : item.symbol) {
-                                page = item
-                            }
-                        }
-                    } label: {
-                        Label(page.rawValue, systemImage: page.symbol)
-                            .font(.system(size: 13, weight: .medium))
-                            .padding(.horizontal, 10)
-                            .frame(height: 36)
+                SeamDropdown("設定カテゴリ") {
+                    Label(page.rawValue, systemImage: page.symbol)
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .frame(height: 36)
+                } items: {
+                    ForEach(NativeSettingsPage.allCases) { item in
+                        SeamDropdownRow(item.rawValue, symbol: item.symbol, selected: page == item) { page = item }
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .accessibilityLabel("設定カテゴリ")
                 }
+                .seamToolbarGlass()
+                .fixedSize()
             }
         }
+        .frame(maxWidth: 720)
         .padding(.horizontal, gutter)
-        .padding(.top, gutter)
-        .padding(.bottom, 8)
+        .padding(.top, 20)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity)
     }
+
+    private var hasPendingChanges: Bool { !editor.changes.isEmpty || editor.saving }
 
     @ViewBuilder
     private var settingsFooter: some View {
-        if let feedback = editor.feedback {
-            HStack {
-                Text(feedback)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .accessibilityLabel("設定の状態 \(feedback)")
+        if hasPendingChanges || editor.feedback != nil {
+            HStack(spacing: 12) {
+                if let feedback = editor.feedback {
+                    Label(feedback, systemImage: feedback == "保存しました" ? "checkmark.circle" : "info.circle")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 Spacer(minLength: 0)
+                if hasPendingChanges { saveButton }
             }
-            .padding(.horizontal, gutter)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.seamPaper(for: colorScheme))
+            .background(Color.seamPaper(for: colorScheme), in: .rect(cornerRadius: 16))
+            .seamFieldSurface(radius: 16)
+            .frame(maxWidth: 720)
+            .padding(.horizontal, gutter)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity)
+            .transition(reduceMotion ? .identity : .offset(y: 6).combined(with: .opacity))
         }
     }
 
@@ -292,7 +283,7 @@ public struct NativeSettings<Appearance: View>: View {
             Task { await editor.save() }
         }
         .keyboardShortcut("s")
-        .buttonStyle(SettingsActionStyle())
+        .buttonStyle(SeamFormActionStyle(primary: true))
         .disabled(editor.loading || editor.saving || busy)
     }
 
@@ -329,7 +320,7 @@ public struct NativeSettings<Appearance: View>: View {
                             }
                             .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(SeamToolbarButtonStyle())
                     .accessibilityAddTraits(active ? .isSelected : [])
                 }
             }
@@ -353,17 +344,13 @@ public struct NativeSettings<Appearance: View>: View {
     private var inputSettings: some View {
         Section("入力") {
             SettingsRow("マイク") {
-                Picker("マイク", selection: Binding(
+                let microphone = Binding(
                     get: { Int(editor.document["recording.mic_device"]?.number ?? -1) },
                     set: { editor.set("recording.mic_device", $0 == -1 ? .null : .number(Double($0))) }
-                )) {
-                    Text("システムの既定").tag(-1)
-                    ForEach(devices) { Text($0.name).tag($0.id) }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .controlSize(.large)
-                .frame(maxWidth: 245, alignment: .trailing)
+                )
+                settingMenu("マイク", selection: microphone,
+                            options: [(-1, "システムの既定")] + devices.map { ($0.id, $0.name) },
+                            unknown: "使用できない入力")
             }
             flag("システム音声も録音", "recording.last_capture_system", fallback: true)
         }
@@ -391,26 +378,26 @@ public struct NativeSettings<Appearance: View>: View {
     // 要約プロバイダー、モデル、接続テストの設定項目。
     private var summarySettings: some View {
         Section("モデル") {
-            choose("要約プロバイダ", "minutes_ai.provider", fallback: "ollama",
+            choose("AIプロバイダー", "minutes_ai.provider", fallback: "ollama",
                    options: SummaryProvider.allCases.map { ($0.rawValue, $0.label) })
             let prefix = "minutes_ai." + provider.rawValue
-            SettingsRow("要約モデル") {
+            SettingsRow("モデル") {
                 textInput("要約モデル", text(prefix + ".model", fallback: provider.modelHint))
                 if !cliOptions.isEmpty {
-                    Menu {
+                    SeamDropdown("利用可能なモデル", width: 288) {
+                        SeamToolbarIcon("list.bullet")
+                    } items: {
                         ForEach(cliOptions) { option in
-                            Button(option.displayName) { editor.set(prefix + ".model", .text(option.slug)) }
+                            SeamDropdownRow(option.displayName, selected: editor.document[prefix + ".model"]?.text == option.slug) {
+                                editor.set(prefix + ".model", .text(option.slug))
+                            }
                         }
-                        if provider == .codex { Button("CLIの既定") { editor.set(prefix + ".model", .text("")) } }
-                    } label: {
-                        Image(systemName: "list.bullet")
-                            .frame(width: 34, height: 34)
+                        if provider == .codex {
+                            SeamDropdownRow("CLIの既定", selected: editor.document[prefix + ".model"]?.text == "") {
+                                editor.set(prefix + ".model", .text(""))
+                            }
+                        }
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .accessibilityLabel("利用可能なモデル")
-                    .help("利用可能なモデル")
                 }
             }
             if provider.isCLI {
@@ -495,7 +482,7 @@ public struct NativeSettings<Appearance: View>: View {
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 112)
                         .padding(8)
-                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                        .seamFieldSurface()
                         .padding(.vertical, 8)
                         .accessibilityLabel("要約プロンプト")
                 }
@@ -543,17 +530,14 @@ public struct NativeSettings<Appearance: View>: View {
                         options: [(value: String, label: String)]) -> some View {
         let selection = text(key, fallback: fallback)
         return SettingsRow(label) {
-            Picker(label, selection: selection) {
-                if !options.contains(where: { $0.value == selection.wrappedValue }) {
-                    Text(selection.wrappedValue).tag(selection.wrappedValue)
-                }
-                ForEach(options, id: \.value) { option in Text(option.label).tag(option.value) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .controlSize(.large)
-            .frame(maxWidth: 245, alignment: .trailing)
+            settingMenu(label, selection: selection, options: options, unknown: selection.wrappedValue)
         }
+    }
+
+    private func settingMenu<Value: Hashable>(
+        _ label: String, selection: Binding<Value>, options: [(value: Value, label: String)], unknown: String
+    ) -> some View {
+        SeamDropdownSelection(label, selection: selection, options: options, unknown: unknown)
     }
 
     private var actionsLayout: AnyLayout {
@@ -585,14 +569,11 @@ public struct NativeSettings<Appearance: View>: View {
         content()
             .labelsHidden()
             .textFieldStyle(.plain)
+            .font(.system(size: 13))
             .padding(.horizontal, 10)
-            .frame(height: 32)
-            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Color.primary.opacity(0.08))
-                    .allowsHitTesting(false)
-            }
+            .frame(height: 34)
+            .seamTextPointer()
+            .seamFieldSurface(radius: 10)
     }
 
     private func flag(_ label: String, _ key: String, fallback: Bool) -> some View {

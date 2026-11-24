@@ -26,7 +26,10 @@ from .base import (
 )
 from .prompts import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    PROMPT_OVERHEAD_TOKENS,
+    SAFETY_MARGIN_TOKENS,
     build_messages,
+    estimate_tokens_jp,
     validate_context_budget,
 )
 
@@ -127,18 +130,25 @@ class OllamaProvider(SummarizerProvider):
         transcript: str,
         *,
         project: ProjectContext | None = None,
+        messages: list[dict[str, str]] | None = None,
         on_token: TokenCallback | None = None,
         on_activity: ActivityCallback | None = None,
         timeout_sec: float = 300,
     ) -> SummaryResult:
         _ = on_activity  # ローカル LLM 経由は activity 表示なし
-        # context budget 事前検証
-        validate_context_budget(transcript, ctx_window=self._num_ctx)
-
-        sys_p, user_p = build_messages(transcript, project)
+        if messages is None:
+            system, user = build_messages(transcript, project)
+            conversation = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        else:
+            conversation = messages
+        context_text = "".join(message["content"] for message in conversation)
+        available = self._num_ctx - estimate_tokens_jp(context_text) - PROMPT_OVERHEAD_TOKENS - SAFETY_MARGIN_TOKENS
+        max_output = min(DEFAULT_MAX_OUTPUT_TOKENS, max(512, available))
+        validate_context_budget(context_text, ctx_window=self._num_ctx, max_output=max_output)
         # /no_think で Qwen3 系の thinking モードを抑止する。
-        # /api/chat 経由なら chat template が解釈してくれる。
-        user_with_directive = user_p + "\n\n/no_think"
+        conversation = [*conversation[:-1], {
+            "role": "user", "content": conversation[-1]["content"] + "\n\n/no_think",
+        }]
 
         options: dict[str, Any] = {
             "num_ctx": self._num_ctx,
@@ -146,14 +156,11 @@ class OllamaProvider(SummarizerProvider):
             "num_batch": self._num_batch,
             "num_gpu": self._num_gpu,
             "low_vram": self._low_vram,
-            "num_predict": DEFAULT_MAX_OUTPUT_TOKENS,
+            "num_predict": max_output,
         }
         body = {
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": sys_p},
-                {"role": "user", "content": user_with_directive},
-            ],
+            "messages": conversation,
             "stream": True,
             "options": options,
             "keep_alive": f"{self._keep_alive_sec}s",
@@ -166,7 +173,6 @@ class OllamaProvider(SummarizerProvider):
         started = time.time()
         out_chunks: list[str] = []
         deadline = started + timeout_sec
-        prompt_total_chars = len(sys_p) + len(user_with_directive)
 
         try:
             async with client.stream(
@@ -242,13 +248,14 @@ class OllamaProvider(SummarizerProvider):
         text = _strip_think_blocks(text)
         # Qwen3 等は think:false でも reasoning が content に混入することがある。
         # 出力テンプレートの最初の見出し (## 概要) を見つけて、それ以前を捨てる。
-        text = _extract_markdown_summary(text)
+        if messages is None:
+            text = _extract_markdown_summary(text)
         duration = time.time() - started
         return SummaryResult(
             text=text,
             provider=self.name,
             model=self._model,
-            input_chars=prompt_total_chars,
+            input_chars=len(context_text),
             output_chars=len(text),
             duration_sec=duration,
         )

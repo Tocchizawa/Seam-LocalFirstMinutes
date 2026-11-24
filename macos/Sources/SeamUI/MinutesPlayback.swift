@@ -195,26 +195,22 @@ public struct MinutesAudioBar: View {
                 Text(minutesTime(playback.duration))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
-                Menu {
+                SeamDropdown("再生速度 \(Self.speed(playback.rate))", width: 160) {
+                    Text(Self.speed(playback.rate))
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: SeamToolbarMetrics.buttonSize)
+                } items: {
                     if compact {
-                        Button("10秒戻る") { playback.seek(to: playback.elapsed - 10) }
-                        Button("10秒進む") { playback.seek(to: playback.elapsed + 10) }
+                        SeamDropdownRow("10秒戻る", symbol: "gobackward.10") { playback.seek(to: playback.elapsed - 10) }
+                        SeamDropdownRow("10秒進む", symbol: "goforward.10") { playback.seek(to: playback.elapsed + 10) }
                         Divider()
                     }
                     ForEach([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { rate in
-                        Button {
-                            playback.setRate(rate)
-                        } label: {
-                            Label(Self.speed(rate), systemImage: playback.rate == rate ? "checkmark" : "")
-                        }
+                        SeamDropdownRow(Self.speed(rate), selected: playback.rate == rate) { playback.setRate(rate) }
                     }
-                } label: {
-                    Text(Self.speed(playback.rate))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 }
-                .menuStyle(.borderlessButton)
                 .fixedSize()
-                .accessibilityLabel("再生速度 \(Self.speed(playback.rate))")
             }
         }
         .padding(.leading, 6)
