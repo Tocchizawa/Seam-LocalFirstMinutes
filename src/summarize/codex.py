@@ -36,7 +36,7 @@ from .cli_launcher import (
     normalize_extra_args,
     strip_cli_error,
 )
-from .prompts import build_messages
+from .prompts import build_messages, format_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -171,8 +171,20 @@ def _parse_json_result(raw: bytes) -> tuple[str, dict[str, int] | None]:
     return _strip_ansi(raw.decode("utf-8", errors="replace")).strip(), None
 
 
+def _read_session_id(raw: bytes) -> str | None:
+    for line in raw.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            return event.get("thread_id")
+    return None
+
+
 class CodexProvider(SummarizerProvider):
     name = PROVIDER_CODEX
+    supports_resume = True
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._config = config or {}
@@ -378,12 +390,20 @@ class CodexProvider(SummarizerProvider):
         transcript: str,
         *,
         project: ProjectContext | None = None,
+        messages: list[dict[str, str]] | None = None,
+        persist_session: bool = False,
+        resume_session: str | None = None,
         on_token: TokenCallback | None = None,
         on_activity: ActivityCallback | None = None,
         timeout_sec: float = 600,
     ) -> SummaryResult:
-        sys_p, user_p = build_messages(transcript, project)
-        full_prompt = f"{sys_p}\n\n---\n\n{user_p}"
+        if messages is None:
+            system, user = build_messages(transcript, project)
+            full_prompt = f"{system}\n\n---\n\n{user}"
+        elif resume_session:
+            full_prompt = messages[-1]["content"]
+        else:
+            full_prompt = format_conversation(messages)
 
         # ProjectContext から path を取得。
         # repo_path → -C (cwd として agent が触れる primary workspace)
@@ -409,13 +429,16 @@ class CodexProvider(SummarizerProvider):
             cmd, _ = self._build_cmd([
                 "exec",
                 "--skip-git-repo-check",
-                "--ephemeral",
+                *([] if persist_session else ["--ephemeral"]),
                 "--json",
                 *self._reasoning_args(),
                 *cur_model_arg,
                 *repo_arg,
                 *add_dir_args,
                 *self._extra_args,
+                *(["-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"']
+                  if messages is not None and not persist_session else []),
+                *(["resume", "--all", resume_session] if resume_session else []),
                 "-",
             ])
             if cmd is None:
@@ -468,10 +491,11 @@ class CodexProvider(SummarizerProvider):
             )
 
         out_chunks: list[str] = []
-        in_summary = False  # 旧CLIの通常テキスト出力用
+        in_summary = messages is not None  # 旧CLIの通常テキスト出力用
         json_mode = False
         last_agent_text = ""
         usage: dict[str, int] | None = None
+        session_id = resume_session
 
         async def _emit_activity(msg: str) -> None:
             if on_activity is None:
@@ -507,6 +531,8 @@ class CodexProvider(SummarizerProvider):
                     if isinstance(event, dict) and isinstance(event.get("type"), str):
                         json_mode = True
                         event_type = event["type"]
+                        if event_type == "thread.started":
+                            session_id = event.get("thread_id") or session_id
                         if event_type in {"thread.started", "turn.started"}:
                             await _emit_activity(
                                 "Codexスレッド開始" if event_type == "thread.started" else "推論開始",
@@ -594,7 +620,7 @@ class CodexProvider(SummarizerProvider):
             except Exception:
                 pass
 
-        if return_code != 0 and not out_chunks:
+        if return_code != 0:
             stderr_text = _strip_ansi(stderr_bytes.decode("utf-8", errors="replace"))[:300]
             if self._model and self._is_chatgpt_model_unsupported(stderr_text):
                 try:
@@ -620,6 +646,7 @@ class CodexProvider(SummarizerProvider):
                         output_chars=len(fallback_text),
                         duration_sec=duration,
                         usage=fallback_usage,
+                        session_id=_read_session_id(fallback_stdout) if persist_session else None,
                     )
                 fallback_err = _strip_ansi(
                     fallback_stderr.decode("utf-8", errors="replace"),
@@ -649,6 +676,7 @@ class CodexProvider(SummarizerProvider):
             output_chars=len(text),
             duration_sec=duration,
             usage=usage,
+            session_id=session_id if persist_session else None,
         )
 
     async def cancel(self, *, reason: str = "user_cancelled") -> None:

@@ -145,6 +145,104 @@ public struct SeamAPI: Sendable {
         return BackendEventConnection(socket: socket)
     }
 
+    public func meetingNotes(session: String) async throws -> [MeetingNote] {
+        try await request(meetingPath(session, "notes"))
+    }
+
+    public func saveMeetingNote(
+        session: String, noteID: Int?, start: Double, title: String, body: String
+    ) async throws -> MeetingNotesUpdate {
+        struct Note: Encodable { let start: Double; let title: String; let body: String }
+        let path = meetingPath(session, "notes")
+        return try await write(path + (noteID.map { [String($0)] } ?? []),
+                               method: noteID == nil ? "POST" : "PUT",
+                               body: Note(start: start, title: title, body: body))
+    }
+
+    public func deleteMeetingNote(session: String, id: Int) async throws -> MeetingNotesUpdate {
+        try await request(meetingPath(session, "notes") + [String(id)], method: "DELETE")
+    }
+
+    public func meetingChats(session: String) async throws -> [MeetingChat] {
+        try await request(meetingPath(session, "chats"))
+    }
+
+    public func newMeetingChat(session: String) async throws -> MeetingConversation {
+        try await request(meetingPath(session, "chats"), method: "POST")
+    }
+
+    public func meetingChat(session: String, id: String) async throws -> MeetingConversation {
+        try await request(meetingPath(session, "chats") + [id])
+    }
+
+    public func renameMeetingChat(session: String, id: String, title: String) async throws -> MeetingConversation {
+        struct Rename: Encodable { let title: String }
+        return try await write(meetingPath(session, "chats") + [id], method: "PUT", body: Rename(title: title))
+    }
+
+    public func deleteMeetingChat(session: String, id: String) async throws {
+        struct Result: Decodable { let status: String }
+        let _: Result = try await request(meetingPath(session, "chats") + [id], method: "DELETE")
+    }
+
+    @MainActor
+    public func askMeetingChat(
+        session sessionID: String, id: String, question: String, focusStart: Double? = nil, onChunk: (String) -> Void
+    ) async throws -> MeetingConversation {
+        struct Send: Encodable {
+            let content: String
+            let focusStart: Double?
+            enum CodingKeys: String, CodingKey { case content; case focusStart = "focus_start" }
+        }
+        struct Event: Decodable {
+            enum Kind: String, Decodable { case chunk, done, error }
+            let type: Kind
+            let text: String?
+            let chat: MeetingConversation?
+        }
+
+        let path = meetingPath(sessionID, "chats") + [id, "messages"]
+        var request = URLRequest(url: try endpoint(path))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder().encode(Send(content: question, focusStart: focusStart))
+        request.timeoutInterval = 600
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/x-ndjson", forHTTPHeaderField: "Accept")
+
+        let (bytes, response) = try await Self.eventSession.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        let decoder = makeDecoder()
+        if !(200...299).contains(http.statusCode) {
+            for try await line in bytes.lines {
+                throw backendError(status: http.statusCode, data: Data(line.utf8))
+            }
+            throw backendError(status: http.statusCode, data: Data())
+        }
+        for try await line in bytes.lines {
+            let event = try decoder.decode(Event.self, from: Data(line.utf8))
+            switch event.type {
+            case .chunk:
+                if let text = event.text { onChunk(text) }
+            case .done:
+                if let chat = event.chat { return chat }
+            case .error:
+                throw BackendError(status: http.statusCode, code: nil, message: event.text ?? "回答を生成できませんでした")
+            }
+        }
+        throw BackendError(status: http.statusCode, code: nil, message: "回答を受信できませんでした")
+    }
+
+    private func meetingPath(_ id: String, _ resource: String) -> [String] {
+        ["api", "meeting", id, resource]
+    }
+
+    private func backendError(status: Int, data: Data) -> BackendError {
+        let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
+        let detail = payload?.error ?? payload?.detail
+        return BackendError(status: status, code: detail?.code,
+                            message: detail?.message ?? "処理に失敗しました（HTTP \(status)）")
+    }
+
     func request<Value: Decodable>(
         _ path: [String], query: [URLQueryItem] = [], method: String = "GET", body: Data? = nil,
         timeout: TimeInterval? = nil
@@ -159,10 +257,7 @@ public struct SeamAPI: Sendable {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200...299).contains(http.statusCode) else {
-            let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
-            let detail = payload?.error ?? payload?.detail
-            throw BackendError(status: http.statusCode, code: detail?.code,
-                               message: detail?.message ?? "処理に失敗しました（HTTP \(http.statusCode)）")
+            throw backendError(status: http.statusCode, data: data)
         }
         return try makeDecoder().decode(Value.self, from: data)
     }

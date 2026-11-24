@@ -74,7 +74,7 @@ public struct SettingsToggleRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
+        .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback, cornerRadius: 0))
         .accessibilityRepresentation {
             Toggle(title, isOn: $isOn).toggleStyle(.switch)
         }
@@ -107,7 +107,7 @@ struct SettingsDisclosure<Content: View>: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(ReaderHoverStyle(tint: .primary, motion: motion))
+            .buttonStyle(ReaderHoverStyle(tint: .primary, motion: motion, cornerRadius: 0))
             .accessibilityValue(showing ? "展開済み" : "折りたたみ")
 
             if showing {

@@ -34,6 +34,7 @@ public struct Workspace: View {
     @Stored private var showTranscript = false
     @Stored private var readerExpanded = false
     @Stored private var liveExpanded = false
+    @Stored private var liveChatOpen = false
     @Stored private var settingsPage: NativeSettingsPage = .transcription
     @Stored private var searchOpen = false
     @Stored private var search = ""
@@ -110,7 +111,7 @@ public struct Workspace: View {
     }
     private var selectedProject: Project? { projects.first { $0.id == projectID } }
     private var projectName: String { selectedProject?.name ?? "Seam" }
-    private var showsSidebar: Bool { sidebarVisible && !readerExpanded && !liveExpanded }
+    private var showsSidebar: Bool { sidebarVisible && !readerExpanded && !liveExpanded && !liveChatOpen }
     private var projectSubtitle: String? {
         guard let projectCount, projectCount.projectID == projectID else { return nil }
         return "\(projectCount.count.formatted())件の議事録"
@@ -136,21 +137,26 @@ public struct Workspace: View {
 
     // 画面全体の入口。録音中の分割は LiveWorkspaceSplit、文字起こし側は CapturePane で調整する。
     public var body: some View {
-        LiveWorkspaceSplit(recording: session.capture != nil, expanded: liveExpanded) { compact, narrow in
+        LiveWorkspaceSplit(recording: session.capture != nil, expanded: liveExpanded || liveChatOpen) { compact, narrow in
             archive(compact: compact, narrow: narrow)
         } transcript: { _ in
-            CapturePane(session: session, expanded: $liveExpanded)
+            CapturePane(session: session, expanded: $liveExpanded, chatOpen: $liveChatOpen)
+                .id(session.capture?.id)
         }
         .preferredColorScheme(appearance == "light" ? .light : (appearance == "dark" ? .dark : nil))
         .onExitCommand {
             withAnimation(motion) {
-                if liveExpanded { liveExpanded = false }
+                if liveChatOpen { liveChatOpen = false }
+                else if liveExpanded { liveExpanded = false }
                 else if readerExpanded { readerExpanded = false }
             }
         }
         .onChange(of: session.capture != nil) { _, active in
             if active { readerExpanded = false }
-            else { liveExpanded = false }
+            else {
+                liveExpanded = false
+                liveChatOpen = false
+            }
         }
         .task { if runsSession { await session.run() } }
         .task(id: session.connected) {
@@ -251,6 +257,7 @@ public struct Workspace: View {
         if opening {
             readerExpanded = false
             liveExpanded = false
+            liveChatOpen = false
         }
     }
 
@@ -298,15 +305,8 @@ public struct Workspace: View {
             NativeSettings(api: session.api, page: $settingsPage, compact: compact) {
                 Section("表示") {
                     SettingsRow("外観") {
-                        Picker("外観", selection: $appearance) {
-                            Text("システム").tag("system")
-                            Text("ライト").tag("light")
-                            Text("ダーク").tag("dark")
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .controlSize(.large)
-                        .frame(maxWidth: 245, alignment: .trailing)
+                        SeamDropdownSelection("外観", selection: $appearance,
+                                              options: [("system", "システム"), ("light", "ライト"), ("dark", "ダーク")])
                     }
                 }
             }
@@ -739,6 +739,7 @@ public struct Workspace: View {
     private func openSettings() {
         readerExpanded = false
         liveExpanded = false
+        liveChatOpen = false
         searchOpen = false
         search = ""
         page = .settings

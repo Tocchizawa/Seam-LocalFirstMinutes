@@ -37,6 +37,26 @@ CREATE INDEX IF NOT EXISTS idx_minutes_date ON minutes(date);
 -- インデックスのみで処理できるようにする。
 CREATE INDEX IF NOT EXISTS idx_minutes_project_date_started
     ON minutes(project_id, date DESC, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS meeting_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    start       REAL NOT NULL,
+    number      INTEGER NOT NULL,
+    body        TEXT NOT NULL,
+    title       TEXT,
+    auto_title  TEXT,
+    UNIQUE(session_id, start)
+);
+
+CREATE TABLE IF NOT EXISTS meeting_chats (
+    id          TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    title       TEXT,
+    messages    TEXT NOT NULL DEFAULT '[]',
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_chats_session ON meeting_chats(session_id, updated_at);
 """
 
 FTS_SQL = """
@@ -225,7 +245,7 @@ class Database:
         if clear_summary:
             result = conn.execute(
                 "UPDATE minutes SET transcript = ?, transcript_text = ?, summary = '', "
-                "llm_model = '', updated_at = datetime('now') WHERE id = ?",
+                "llm_model = '', context_snapshot = NULL, updated_at = datetime('now') WHERE id = ?",
                 (transcript_json, transcript_text, minutes_id),
             )
         else:
@@ -246,19 +266,27 @@ class Database:
         conn.commit()
         return result.rowcount > 0
 
-    def update_summary(self, minutes_id: str, summary: str,
-                       llm_model: str | None = None) -> bool:
+    def summary_context(self, minutes_id: str) -> dict:
+        row = self._get_conn().execute(
+            "SELECT context_snapshot FROM minutes WHERE id = ?", (minutes_id,),
+        ).fetchone()
+        try:
+            context = json.loads(row["context_snapshot"] or "{}") if row else {}
+        except (ValueError, TypeError):
+            return {}
+        return context if isinstance(context, dict) else {}
+
+    def update_summary(
+        self, minutes_id: str, summary: str, llm_model: str | None = None,
+        *, context: dict | None = None,
+    ) -> bool:
         conn = self._get_conn()
-        if llm_model is None:
-            result = conn.execute(
-                "UPDATE minutes SET summary = ?, updated_at = datetime('now') WHERE id = ?",
-                (summary, minutes_id),
-            )
-        else:
-            result = conn.execute(
-                "UPDATE minutes SET summary = ?, llm_model = ?, updated_at = datetime('now') WHERE id = ?",
-                (summary, llm_model, minutes_id),
-            )
+        snapshot = json.dumps(context, ensure_ascii=False) if context is not None else None
+        result = conn.execute(
+            "UPDATE minutes SET summary = ?, llm_model = COALESCE(?, llm_model), "
+            "context_snapshot = COALESCE(?, context_snapshot), updated_at = datetime('now') WHERE id = ?",
+            (summary, llm_model, snapshot, minutes_id),
+        )
         conn.commit()
         return result.rowcount > 0
 
@@ -273,8 +301,101 @@ class Database:
 
     def delete_minutes(self, minutes_id: str) -> bool:
         conn = self._get_conn()
-        result = conn.execute("DELETE FROM minutes WHERE id = ?", (minutes_id,))
-        conn.commit()
+        with conn:
+            for table in ("meeting_notes", "meeting_chats"):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE session_id = (SELECT session_id FROM minutes WHERE id = ?)",
+                    (minutes_id,),
+                )
+            result = conn.execute("DELETE FROM minutes WHERE id = ?", (minutes_id,))
+        return result.rowcount > 0
+
+    def meeting_notes(self, session_id: str) -> list[dict]:
+        rows = self._get_conn().execute(
+            "SELECT * FROM meeting_notes WHERE session_id = ? ORDER BY start", (session_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def add_meeting_note(self, session_id: str, start: float, body: str, title: str | None) -> int | None:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute(
+                "INSERT INTO meeting_notes (session_id, start, number, body, title) "
+                "SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ? FROM meeting_notes WHERE session_id = ? "
+                "ON CONFLICT(session_id, start) DO NOTHING",
+                (session_id, start, body, title, session_id),
+            )
+        return result.lastrowid if result.rowcount else None
+
+    def edit_meeting_note(self, session_id: str, note_id: int, body: str, title: str | None) -> bool:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute(
+                "UPDATE meeting_notes SET body = ?, title = ?, "
+                "auto_title = CASE WHEN body = ? AND title IS NULL THEN auto_title ELSE NULL END "
+                "WHERE session_id = ? AND id = ?",
+                (body, title, body, session_id, note_id),
+            )
+        return result.rowcount > 0
+
+    def finish_note_title(self, session_id: str, note_id: int, body: str, title: str) -> bool:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute(
+                "UPDATE meeting_notes SET auto_title = ? "
+                "WHERE session_id = ? AND id = ? AND body = ? AND title IS NULL AND auto_title IS NULL",
+                (title, session_id, note_id, body),
+            )
+        return result.rowcount > 0
+
+    def delete_meeting_note(self, session_id: str, note_id: int) -> bool:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute("DELETE FROM meeting_notes WHERE session_id = ? AND id = ?", (session_id, note_id))
+        return result.rowcount > 0
+
+    def meeting_chats(self, session_id: str) -> list[dict]:
+        rows = self._get_conn().execute(
+            "SELECT id, title FROM meeting_chats WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC",
+            (session_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def meeting_chat(self, session_id: str, chat_id: str) -> dict | None:
+        row = self._get_conn().execute(
+            "SELECT id, title, messages FROM meeting_chats WHERE session_id = ? AND id = ?",
+            (session_id, chat_id),
+        ).fetchone()
+        return {**dict(row), "messages": json.loads(row["messages"])} if row else None
+
+    def create_meeting_chat(self, session_id: str, chat_id: str) -> None:
+        conn = self._get_conn()
+        with conn:
+            conn.execute("INSERT INTO meeting_chats (session_id, id) VALUES (?, ?)", (session_id, chat_id))
+
+    def rename_meeting_chat(self, session_id: str, chat_id: str, title: str) -> bool:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute(
+                "UPDATE meeting_chats SET title = ? WHERE session_id = ? AND id = ?",
+                (title, session_id, chat_id),
+            )
+        return result.rowcount > 0
+
+    def finish_chat_turn(self, session_id: str, chat_id: str, messages: list[dict], title: str) -> bool:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute(
+                "UPDATE meeting_chats SET messages = ?, title = COALESCE(title, ?), "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE session_id = ? AND id = ?",
+                (json.dumps(messages, ensure_ascii=False), title, session_id, chat_id),
+            )
+        return result.rowcount > 0
+
+    def delete_meeting_chat(self, session_id: str, chat_id: str) -> bool:
+        conn = self._get_conn()
+        with conn:
+            result = conn.execute("DELETE FROM meeting_chats WHERE session_id = ? AND id = ?", (session_id, chat_id))
         return result.rowcount > 0
 
     def search(self, query: str, project_id: str | None = None,
@@ -366,6 +487,7 @@ class Database:
         d = dict(row)
         # Older databases may still have this column; keep its contents in SQLite but do not expose it.
         d.pop("whisper_model", None)
+        d.pop("context_snapshot", None)
         if "transcript" in d and isinstance(d["transcript"], str):
             try:
                 d["transcript"] = json.loads(d["transcript"])

@@ -68,7 +68,7 @@ struct MinutesSummary: View {
         GeometryReader { geometry in
             let headings = blocks.filter { $0.heading != nil }
             HStack(alignment: .top, spacing: 32) {
-                SeamScrollView {
+                SeamScrollView(indicatorInset: 6) {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if blocks.isEmpty && markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Text("要約はまだありません")
@@ -224,33 +224,39 @@ func readerText(_ original: AttributedString, query: String, tint: Color) -> Tex
 public struct ReaderHoverStyle: ButtonStyle {
     let tint: Color
     let motion: Animation?
+    let cornerRadius: CGFloat
 
-    public init(tint: Color, motion: Animation?) {
+    public init(tint: Color, motion: Animation?, cornerRadius: CGFloat = 8) {
         self.tint = tint
         self.motion = motion
+        self.cornerRadius = cornerRadius
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        Hoverable(label: configuration.label, pressed: configuration.isPressed, tint: tint, motion: motion)
+        Hoverable(label: configuration.label, pressed: configuration.isPressed, tint: tint, motion: motion,
+                  cornerRadius: cornerRadius)
     }
 
     private struct Hoverable<Label: View>: View {
         private typealias Stored<Value> = SwiftUI.State<Value>
+        @Environment(\.isEnabled) private var enabled
         @Stored private var hover = false
         let label: Label
         let pressed: Bool
         let tint: Color
         let motion: Animation?
+        let cornerRadius: CGFloat
 
         var body: some View {
             label
                 .background {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(tint.opacity(pressed ? 0.14 : (hover ? 0.075 : 0)))
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(tint.opacity(enabled ? (pressed ? 0.14 : hover ? 0.075 : 0) : 0))
                 }
                 .animation(motion, value: hover)
                 .animation(motion, value: pressed)
                 .onHover { hover = $0 }
+                .seamActionPointer(enabled)
         }
     }
 }

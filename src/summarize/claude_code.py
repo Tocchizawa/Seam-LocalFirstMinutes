@@ -34,7 +34,7 @@ from .cli_launcher import (
     normalize_extra_args,
     strip_cli_error,
 )
-from .prompts import build_messages
+from .prompts import build_messages, format_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ class ClaudeCodeProvider(SummarizerProvider):
     """`claude` CLI を subprocess で起動するprovider。"""
 
     name = PROVIDER_CLAUDE_CODE
+    supports_resume = True
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._config = config or {}
@@ -191,6 +192,9 @@ class ClaudeCodeProvider(SummarizerProvider):
         transcript: str,
         *,
         project: ProjectContext | None = None,
+        messages: list[dict[str, str]] | None = None,
+        persist_session: bool = False,
+        resume_session: str | None = None,
         on_token: TokenCallback | None = None,
         on_activity: ActivityCallback | None = None,
         timeout_sec: float = 600,  # CLI は遅い前提でデフォルト10分
@@ -202,10 +206,15 @@ class ClaudeCodeProvider(SummarizerProvider):
                 f"Claude Code CLI ('{self._binary_path}') が見つかりません",
                 provider=self.name,
             )
-        sys_p, user_p = build_messages(transcript, project)
         # Claude Code は --append-system-prompt があるが、--print 経由では prompt が
         # ユーザー入力の位置づけ。system prompt + user prompt を1つに連結して渡す。
-        full_prompt = f"{sys_p}\n\n---\n\n{user_p}"
+        if messages is None:
+            system, user = build_messages(transcript, project)
+            full_prompt = f"{system}\n\n---\n\n{user}"
+        elif resume_session:
+            full_prompt = messages[-1]["content"]
+        else:
+            full_prompt = format_conversation(messages)
 
         # ProjectContext.repo_path / doc_dirs を --add-dir で渡し、agent が
         # Read/Grep tool で自由に参照できるようにする。存在しないパスは弾く。
@@ -230,14 +239,15 @@ class ClaudeCodeProvider(SummarizerProvider):
             "--include-partial-messages",
             "--model", self._model,
             "--input-format", "text",
-            # 要約は one-shot なので Claude Code 側に履歴を残さない。
-            "--no-session-persistence",
+            *([] if persist_session else ["--no-session-persistence"]),
+            *(["--resume", resume_session] if resume_session else []),
             # -p モードはデフォルトで permission-mode=default のため、ツール実行が
             # 全て拒否されてしまう (= --add-dir で渡しても agent が読めない)。
             # 要約で必要な readonly tool だけを明示許可する (Edit/Write は許可しない)。
             "--allowedTools", "Read,Glob,Grep,WebFetch",
             *add_dir_args,
             *self._extra_args,
+            *(["--tools", ""] if messages is not None and not persist_session else []),
         ]
         launch_argv, _ = self._build_cmd(args)
         if launch_argv is None:
@@ -288,6 +298,7 @@ class ClaudeCodeProvider(SummarizerProvider):
 
         out_chunks: list[str] = []
         actual_model: str | None = None
+        session_id = resume_session
         # stream_event が来ない環境向けのフォールバック: assistant message の
         # content[*].text の全文から差分を計算して on_token に流す。
         accumulated_full = ""
@@ -321,6 +332,7 @@ class ClaudeCodeProvider(SummarizerProvider):
 
                     mtype = msg.get("type")
                     if mtype == "system" and msg.get("subtype") == "init":
+                        session_id = msg.get("session_id") or session_id
                         actual_model = str(msg.get("model") or self._model)
                         await _emit_activity(f"接続: {actual_model}")
                     elif mtype == "stream_event":
@@ -415,7 +427,7 @@ class ClaudeCodeProvider(SummarizerProvider):
                 pass
         self._proc = None
 
-        if return_code != 0 and not out_chunks:
+        if return_code != 0:
             stderr_text = stderr_bytes.decode("utf-8", errors="replace")[:300]
             code = classify_cli_error_code(stderr_text)
             raise SummaryError(
@@ -433,6 +445,7 @@ class ClaudeCodeProvider(SummarizerProvider):
             input_chars=len(full_prompt),
             output_chars=len(text),
             duration_sec=duration,
+            session_id=session_id if persist_session else None,
         )
 
     async def cancel(self, *, reason: str = "user_cancelled") -> None:

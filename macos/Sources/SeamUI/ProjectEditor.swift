@@ -35,6 +35,7 @@ public struct NewProjectButton: View {
 public struct ProjectEditor: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var nameFocused: Bool
     @FocusState private var emojiFocused: Bool
     @Stored private var name = ""
@@ -54,7 +55,6 @@ public struct ProjectEditor: View {
     @Stored private var suggestions: [String] = []
     @Stored private var suggesting = false
     @Stored private var referencesExpanded = false
-    @Stored private var scrollPosition = ScrollPosition(edge: .top)
 
     private enum Folder { case output, repo, documents }
     private struct Correction: Identifiable {
@@ -86,16 +86,15 @@ public struct ProjectEditor: View {
         _corrections = Stored(initialValue: (project?.corrections ?? []).map { Correction(wrong: $0.wrong, correct: $0.correct) })
     }
 
-    private var gutter: CGFloat { compact ? 14 : 33 }
+    private var gutter: CGFloat { compact ? 16 : 28 }
+    private var motion: Animation? { reduceMotion ? nil : SeamMotion.reposition }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            heading
-            editorForm
-            Divider().padding(.horizontal, gutter)
-            footer
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        editorForm
+            .scrollEdgeBar { heading }
+            .scrollEdgeBar(.bottom) { footer }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.seamPaper(for: colorScheme))
         .interactiveDismissDisabled(saving)
         .task { nameFocused = true }
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.folder], allowsMultipleSelection: folder == .documents) {
@@ -105,33 +104,38 @@ public struct ProjectEditor: View {
 
     private var heading: some View {
         Text(project == nil ? "新規プロジェクト" : "プロジェクトを編集")
-            .font(.system(size: compact ? 22 : 28, weight: .semibold))
+            .font(.system(size: compact ? 22 : 26, weight: .semibold))
             .accessibilityAddTraits(.isHeader)
             .padding(.horizontal, gutter)
-            .padding(.top, 22)
-            .padding(.bottom, 16)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var editorForm: some View {
         SeamScrollView { editorFields }
-            .defaultScrollAnchor(.top, for: .sizeChanges)
-            .scrollPosition($scrollPosition)
-            .onChange(of: referencesExpanded) { _, _ in scrollPosition.scrollTo(edge: .top) }
             .scrollBounceBehavior(.basedOnSize)
             .frame(maxHeight: .infinity)
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.plain)
             .disabled(saving)
     }
 
     // フォーム項目の並び。項目の追加や順番の変更はここを編集する。
     private var editorFields: some View {
         VStack(alignment: .leading, spacing: 16) {
-            nameField
-            colorField
-            outputField
+            VStack(alignment: .leading, spacing: 16) {
+                nameField
+                colorField
+                outputField
+            }
+            .padding(16)
+            .seamFieldSurface(radius: 18)
             referencesSection
             if let problem {
-                Text(problem).font(.callout).foregroundStyle(.secondary)
+                Label(problem, systemImage: "exclamationmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
             }
         }
         .frame(maxWidth: 590, alignment: .leading)
@@ -148,10 +152,33 @@ public struct ProjectEditor: View {
     }
 
     private var referencesSection: some View {
-        DisclosureGroup(project == nil ? "参照資料" : "参照資料と用語集", isExpanded: $referencesExpanded) {
-            referenceFields.padding(.top, 12)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(motion) { referencesExpanded.toggle() }
+            } label: {
+                HStack(spacing: 10) {
+                    Label(project == nil ? "参照資料" : "参照資料と用語集", systemImage: "folder")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(referencesExpanded ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(14)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(ReaderHoverStyle(tint: .primary, motion: motion, cornerRadius: 0))
+            .accessibilityValue(referencesExpanded ? "展開済み" : "折りたたみ")
+            if referencesExpanded {
+                referenceFields
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
+                    .transition(reduceMotion ? .identity : .opacity)
+            }
         }
-        .font(.system(size: 13, weight: .medium))
+        .clipShape(.rect(cornerRadius: 18))
+        .seamFieldSurface(radius: 18)
     }
 
     private var referenceFields: some View {
@@ -184,7 +211,8 @@ public struct ProjectEditor: View {
                     .accessibilityLabel("資料フォルダを選択から外す \(path)")
                 }
             }
-            Button("資料フォルダを追加…") { choose(.documents) }
+            Button("資料フォルダを追加…", systemImage: "plus") { choose(.documents) }
+                .buttonStyle(SeamFormActionStyle())
         }
     }
 
@@ -192,9 +220,11 @@ public struct ProjectEditor: View {
         field("用語集") {
             TextEditor(text: $terms)
                 .overlayEditorScrollIndicators()
-                .frame(height: 75)
-                .padding(3)
-                .overlay { RoundedRectangle(cornerRadius: 5).strokeBorder(.quaternary) }
+                .scrollContentBackground(.hidden)
+                .font(.system(size: 13))
+                .frame(height: 84)
+                .padding(8)
+                .seamFieldSurface()
                 .accessibilityLabel("用語集、1行に1語")
             if suggest != nil { glossarySuggestionControls }
         }
@@ -203,10 +233,12 @@ public struct ProjectEditor: View {
     @ViewBuilder
     private var glossarySuggestionControls: some View {
         Button(suggesting ? "抽出中" : "保存済みの資料から候補を抽出", action: extractGlossarySuggestions)
+            .buttonStyle(SeamFormActionStyle())
             .disabled(suggesting)
         if !suggestions.isEmpty {
             Text(suggestions.joined(separator: "、")).font(.callout)
-            Button("候補を追加", action: appendGlossarySuggestions)
+            Button("候補を追加", systemImage: "plus", action: appendGlossarySuggestions)
+                .buttonStyle(SeamFormActionStyle())
         }
     }
 
@@ -214,31 +246,37 @@ public struct ProjectEditor: View {
         field("誤転写の補正") {
             ForEach($corrections) { $rule in
                 HStack {
-                    TextField("誤表記", text: $rule.wrong)
-                    TextField("正しい表記", text: $rule.correct)
+                    TextField("誤表記", text: $rule.wrong).padding(8).seamFieldSurface()
+                    Image(systemName: "arrow.right").font(.caption).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    TextField("正しい表記", text: $rule.correct).padding(8).seamFieldSurface()
                     Button { corrections.removeAll { $0.id == rule.id } } label: {
                         Image(systemName: "minus.circle")
                     }
+                    .buttonStyle(.plain)
                     .accessibilityLabel("補正を削除")
                 }
             }
-            Button("補正を追加") { corrections.append(Correction(wrong: "", correct: "")) }
+            Button("補正を追加", systemImage: "plus") { corrections.append(Correction(wrong: "", correct: "")) }
+                .buttonStyle(SeamFormActionStyle())
         }
     }
 
     private var footer: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 8) {
             Spacer()
+            if saving { ProgressView().controlSize(.small) }
             Button("キャンセル", action: cancel)
+                .buttonStyle(SeamFormActionStyle())
                 .disabled(saving)
                 .keyboardShortcut(.cancelAction)
-            Button(saving ? "保存中" : (project == nil ? "作成" : "保存"), action: submit)
-                .buttonStyle(.borderedProminent)
+            Button(project == nil ? "作成" : "保存", systemImage: "checkmark", action: submit)
+                .buttonStyle(SeamFormActionStyle(primary: true))
                 .disabled(saving || cleaned(name).isEmpty || cleaned(output).isEmpty)
                 .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, gutter)
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
     }
 
     private var nameField: some View {
@@ -256,7 +294,7 @@ public struct ProjectEditor: View {
                     }
                     .padding(.horizontal, 5)
                     .frame(height: 34)
-                    .background(.primary.opacity(0.05), in: .rect(cornerRadius: 8))
+                    .seamFieldSurface(radius: 10)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(ReaderHoverStyle(tint: .primary, motion: reduceMotion ? nil : SeamMotion.feedback))
@@ -266,9 +304,13 @@ public struct ProjectEditor: View {
 
                 TextField("プロジェクト名", text: $name, prompt: Text("名前を入力"))
                     .labelsHidden()
-                    .controlSize(.large)
+                    .font(.system(size: 15))
                     .accessibilityLabel("プロジェクト名")
                     .focused($nameFocused)
+                    .padding(.horizontal, 10)
+                    .frame(height: 36)
+                    .seamTextPointer()
+                .seamFieldSurface(focused: nameFocused)
             }
         }
     }
@@ -339,8 +381,11 @@ public struct ProjectEditor: View {
 
     private var emojiTextField: some View {
         TextField("絵文字を入力", text: $emojiInput)
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.plain)
             .focused($emojiFocused)
+            .padding(8)
+            .seamTextPointer()
+            .seamFieldSurface(focused: emojiFocused)
             .accessibilityLabel("絵文字を入力")
             .onChange(of: emojiInput) { oldValue, newValue in
                 updateEmojiInput(oldValue, newValue)
@@ -393,17 +438,19 @@ public struct ProjectEditor: View {
     }
 
     private func pathField(_ label: String, placeholder: String, value: Binding<String>, target: Folder) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             TextField(label, text: value, prompt: Text(placeholder))
                 .labelsHidden()
+                .font(.system(size: 13))
                 .accessibilityLabel(label)
-            Button { choose(target) } label: {
-                Image(systemName: "folder")
-                    .font(.system(size: 14))
-                    .frame(width: 25, height: 22)
-            }
-            .accessibilityLabel("\(label)のフォルダを選択")
-            .help("\(label)のフォルダを選択")
+                .padding(.horizontal, 10)
+                .frame(height: 36)
+                .seamTextPointer()
+                .seamFieldSurface()
+            Button("選択…", systemImage: "folder") { choose(target) }
+                .buttonStyle(SeamFormActionStyle())
+                .accessibilityLabel("\(label)のフォルダを選択")
+                .help("\(label)のフォルダを選択")
         }
     }
 

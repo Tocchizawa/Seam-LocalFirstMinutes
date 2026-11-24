@@ -9,8 +9,14 @@ struct ArchiveDetail: View {
     private typealias Stored<Value> = SwiftUI.State<Value>
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("meetingChatWidth") private var chatWidth = 0.0
+    @AppStorage("meetingNotesWidth") private var notesWidth = 0.0
     @ObservedObject var session: WorkspaceSession
     @StateObject private var playback = MinutesPlayback()
+    @StateObject private var notebook = MeetingNotes()
+    @Stored private var panel: Panel?
+    @Stored private var transcriptQuestion: MeetingTranscriptQuestion?
+    @Stored private var jump: (id: UUID, time: Double)?
     @Stored private var current: Minutes?
     @Stored private var transcript: [TranscriptSegment]?
     @Stored private var transcriptLoading = false
@@ -31,6 +37,8 @@ struct ArchiveDetail: View {
     @Binding var showTranscript: Bool
     let close: () -> Void
 
+    private enum Panel { case notes, chat }
+
     private struct ExportNotice {
         let id = UUID()
         let destination: URL
@@ -49,19 +57,26 @@ struct ArchiveDetail: View {
     private var summarizing: Bool { activeSummary != nil || summaryJob?.active == true }
 
     var body: some View {
-        // 本文、進行状況、操作メニューを組み合わせて詳細画面を作る。
-        MinutesReader(title: note.title, date: formattedDate(note), summary: note.summary ?? "",
-                      sections: transcript ?? [], transcriptLoading: transcriptLoading, query: query,
-                      playback: hasAudio ? playback : nil, compact: compact, expanded: expanded,
-                      showTranscript: $showTranscript,
-                      toggleExpanded: compact ? nil : {
-                          withAnimation(reduceMotion ? nil : SeamMotion.reposition) { expanded.toggle() }
-                      },
-                      backTitle: projectName, goBack: close,
-                      export: export, exporting: working,
-                      menu: AnyView(commands), activity: currentActivity,
-                      problem: problem ?? pipeline?.error ?? summaryJob?.errorMessage,
-                      exportNotice: exportNotice.map { AnyView(exportToast($0)) })
+        MeetingSplitView(showing: panel != nil, overlaysWhenNarrow: true,
+                         preferredWidth: panel == .notes ? $notesWidth : $chatWidth) {
+            reader
+        } side: { overlay in
+            if let panel {
+                panelContent(panel) { time in
+                    jumpTo(time)
+                    if overlay { closePanel() }
+                }
+            }
+        }
+        .animation(reduceMotion ? nil : SeamMotion.reposition, value: panel)
+        .task(id: "\(session.meetingNotesRevision):\(session.connected)") {
+            await notebook.load(via: session.api, session: item.sessionId)
+        }
+        .sheet(item: $notebook.editor) { editing in
+            MeetingNoteEditor(editing: editing) { title, body in
+                try await notebook.save(editing, title: title, body: body, via: session.api, session: item.sessionId)
+            }
+        }
         .task(id: exportNotice?.id) {
             guard let id = exportNotice?.id else { return }
             try? await Task.sleep(for: .seconds(8))
@@ -119,6 +134,58 @@ struct ArchiveDetail: View {
         }
     }
 
+    @ViewBuilder
+    private func panelContent(_ panel: Panel, jump: @escaping (Double) -> Void) -> some View {
+        switch panel {
+        case .notes:
+            MeetingNotesPanel(notebook: notebook, close: closePanel, jump: jump, remove: removeNote)
+        case .chat:
+            MeetingChatPanel(api: session.api, session: item.sessionId, showsQuickQuestions: false,
+                             transcriptQuestion: $transcriptQuestion, jump: jump, close: closePanel)
+        }
+    }
+
+    private var reader: some View {
+        MinutesReader(title: note.title, date: formattedDate(note), summary: note.summary ?? "",
+                      sections: transcript ?? [], transcriptLoading: transcriptLoading, query: query,
+                      playback: hasAudio ? playback : nil, compact: compact || panel != nil, expanded: expanded,
+                      showTranscript: $showTranscript,
+                      toggleExpanded: compact ? nil : {
+                          withAnimation(reduceMotion ? nil : SeamMotion.reposition) { expanded.toggle() }
+                      },
+                      backTitle: projectName, goBack: close,
+                      export: export, exporting: working,
+                      menu: AnyView(commands), activity: currentActivity,
+                      problem: notebook.problem ?? problem ?? pipeline?.error ?? summaryJob?.errorMessage,
+                      exportNotice: exportNotice.map { AnyView(exportToast($0)) },
+                      annotations: .init(notes: notebook.byStart(in: transcript ?? []), edit: { row, note in
+                          notebook.editor = .init(start: row.start, note: note)
+                      }, remove: removeNote, askChat: { row in
+                          showTranscript = true
+                          panel = .chat
+                          transcriptQuestion = .init(start: row.start)
+                      }), jump: jump,
+                      toggleNotes: { toggle(.notes) }, toggleChat: { toggle(.chat) },
+                      notesOpen: panel == .notes, chatOpen: panel == .chat)
+    }
+
+    private func toggle(_ selected: Panel) {
+        notebook.problem = nil
+        panel = panel == selected ? nil : selected
+        if panel == .chat { showTranscript = true }
+    }
+
+    private func closePanel() { panel = nil }
+
+    private func jumpTo(_ time: Double) {
+        showTranscript = true
+        jump = (UUID(), time)
+    }
+
+    private func removeNote(_ note: MeetingNote) {
+        Task { await notebook.delete(note, via: session.api, session: item.sessionId) }
+    }
+
     private var currentActivity: BackgroundActivity? {
         if transcribing, let pipeline {
             return pipeline.activity(title: note.title)
@@ -130,12 +197,14 @@ struct ArchiveDetail: View {
 
     // タイトル/要約の編集、再処理、削除などの詳細画面操作。
     private var commands: some View {
-        Menu {
-            Button("タイトルを編集…", systemImage: "pencil") { editor = .title }
-            Button("要約を編集…", systemImage: "square.and.pencil") { editor = .summary }
+        SeamDropdown("その他の議事録操作", width: 288) {
+            SeamToolbarIcon("ellipsis")
+        } items: {
+            SeamDropdownRow("タイトルを編集…", symbol: "pencil") { editor = .title }
+            SeamDropdownRow("要約を編集…", symbol: "square.and.pencil") { editor = .summary }
                 .disabled(transcribing || summarizing || current == nil)
             Divider()
-            Button("議事録のMarkdownをコピー", systemImage: "document.on.document") {
+            SeamDropdownRow("議事録のMarkdownをコピー", symbol: "document.on.document") {
                 perform {
                     let markdown = try await session.api.markdown(for: item.id)
                     NSPasteboard.general.clearContents()
@@ -143,9 +212,9 @@ struct ArchiveDetail: View {
                 }
             }
             if projects.count > 1 {
-                Menu("別のプロジェクトへ移動", systemImage: "folder") {
+                DisclosureGroup("別のプロジェクトへ移動") {
                     ForEach(projects.filter { $0.id != note.projectId }) { project in
-                        Button(project.name) {
+                        SeamDropdownRow(project.name) {
                             perform {
                                 try await session.api.reassignMinutes(id: item.id, projectId: project.id)
                                 session.archiveChanged()
@@ -153,18 +222,21 @@ struct ArchiveDetail: View {
                         }
                     }
                 }
+                .font(.system(size: 13))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             }
             Divider()
             if summarizing {
-                Button((activeSummary?.state ?? summaryJob?.state) == "dictionary_update" ? "用語辞書の整理を中止" : "要約を中止",
-                       systemImage: "stop.circle") {
+                SeamDropdownRow((activeSummary?.state ?? summaryJob?.state) == "dictionary_update" ? "用語辞書の整理を中止" : "要約を中止",
+                       symbol: "stop.circle") {
                     perform {
                         try await session.cancelSummary(id: item.id)
                         summaryJob = try await session.api.summaryJob(for: item.id)
                     }
                 }
             } else {
-                Button(note.summary?.isEmpty == false ? "要約を再生成" : "要約を生成", systemImage: "doc.text") {
+                SeamDropdownRow(note.summary?.isEmpty == false ? "要約を再生成" : "要約を生成", symbol: "doc.text") {
                     perform {
                         try await session.api.summarize(id: item.id)
                         summaryJob = try await session.api.summaryJob(for: item.id)
@@ -174,27 +246,17 @@ struct ArchiveDetail: View {
                 .disabled(transcribing)
             }
             if transcribing {
-                Button("再文字起こしを中止", systemImage: "stop.circle") {
+                SeamDropdownRow("再文字起こしを中止", symbol: "stop.circle") {
                     perform { try await session.api.cancelRetranscription(id: item.id) }
                 }
             } else {
-                Button("文字起こしを再実行…", systemImage: "waveform") { confirmation = .retry }
+                SeamDropdownRow("文字起こしを再実行…", symbol: "waveform") { confirmation = .retry }
                     .disabled(!hasAudio || summarizing)
             }
             Divider()
-            Button("議事録を削除…", systemImage: "trash", role: .destructive) { confirmation = .delete }
+            SeamDropdownRow("議事録を削除…", symbol: "trash", role: .destructive) { confirmation = .delete }
                 .disabled(transcribing || summarizing)
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 34, height: 34)
-                .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .accessibilityLabel("その他の議事録操作")
-        .help("その他の議事録操作")
         .disabled(working)
     }
 

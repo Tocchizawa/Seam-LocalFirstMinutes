@@ -79,6 +79,7 @@ package final class WorkspaceSession: ObservableObject {
     @Published private(set) var recovery: RecoveryStatus?
     @Published var importingAudioName: String?
     @Published private(set) var archiveRevision = 0
+    @Published private(set) var meetingNotesRevision = 0
     @Published var idleReminder: RecordingIdleReminder?
     @Published package var error: String?
 
@@ -416,6 +417,7 @@ package final class WorkspaceSession: ObservableObject {
                 if let message = progress.error { error = message }
             }
         case .other(let type):
+            if type == "meeting_notes_changed" { meetingNotesRevision += 1 }
             if ["summary_stage", "summary_done", "summary_failed", "summary_cancelled", "summary_skipped",
                 "dictionary_update_started", "dictionary_update_stage", "dictionary_update_finished"].contains(type) {
                 needsSummaryRefresh = true

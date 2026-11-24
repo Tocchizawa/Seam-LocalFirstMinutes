@@ -157,6 +157,7 @@ class ClaudeApiProvider(SummarizerProvider):
         transcript: str,
         *,
         project: ProjectContext | None = None,
+        messages: list[dict[str, str]] | None = None,
         on_token: TokenCallback | None = None,
         on_activity: ActivityCallback | None = None,
         timeout_sec: float = 300,
@@ -169,7 +170,13 @@ class ClaudeApiProvider(SummarizerProvider):
             RateLimitError,
         )
 
-        sys_p, user_p = build_messages(transcript, project)
+        if messages is None:
+            system, user = build_messages(transcript, project)
+            conversation = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        else:
+            conversation = messages
+        input_chars = sum(len(message["content"]) for message in conversation)
+        sys_p = conversation[0]["content"]
 
         # prompt caching: system prompt は再利用率高いので cache_control 指定。
         # 長い system content をブロック形式で渡し ephemeral cache をマーク。
@@ -196,7 +203,7 @@ class ClaudeApiProvider(SummarizerProvider):
                     model=self._model,
                     max_tokens=self._max_tokens,
                     system=system_blocks,
-                    messages=[{"role": "user", "content": user_p}],
+                    messages=conversation[1:],
                 ) as stream:
                     async for delta in stream.text_stream:
                         if self._cancel_event.is_set():
@@ -274,7 +281,7 @@ class ClaudeApiProvider(SummarizerProvider):
             text=text,
             provider=self.name,
             model=self._model,
-            input_chars=len(sys_p) + len(user_p),
+            input_chars=input_chars,
             output_chars=len(text),
             duration_sec=duration,
         )

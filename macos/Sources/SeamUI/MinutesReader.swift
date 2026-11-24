@@ -12,6 +12,7 @@ public struct MinutesReader: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Stored private var summaryPosition: Int?
     @Stored private var transcriptPosition: Int?
+    @Stored private var highlightedTranscriptIndex: Int?
     @Stored private var copyFeedback: UUID?
 
     private let title: String
@@ -34,6 +35,27 @@ public struct MinutesReader: View {
     private let activity: BackgroundActivity?
     private let problem: String?
     private let exportNotice: AnyView?
+    private let annotations: TranscriptAnnotations?
+    private let jump: (id: UUID, time: Double)?
+    private let toggleNotes: (() -> Void)?
+    private let toggleChat: (() -> Void)?
+    private let notesOpen: Bool
+    private let chatOpen: Bool
+
+    public struct TranscriptAnnotations {
+        let notes: [Double: MeetingNote]
+        let edit: (TranscriptSegment, MeetingNote?) -> Void
+        let remove: (MeetingNote) -> Void
+        let askChat: ((TranscriptSegment) -> Void)?
+
+        public init(notes: [Double: MeetingNote], edit: @escaping (TranscriptSegment, MeetingNote?) -> Void,
+                    remove: @escaping (MeetingNote) -> Void, askChat: ((TranscriptSegment) -> Void)? = nil) {
+            self.notes = notes
+            self.edit = edit
+            self.remove = remove
+            self.askChat = askChat
+        }
+    }
     @Binding private var showTranscript: Bool
 
     public init(
@@ -43,7 +65,10 @@ public struct MinutesReader: View {
         expanded: Bool = false, showTranscript: Binding<Bool>, toggleExpanded: (() -> Void)? = nil,
         backTitle: String? = nil, goBack: (() -> Void)? = nil,
         export: (() -> Void)? = nil, exporting: Bool = false, menu: AnyView? = nil,
-        activity: BackgroundActivity? = nil, problem: String? = nil, exportNotice: AnyView? = nil
+        activity: BackgroundActivity? = nil, problem: String? = nil, exportNotice: AnyView? = nil,
+        annotations: TranscriptAnnotations? = nil, jump: (id: UUID, time: Double)? = nil,
+        toggleNotes: (() -> Void)? = nil, toggleChat: (() -> Void)? = nil,
+        notesOpen: Bool = false, chatOpen: Bool = false
     ) {
         self.title = title
         self.date = date
@@ -66,6 +91,12 @@ public struct MinutesReader: View {
         self.activity = activity
         self.problem = problem
         self.exportNotice = exportNotice
+        self.annotations = annotations
+        self.jump = jump
+        self.toggleNotes = toggleNotes
+        self.toggleChat = toggleChat
+        self.notesOpen = notesOpen
+        self.chatOpen = chatOpen
     }
 
     private let tint: Color = .primary
@@ -73,6 +104,16 @@ public struct MinutesReader: View {
     private var padding: CGFloat { compact ? 14 : 33 }
     private var canCopy: Bool {
         showTranscript ? !sections.isEmpty || !untimedTranscript.isEmpty : !summary.isEmpty
+    }
+
+    private struct ScrollRequest: Equatable {
+        let id: UUID
+        let index: Int
+    }
+
+    private var scrollRequest: ScrollRequest? {
+        guard let jump, let index = sections.transcriptIndex(at: jump.time), showTranscript else { return nil }
+        return .init(id: jump.id, index: index)
     }
 
     public var body: some View {
@@ -104,6 +145,19 @@ public struct MinutesReader: View {
         }
         .clipped()
         .onChange(of: showTranscript) { _, _ in copyFeedback = nil }
+        .task(id: scrollRequest) {
+            guard let request = scrollRequest else {
+                highlightedTranscriptIndex = nil
+                return
+            }
+            withAnimation(motion) {
+                highlightedTranscriptIndex = request.index
+                transcriptPosition = request.index
+            }
+            do { try await Task.sleep(for: .seconds(1.4)) }
+            catch { return }
+            withAnimation(motion) { highlightedTranscriptIndex = nil }
+        }
         .task(id: copyFeedback) {
             guard copyFeedback != nil else { return }
             try? await Task.sleep(for: .seconds(1.25))
@@ -132,10 +186,12 @@ public struct MinutesReader: View {
     private var transcript: some View {
         if let playback {
             PlayingMinutesTranscript(sections: sections, untimed: untimedTranscript, query: query, playback: playback,
-                                      compact: compact, tint: tint, motion: motion, position: $transcriptPosition)
+                                      compact: compact, tint: tint, motion: motion, position: $transcriptPosition,
+                                      annotations: annotations, highlighted: highlightedTranscriptIndex)
         } else {
             MinutesTranscript(sections: sections, untimed: untimedTranscript, query: query, compact: compact,
-                              tint: tint, motion: motion, position: $transcriptPosition)
+                              tint: tint, motion: motion, position: $transcriptPosition,
+                                      annotations: annotations, highlighted: highlightedTranscriptIndex)
         }
     }
 
@@ -146,7 +202,7 @@ public struct MinutesReader: View {
                     backButton(backTitle, action: goBack)
                 }
                 Spacer(minLength: 0)
-                glassSurface(toolButtons)
+                toolButtons.seamToolbarGlass()
                     .fixedSize()
             }
 
@@ -237,27 +293,18 @@ public struct MinutesReader: View {
                     .lineLimit(1)
             }
             .padding(.horizontal, 12)
-            .frame(height: 40)
+            .frame(height: SeamToolbarMetrics.height)
             .contentShape(Capsule())
         }
-        .buttonStyle(ReaderToolbarButtonStyle())
+        .buttonStyle(SeamToolbarButtonStyle())
         .accessibilityHint("議事録一覧に戻る")
         .help("議事録一覧に戻る")
 
-        return glassSurface(button)
-    }
-
-    @ViewBuilder
-    private func glassSurface<Content: View>(_ content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: .capsule)
-        } else {
-            content.background(.regularMaterial, in: Capsule())
-        }
+        return button.seamToolbarGlass()
     }
 
     private var toolButtons: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: SeamToolbarMetrics.spacing) {
             control(copyFeedback == nil ? "document.on.document" : "checkmark",
                     label: showTranscript ? "文字起こしをコピー" : "要約をコピー", action: copy)
                 .opacity(canCopy ? 1 : 0.40)
@@ -272,29 +319,34 @@ public struct MinutesReader: View {
                 control(expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                         label: expanded ? "通常表示に戻す" : "議事録を全体表示", action: toggleExpanded)
             }
+            if let toggleNotes {
+                control(notesOpen ? "tag.fill" : "tag",
+                        label: notesOpen ? "メモ・ラベルを閉じる" : "メモ・ラベルを開く", action: toggleNotes)
+                    .accessibilityAddTraits(notesOpen ? .isSelected : [])
+            }
+            if let toggleChat {
+                control(chatOpen ? "bubble.left.fill" : "bubble.left",
+                        label: chatOpen ? "会議チャットを閉じる" : "会議チャットを開く", action: toggleChat)
+                    .accessibilityAddTraits(chatOpen ? .isSelected : [])
+            }
             if let menu {
                 Divider()
                     .frame(height: 14)
                     .padding(.horizontal, 2)
                     .accessibilityHidden(true)
-                menu.frame(width: 34, height: 34)
+                menu.frame(width: SeamToolbarMetrics.buttonSize, height: SeamToolbarMetrics.buttonSize)
             }
         }
-        .padding(3)
+        .padding(SeamToolbarMetrics.inset)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("議事録のツールバー")
     }
 
     private func control(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.primary)
-                .contentTransition(.opacity)
-                .frame(width: 34, height: 34)
-            .contentShape(Capsule())
+            SeamToolbarIcon(symbol)
         }
-        .buttonStyle(ReaderToolbarButtonStyle())
+        .buttonStyle(SeamToolbarButtonStyle())
         .accessibilityLabel(label)
         .help(label)
     }
@@ -315,20 +367,59 @@ public struct MinutesReader: View {
     }
 }
 
-private struct ReaderToolbarButtonStyle: ButtonStyle {
+package enum SeamToolbarMetrics {
+    package static let buttonSize: CGFloat = 34
+    package static let spacing: CGFloat = 2
+    package static let inset: CGFloat = 3
+    package static var height: CGFloat { buttonSize + 2 * inset }
+}
+
+package struct SeamToolbarIcon: View {
+    let symbol: String
+
+    package init(_ symbol: String) { self.symbol = symbol }
+
+    package var body: some View {
+        Image(systemName: symbol)
+            .symbolRenderingMode(.monochrome)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(.primary)
+            .contentTransition(.opacity)
+            .frame(width: SeamToolbarMetrics.buttonSize, height: SeamToolbarMetrics.buttonSize)
+            .contentShape(Capsule())
+    }
+}
+
+package extension View {
+    @ViewBuilder func seamToolbarGlass() -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular, in: .capsule)
+        } else {
+            background(.regularMaterial, in: Capsule())
+        }
+    }
+}
+
+package struct SeamToolbarButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovered = false
 
-    func makeBody(configuration: Configuration) -> some View {
+    let active: Bool
+
+    package init(active: Bool = false) { self.active = active }
+
+    package func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
-        let highlight = isEnabled ? (pressed ? 0.17 : hovered ? 0.075 : 0) : 0
+        let highlight = isEnabled ? (pressed ? 0.17 : active ? 0.12 : hovered ? 0.075 : 0) : 0
         configuration.label
             .background(Color.primary.opacity(highlight), in: Capsule())
             .scaleEffect(pressed && !reduceMotion ? 0.94 : 1)
             .animation(reduceMotion ? nil : SeamMotion.feedback, value: pressed)
             .animation(reduceMotion ? nil : SeamMotion.feedback, value: hovered)
+            .animation(reduceMotion ? nil : SeamMotion.feedback, value: active)
             .onHover { hovered = $0 }
+            .seamActionPointer(isEnabled)
     }
 }
 
@@ -384,6 +475,8 @@ private struct PlayingMinutesTranscript: View {
     let tint: Color
     let motion: Animation?
     @Binding var position: Int?
+    var annotations: MinutesReader.TranscriptAnnotations?
+    var highlighted: Int?
 
     private var activeSegment: Int? {
         guard playback.hasPosition else { return nil }
@@ -408,7 +501,8 @@ private struct PlayingMinutesTranscript: View {
 
     var body: some View {
         MinutesTranscript(sections: sections, untimed: untimed, query: query, compact: compact,
-                          tint: tint, motion: motion, position: $position, active: activeSegment, playing: playback.isPlaying) { time in
+                          tint: tint, motion: motion, position: $position, annotations: annotations, highlighted: highlighted,
+                          active: activeSegment, playing: playback.isPlaying) { time in
             playback.seek(to: time, play: true)
         }
     }
@@ -425,6 +519,8 @@ private struct MinutesTranscript: View {
     let tint: Color
     let motion: Animation?
     @Binding var position: Int?
+    var annotations: MinutesReader.TranscriptAnnotations?
+    var highlighted: Int?
     var active: Int?
     var playing = false
     var seek: ((Double) -> Void)?
@@ -435,7 +531,7 @@ private struct MinutesTranscript: View {
     }
 
     var body: some View {
-        SeamScrollView {
+        SeamScrollView(indicatorInset: 6) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if sections.isEmpty {
                     readerText(AttributedString(untimed.isEmpty ? "文字起こしはまだありません" : untimed),
@@ -448,7 +544,7 @@ private struct MinutesTranscript: View {
                 }
                 ForEach(sections.indices, id: \.self) { index in
                     let line = sections[index]
-                    segment(line, active: active == index)
+                    segment(line, active: active == index, selected: highlighted == index)
                         .id(index)
                 }
             }
@@ -487,31 +583,36 @@ private struct MinutesTranscript: View {
         }
     }
 
+    private func segment(_ line: TranscriptSegment, active: Bool, selected: Bool) -> some View {
+        let note = annotations?.notes[line.start]
+        return segmentContent(line, active: active, selected: selected)
+            .transcriptNoteMenu(text: line.text, note: note, edit: annotations.map { annotations in
+                { annotations.edit(line, note) }
+            }, remove: note.flatMap { note in
+                annotations.map { annotations in { annotations.remove(note) } }
+            }, askChat: annotations?.askChat.map { ask in { ask(line) } })
+    }
+
     @ViewBuilder
-    private func segment(_ line: TranscriptSegment, active: Bool) -> some View {
+    private func segmentContent(_ line: TranscriptSegment, active: Bool, selected: Bool) -> some View {
         if let seek {
-            Button { seek(line.start) } label: { row(line, active: active) }
+            Button { seek(line.start) } label: { row(line, active: active, selected: selected) }
                 .buttonStyle(ReaderHoverStyle(tint: tint, motion: motion))
                 .accessibilityLabel(rowLabel(line))
                 .accessibilityHint("\(minutesTime(line.start)) から再生")
-                .help("\(minutesTime(line.start)) から再生")
-                .contextMenu {
-                    Button("発言をコピー") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(line.text, forType: .string)
-                    }
-                }
         } else {
-            row(line, active: active).textSelection(.enabled)
+            row(line, active: active, selected: selected).textSelection(.enabled)
         }
     }
 
-    private func row(_ line: TranscriptSegment, active: Bool) -> some View {
+    private func row(_ line: TranscriptSegment, active: Bool, selected: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             HStack(spacing: 5) {
                 Text(minutesTime(line.start))
                     .font(.system(size: 11, weight: active ? .semibold : .medium, design: .monospaced))
-                if seek != nil {
+                if let note = annotations?.notes[line.start] {
+                    MeetingNoteBadge(note: note)
+                } else if seek != nil {
                     Image(systemName: active && playing ? "waveform" : "play.fill")
                         .font(.system(size: active && playing ? 10 : 7, weight: .medium))
                         .frame(width: 12, height: 12)
@@ -537,14 +638,15 @@ private struct MinutesTranscript: View {
             .padding(.vertical, 12)
             .overlay(alignment: .leading) {
                 Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1)
-                Capsule().fill(tint).frame(width: 2)
+                Capsule().fill(selected ? Color.accentColor : tint).frame(width: 2)
                     .padding(.vertical, 5)
-                    .opacity(active ? 1 : 0)
+                    .opacity(active || selected ? 1 : 0)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .background(tint.opacity(active ? 0.075 : 0), in: RoundedRectangle(cornerRadius: 8))
+        .background(selected ? Color.accentColor.opacity(0.15) : tint.opacity(active ? 0.075 : 0),
+                    in: RoundedRectangle(cornerRadius: 8))
         .animation(motion, value: active)
     }
 
