@@ -67,6 +67,7 @@ struct MinutesSummary: View {
         // 文字の大きさと行間は compact に応じて変わる。目次の幅は outline を参照する。
         GeometryReader { geometry in
             let headings = blocks.filter { $0.heading != nil }
+            let showsOutline = !compact && geometry.size.width >= 630 && headings.count >= 3
             HStack(alignment: .top, spacing: 32) {
                 SeamScrollView(indicatorInset: 6) {
                     LazyVStack(alignment: .leading, spacing: 12) {
@@ -89,8 +90,9 @@ struct MinutesSummary: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollPosition(id: $position, anchor: .top)
+                .frame(maxWidth: showsOutline ? 760 : .infinity)
 
-                if !compact && geometry.size.width >= 630 && headings.count >= 3 {
+                if showsOutline {
                     outline(headings)
                 }
             }
