@@ -121,9 +121,6 @@ struct CapturePane: View {
                         .foregroundStyle(capture.phase == .running ? red : .secondary)
                         .contentTransition(.opacity)
                 }
-                Text("文字起こし")
-                    .font(.system(size: expanded ? 27 : 19, weight: .semibold))
-                    .accessibilityAddTraits(.isHeader)
             }
             Spacer()
             let transcriptOnly = expanded && !chatOpen
