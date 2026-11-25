@@ -36,6 +36,9 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &updaterObservers)
         controller.startUpdater()
+        if updater.automaticallyChecksForUpdates {
+            updater.checkForUpdatesInBackground()
+        }
     }
 
     private func migrateLegacySettings(_ legacy: SettingsDocument?) {
@@ -72,7 +75,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
     func check() { controller?.checkForUpdates(nil) }
 
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
-        if workInProgress() {
+        if updateCheck != .updatesInBackground && workInProgress() {
             throw NSError(domain: "com.seamapp.seam.native.update", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "録音やバックグラウンド処理が終わってからアップデートを確認してください。"
             ])

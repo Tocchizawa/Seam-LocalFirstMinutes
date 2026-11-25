@@ -68,6 +68,7 @@ struct MinutesSummary: View {
         GeometryReader { geometry in
             let headings = blocks.filter { $0.heading != nil }
             let showsOutline = !compact && geometry.size.width >= 630 && headings.count >= 3
+            let bodyWidth = min(960, max(0, geometry.size.width - (showsOutline ? 180 : 0)))
             HStack(alignment: .top, spacing: 32) {
                 SeamScrollView(indicatorInset: 6) {
                     LazyVStack(alignment: .leading, spacing: 12) {
@@ -86,16 +87,17 @@ struct MinutesSummary: View {
                     .textSelection(.enabled)
                     .padding(.top, 22)
                     .padding(.bottom, 27)
-                    .frame(maxWidth: 760, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: bodyWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .scrollPosition(id: $position, anchor: .top)
-                .frame(maxWidth: showsOutline ? 760 : .infinity)
+                .frame(maxWidth: showsOutline ? bodyWidth : .infinity)
 
                 if showsOutline {
                     outline(headings)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .task(id: markdown) {
             blocks = SummaryBlock.read(markdown)
